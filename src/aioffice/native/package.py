@@ -150,11 +150,27 @@ class NativePackage:
         except KeyError as error:
             raise NativePackageError(f"Part {normalized!r} does not exist.") from error
 
-    def set_part(self, uri: str, payload: bytes) -> None:
+    def set_part(
+        self,
+        uri: str,
+        payload: bytes,
+        *,
+        content_type: str | None = None,
+    ) -> None:
         normalized = _part_uri(uri)
         name = normalized.lstrip("/")
         if not _safe_member_name(name):
             raise NativePackageError(f"Unsafe part URI {uri!r}.")
+        if not isinstance(payload, bytes):
+            raise TypeError("Native part payload must be bytes.")
+        if content_type is not None and (
+            not content_type
+            or "/" not in content_type
+            or any(character.isspace() for character in content_type)
+        ):
+            raise NativePackageError(
+                f"Invalid content type {content_type!r} for part {normalized!r}."
+            )
         if name.lower().endswith((".xml", ".rels")) and len(
             payload
         ) > self.security_policy.max_xml_part_size_bytes:
@@ -162,21 +178,72 @@ class NativePackage:
                 f"XML part {normalized!r} exceeds "
                 f"{self.security_policy.max_xml_part_size_mb} MB."
             )
+        existing = self._parts.get(normalized)
+        active_part_count = sum(
+            uri not in self._deleted
+            for uri in self._parts
+        )
+        if (
+            (
+                existing is None
+                or normalized in self._deleted
+            )
+            and normalized not in self._overrides
+            and active_part_count >= self.security_policy.max_package_parts
+        ):
+            raise SecurityError(
+                "Adding a native part would exceed the package part limit "
+                f"of {self.security_policy.max_package_parts}."
+            )
+        prospective_uncompressed = sum(
+            part.size
+            for part_uri, part in self._parts.items()
+            if part_uri not in self._deleted and part_uri != normalized
+        ) + len(payload)
+        if (
+            prospective_uncompressed
+            > self.security_policy.max_uncompressed_size_bytes
+        ):
+            raise SecurityError(
+                "Adding the native part would exceed the package uncompressed "
+                f"size limit of {self.security_policy.max_uncompressed_size_mb} MB."
+            )
+        replacement_relationships: list[NativeRelationship] | None = None
+        relationship_source: str | None = None
+        if name.endswith(".rels"):
+            replacement_relationships = self._read_relationships(
+                payload,
+                name,
+            )
+            relationship_source = _relationship_source(name)
+
         self._overrides[normalized] = payload
         self._deleted.discard(normalized)
-        existing = self._parts.get(normalized)
         self._parts[normalized] = NativePart(
             uri=normalized,
             content_type=(
-                existing.content_type
-                if existing is not None
-                else "application/octet-stream"
+                content_type
+                or (
+                    existing.content_type
+                    if existing is not None
+                    else "application/octet-stream"
+                )
             ),
             sha256=hashlib.sha256(payload).hexdigest(),
             size=len(payload),
             compressed_size=0,
             state="modified" if existing is not None else "created",
         )
+        if (
+            replacement_relationships is not None
+            and relationship_source is not None
+        ):
+            self._relationships = [
+                relationship
+                for relationship in self._relationships
+                if relationship.source_part != relationship_source
+            ]
+            self._relationships.extend(replacement_relationships)
 
     def delete_part(self, uri: str) -> None:
         normalized = _part_uri(uri)
@@ -194,6 +261,14 @@ class NativePackage:
                 compressed_size=existing.compressed_size,
                 state="deleted",
             )
+        name = normalized.lstrip("/")
+        if name.endswith(".rels"):
+            relationship_source = _relationship_source(name)
+            self._relationships = [
+                relationship
+                for relationship in self._relationships
+                if relationship.source_part != relationship_source
+            ]
 
     def export_bytes(self) -> bytes:
         if not self._overrides and not self._deleted:

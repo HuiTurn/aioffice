@@ -150,6 +150,22 @@
   pre/post image-shape validation with atomic failure outside the proven subset.
 - Exposed the image update schema and machine-readable supported-operation,
   update-field, resize-mode, and native-geometry capabilities for AI planning.
+- Added `Document.replace_image()` and `aioffice replace-image` as explicit
+  out-of-band binary write channels; image bytes still never enter the JSON Spec.
+- Added `Workspace.replace_image()` and `aioffice workspace replace-image` with
+  revision persistence and binary-free patch logs.
+- Added bounded signature and declared-media-type validation for PNG, JPEG, GIF, BMP,
+  and TIFF replacement inputs with deterministic full-SHA-256 asset identities.
+- Added occurrence-scoped copy-on-write image replacement using a content-addressed
+  media part, content-type override, independent relationship, and selective
+  `a:blip/@r:embed` mutation.
+- Preserved shared-image occurrences, original image parts, displayed extent,
+  accessibility metadata, stable occurrence identity, and unknown OPC consumers.
+- Added relationship-graph refresh and prospective package part/uncompressed-size
+  enforcement to copy-on-write native part mutation.
+- Added atomic rejection for detached packages, raw JSON binary replacement, invalid
+  signatures, MIME mismatches, oversized inputs, part collisions, and failed
+  post-mutation native proofs.
 - Changed mixed text/drawing paragraphs and complex image cases to explicit opaque
   projections so the semantic layer can no longer hide a picture inside an ordinary
   text node.
@@ -162,7 +178,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.15`.
+- Advanced the AiOffice Document Spec to `0.2-draft.16`.
 
 ## 0.1.0
 

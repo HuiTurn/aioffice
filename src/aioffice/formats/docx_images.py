@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import posixpath
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from xml.etree import ElementTree as ET
@@ -9,14 +11,23 @@ from xml.etree import ElementTree as ET
 from aioffice.core.errors import NativePackageError
 from aioffice.formats.docx_header_footer import resolve_relationship_target
 from aioffice.native import NativePackage
-from aioffice.native.xml import parse_xml
-from aioffice.spec.models import ImageBlock, Length, NativeRef
+from aioffice.native.xml import parse_xml, serialize_xml
+from aioffice.spec.models import AssetRef, ImageBlock, Length, NativeRef
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+_REPLACEMENT_EXTENSIONS = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/bmp": "bmp",
+    "image/tiff": "tif",
+}
 
 IMAGE_RELATIONSHIP_TYPE = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
@@ -464,11 +475,169 @@ def patch_simple_inline_image(
         )
 
 
+def _relationship_part_uri(source_part: str) -> str:
+    source = PurePosixPath(source_part)
+    return str(
+        source.parent
+        / "_rels"
+        / f"{source.name}.rels"
+    )
+
+
+def replace_simple_inline_image(
+    package: NativePackage,
+    paragraph: ET.Element,
+    *,
+    source_part: str,
+    asset: AssetRef,
+    payload: bytes,
+) -> None:
+    """Replace one image occurrence through a new part and relationship."""
+
+    original = simple_inline_image(
+        package,
+        paragraph,
+        source_part=source_part,
+    )
+    if original is None:
+        raise NativePackageError(
+            "image.replace requires one supported native inline picture."
+        )
+    if (
+        asset.size_bytes is None
+        or asset.size_bytes != len(payload)
+        or asset.sha256 != hashlib.sha256(payload).hexdigest()
+        or asset.id != f"asset_{asset.sha256}"
+        or not asset.filename
+    ):
+        raise NativePackageError(
+            "image.replace asset metadata does not match its binary payload."
+        )
+    expected_extension = _REPLACEMENT_EXTENSIONS.get(asset.media_type)
+    expected_filename = (
+        f"aioffice-{asset.sha256}.{expected_extension}"
+        if expected_extension is not None
+        else None
+    )
+    if asset.filename != expected_filename:
+        raise NativePackageError(
+            "image.replace requires a supported media type and canonical "
+            "content-addressed native filename."
+        )
+    media_part_uri = f"/word/media/{asset.filename}"
+    if package.has_part(media_part_uri):
+        if package.get_part(media_part_uri) != payload:
+            raise NativePackageError(
+                "Content-addressed image part collision detected."
+            )
+        existing_part = next(
+            part
+            for part in package.parts
+            if part.uri == media_part_uri
+        )
+        if existing_part.content_type != asset.media_type:
+            raise NativePackageError(
+                "Existing content-addressed image part has a different media type."
+            )
+    else:
+        package.set_part(
+            media_part_uri,
+            payload,
+            content_type=asset.media_type,
+        )
+
+    content_types = parse_xml(package.get_part("/[Content_Types].xml"))
+    overrides = [
+        element
+        for element in content_types.findall(_q(CT, "Override"))
+        if element.get("PartName") == media_part_uri
+    ]
+    if len(overrides) > 1:
+        raise NativePackageError(
+            "DOCX content types contain duplicate replacement image overrides."
+        )
+    if overrides:
+        if overrides[0].get("ContentType") != asset.media_type:
+            raise NativePackageError(
+                "Replacement image content-type override is inconsistent."
+            )
+    else:
+        ET.SubElement(
+            content_types,
+            _q(CT, "Override"),
+            {
+                "PartName": media_part_uri,
+                "ContentType": asset.media_type,
+            },
+        )
+        package.set_part(
+            "/[Content_Types].xml",
+            serialize_xml(content_types),
+        )
+
+    relationship_part_uri = _relationship_part_uri(source_part)
+    if not package.has_part(relationship_part_uri):
+        raise NativePackageError(
+            f"DOCX image source has no relationship part {relationship_part_uri!r}."
+        )
+    relationships = parse_xml(package.get_part(relationship_part_uri))
+    relationship_ids = {
+        element.get("Id", "")
+        for element in relationships.findall(_q(REL, "Relationship"))
+    }
+    relationship_number = 1
+    while f"rIdAiOfficeImage{relationship_number}" in relationship_ids:
+        relationship_number += 1
+    relationship_id = f"rIdAiOfficeImage{relationship_number}"
+    relative_target = posixpath.relpath(
+        media_part_uri,
+        start=posixpath.dirname(source_part),
+    )
+    ET.SubElement(
+        relationships,
+        _q(REL, "Relationship"),
+        {
+            "Id": relationship_id,
+            "Type": IMAGE_RELATIONSHIP_TYPE,
+            "Target": relative_target,
+        },
+    )
+    package.set_part(
+        relationship_part_uri,
+        serialize_xml(relationships),
+    )
+
+    blips = paragraph.findall(f".//{_q(A, 'blip')}")
+    if len(blips) != 1:
+        raise NativePackageError(
+            "Supported native image no longer contains exactly one a:blip."
+        )
+    blips[0].set(_q(R, "embed"), relationship_id)
+
+    replaced = simple_inline_image(
+        package,
+        paragraph,
+        source_part=source_part,
+    )
+    if (
+        replaced is None
+        or replaced.asset_id != asset.id
+        or replaced.part_uri != media_part_uri
+        or replaced.media_type != asset.media_type
+        or replaced.sha256 != asset.sha256
+        or replaced.size_bytes != asset.size_bytes
+    ):
+        raise NativePackageError(
+            "image.replace would leave the picture outside the supported subset."
+        )
+
+
 __all__ = [
     "EMU_PER_POINT",
     "IMAGE_RELATIONSHIP_TYPE",
     "SimpleInlineImage",
     "patch_simple_inline_image",
+    "replace_simple_inline_image",
     "simple_inline_image",
     "simple_inline_image_from_ref",
 ]

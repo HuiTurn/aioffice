@@ -16,16 +16,17 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev15`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev16`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
 parts, structured dynamic fields, explicit table geometry, logical merged cells,
 rich table-cell paragraphs, explicit table/cell border control, paragraph
 background/border surfaces, conservative native image projection, verified asset
-extraction, selective native image metadata and geometry updates, semantic diffs,
-isolated LibreOffice/Poppler native rendering, consistent multi-page evidence, page
-occupancy diagnostics, visual-regression contracts, and fidelity reports.
+extraction, selective native image metadata and geometry updates, occurrence-scoped
+copy-on-write image replacement, semantic diffs, isolated LibreOffice/Poppler native
+rendering, consistent multi-page evidence, page occupancy diagnostics,
+visual-regression contracts, and fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -125,11 +126,33 @@ exact requested extent. `alt_text` and `title` may be removed with
 records while preserving image bytes and package relationships. It requires the
 attached native DOCX, so a detached JSON snapshot cannot perform this operation.
 
+Image binaries also use an explicit out-of-band write path:
+
+```python
+result = doc.replace_image(
+    image["id"],
+    "assets/revenue-chart.png",
+    media_type="image/png",
+)
+assert result.success
+result.document.export("replaced.docx")
+```
+
+AiOffice signature-checks and bounds the raster input, creates a content-addressed
+native image part and a new relationship for only that occurrence, and preserves its
+stable image ID, displayed extent, alternative text, and title. Other occurrences
+that shared the old image remain unchanged. Raw JSON Patch cannot carry the binary.
+
 The equivalent CLI is:
 
 ```bash
 aioffice extract-image existing.docx IMAGE_ID -o extracted.png
+aioffice replace-image existing.docx IMAGE_ID replacement.png -o replaced.docx
 ```
+
+Persistent workspaces expose the same operation through
+`Workspace.replace_image(...)` and `aioffice workspace replace-image`, recording the
+verified asset metadata but never base64 in the revision log.
 
 The read path re-resolves the trusted native paragraph and OPC relationship, then
 verifies the asset record, media type, size, and content hash before returning bytes.

@@ -17,6 +17,7 @@ from aioffice.core.diagnostics import Diagnostic
 from aioffice.core.diff import DocumentDiff
 from aioffice.core.errors import SecurityError, WorkspaceError
 from aioffice.core.ids import new_id
+from aioffice.documents.assets import ImageAsset
 from aioffice.documents.document import Document, PatchResult
 from aioffice.native import (
     FidelityPolicy,
@@ -133,11 +134,19 @@ class Workspace:
                 "import",
                 "inspect",
                 "apply",
+                "replace_image",
                 "checkout",
                 "reconcile",
                 "export",
             ],
             "patch_operations": ["text.replace", "node.remove"],
+            "binary_operations": {
+                "image.replace": {
+                    "api": "Workspace.replace_image",
+                    "transport": "out_of_band",
+                    "recorded_binary": False,
+                }
+            },
             "revision_store": True,
             "idempotency": True,
             "external_reconciliation": True,
@@ -264,6 +273,75 @@ class Workspace:
                 result.fidelity.model_dump(mode="json") if result.fidelity is not None else None
             ),
             diff=(result.diff.model_dump(mode="json") if result.diff is not None else None),
+        )
+        self._persist_revision(
+            result.document,
+            result.document.to_bytes("docx"),
+            source_name=entry.source_name,
+            patch=patch,
+            expected_base_revision=result.base_revision,
+        )
+        return result
+
+    def replace_image(
+        self,
+        artifact_id: str,
+        image_id: str,
+        source: bytes | bytearray | memoryview | str | Path | ImageAsset,
+        *,
+        media_type: str | None = None,
+        dry_run: bool = False,
+        base_revision: int | None = None,
+    ) -> PatchResult:
+        """Replace one image and persist only verified asset metadata in the log."""
+
+        entry = self._entry(artifact_id)
+        expected_revision = (
+            entry.latest_revision
+            if base_revision is None
+            else base_revision
+        )
+        document = self.open_document(artifact_id)
+        result = document.replace_image(
+            image_id,
+            source,
+            media_type=media_type,
+            dry_run=dry_run,
+            base_revision=expected_revision,
+        )
+        if not result.success or dry_run:
+            return result
+        assert result.document is not None
+        asset_change = result.changes[0].get("asset_change", {})
+        replacement_asset = asset_change.get("after")
+        if not isinstance(replacement_asset, dict):
+            raise WorkspaceError(
+                "Image replacement did not return verified asset metadata."
+            )
+        operation = {
+            "op": "image.replace",
+            "target": image_id,
+            "asset": deepcopy(replacement_asset),
+        }
+        patch = PatchRecord(
+            base_revision=result.base_revision,
+            result_revision=result.result_revision,
+            operations=[operation],
+            changes=deepcopy(result.changes),
+            diagnostics=[
+                diagnostic.model_dump(mode="json")
+                for diagnostic in result.diagnostics
+            ],
+            fidelity=(
+                result.fidelity.model_dump(mode="json")
+                if result.fidelity is not None
+                else None
+            ),
+            diff=(
+                result.diff.model_dump(mode="json")
+                if result.diff is not None
+                else None
+            ),
         )
         self._persist_revision(
             result.document,

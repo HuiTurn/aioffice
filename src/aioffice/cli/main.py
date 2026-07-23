@@ -100,6 +100,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Replace the output file if it already exists.",
     )
 
+    replace_image = subparsers.add_parser(
+        "replace-image",
+        help="Replace one projected native image through a bounded local binary input.",
+    )
+    replace_image.add_argument("input", type=Path)
+    replace_image.add_argument("image_id")
+    replace_image.add_argument("replacement", type=Path)
+    replace_image.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+    )
+    replace_image.add_argument(
+        "--media-type",
+        help="Optional declared media type; it must match the detected image signature.",
+    )
+    replace_image.add_argument("--dry-run", action="store_true")
+    replace_image.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace the output DOCX if it already exists.",
+    )
+
     render = subparsers.add_parser(
         "render",
         help="Render semantic preview or native-compatible page evidence.",
@@ -291,6 +314,18 @@ def _build_parser() -> argparse.ArgumentParser:
     workspace_apply.add_argument("--root", type=Path, default=Path("."))
     workspace_apply.add_argument("--dry-run", action="store_true")
 
+    workspace_replace_image = workspace_commands.add_parser(
+        "replace-image",
+        help="Replace one image and persist the result as a new workspace revision.",
+    )
+    workspace_replace_image.add_argument("artifact_id")
+    workspace_replace_image.add_argument("image_id")
+    workspace_replace_image.add_argument("replacement", type=Path)
+    workspace_replace_image.add_argument("--root", type=Path, default=Path("."))
+    workspace_replace_image.add_argument("--media-type")
+    workspace_replace_image.add_argument("--dry-run", action="store_true")
+    workspace_replace_image.add_argument("--base-revision", type=int)
+
     workspace_reconcile = workspace_commands.add_parser(
         "reconcile",
         help="Preview or commit an externally edited DOCX as a new revision.",
@@ -423,6 +458,17 @@ def _run(args: argparse.Namespace) -> int:
             )
             _json_dump(result.model_dump())
             return 0 if result.success else 1
+        if workspace_command == "replace-image":
+            result = workspace.replace_image(
+                args.artifact_id,
+                args.image_id,
+                args.replacement,
+                media_type=args.media_type,
+                dry_run=args.dry_run,
+                base_revision=args.base_revision,
+            )
+            _json_dump(result.model_dump())
+            return 0 if result.success else 1
         if workspace_command == "reconcile":
             document = workspace.reconcile_document(
                 args.artifact_id,
@@ -488,6 +534,36 @@ def _run(args: argparse.Namespace) -> int:
             }
         )
         return 0
+
+    if args.command == "replace-image":
+        if (
+            not args.dry_run
+            and args.output is not None
+            and args.output.exists()
+            and not args.overwrite
+        ):
+            raise FileExistsError(
+                f"Refusing to overwrite existing DOCX {args.output}."
+            )
+        document = open_artifact(args.input)
+        result = document.replace_image(
+            args.image_id,
+            args.replacement,
+            media_type=args.media_type,
+            dry_run=args.dry_run,
+        )
+        report = result.model_dump()
+        if result.success and not args.dry_run:
+            if args.output is None:
+                raise ValueError(
+                    "Committed image replacement requires --output; "
+                    "the input DOCX is never overwritten."
+                )
+            assert result.document is not None
+            result.document.export(args.output)
+            report["output"] = str(args.output)
+        _json_dump(report)
+        return 0 if result.success else 1
 
     if args.command == "render":
         if args.page is not None and args.format != "png":

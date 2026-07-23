@@ -3,7 +3,7 @@
 AiOffice separates image semantics from image storage:
 
 - the JSON Spec describes an image occurrence and a content-addressed asset;
-- the original image bytes remain in the native OPC package;
+- image bytes remain in the native OPC package rather than the JSON projection;
 - native OOXML remains the authority for exact layout and rendering;
 - bytes are returned only through a verified, explicit read path.
 
@@ -55,9 +55,10 @@ as a filesystem or package read request.
 
 `editable: false` means the image binary and full DrawingML object are not represented
 as generally editable JSON. On an attached native DOCX, compact inspection separately
-advertises `supported_operations: ["image.update", "node.remove"]`. This keeps the
-lossless boundary explicit while still exposing the small set of native mutations that
-AiOffice can prove safe.
+advertises
+`supported_operations: ["image.replace", "image.update", "node.remove"]`. This
+keeps the lossless boundary explicit while still exposing the small set of native
+mutations that AiOffice can prove safe.
 
 ## Conservative projection proof
 
@@ -176,6 +177,99 @@ is empty or malformed, a dimension is cleared, metadata is blank or invalid XML 
 the geometry is unsafe, or the native package is detached. A detached JSON snapshot
 may still be inspected but cannot authorize a native DrawingML mutation.
 
+## Out-of-band binary replacement
+
+Binary replacement deliberately bypasses JSON:
+
+```python
+result = document.replace_image(
+    "#image_3A17C04E",
+    "generated/expert-workflow.png",
+    media_type="image/png",
+)
+assert result.success
+result.document.export("replaced.docx")
+```
+
+`source` may be a local path, bytes-like value, or a previously verified
+`ImageAsset`. The optional declared media type must match the detected signature.
+The first safe subset accepts PNG, JPEG, GIF, BMP, and TIFF. SVG, metafiles, icons,
+unknown image types, empty payloads, and inputs above the active security policy's
+file-size limit fail before native mutation. AiOffice performs bounded signature
+validation; it does not claim that this replaces native rendering or a full image
+decoder's security and compatibility checks.
+
+The replacement receives a full-SHA-256 asset ID and canonical native filename:
+
+```text
+asset_<64 lowercase hex characters>
+/word/media/aioffice-<64 lowercase hex characters>.png
+```
+
+The native lowering follows occurrence-scoped copy-on-write:
+
+1. re-prove the target's conservative inline-picture shape;
+2. add or reuse the exact content-addressed image part;
+3. add a matching `[Content_Types].xml` override;
+4. add a new internal image relationship with a collision-free ID;
+5. change only the target occurrence's `a:blip/@r:embed`;
+6. re-prove relationship, content type, hash, size, and projection shape;
+7. refresh the semantic asset record and native identity manifest.
+
+This mirrors the Open XML package model in which pictures are backed by
+[`ImagePart`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.packaging.imagepart?view=openxml-3.0.1)
+objects connected from a containing part. Microsoft's
+[picture insertion example](https://learn.microsoft.com/en-us/office/open-xml/word/how-to-insert-a-picture-into-a-word-processing-document)
+likewise adds an image part and refers to it through a relationship ID.
+
+Always allocating a relationship for the target occurrence is essential. Two
+`a:blip` elements can share the same relationship and image part; retargeting that
+relationship would silently replace both pictures. AiOffice instead changes only the
+selected blip. The original relationship and image part remain untouched, so other
+occurrences and unknown native consumers are preserved.
+
+The image occurrence ID, displayed width/height, alternative text, title, paragraph
+formatting, and surrounding layout remain stable. The asset ID, media type, native
+filename, byte count, and SHA-256 change to describe the replacement. No decode,
+resample, recompression, automatic resizing, or orphan cleanup occurs.
+
+The CLI uses the same binary channel and refuses output overwrite by default:
+
+```bash
+aioffice replace-image \
+  existing.docx IMAGE_ID replacement.jpg \
+  --media-type image/jpeg \
+  -o replaced.docx
+```
+
+Tracked documents use the same boundary while committing a new workspace revision:
+
+```python
+result = workspace.replace_image(
+    document.id,
+    image_id,
+    "replacement.jpg",
+    media_type="image/jpeg",
+    base_revision=document.revision,
+)
+```
+
+```bash
+aioffice workspace replace-image \
+  ARTIFACT_ID IMAGE_ID replacement.jpg \
+  --root project \
+  --media-type image/jpeg
+```
+
+The workspace patch log stores the verified `AssetRef`, transport label, semantic
+change, fidelity report, and diff. It does not duplicate the binary or encode it as
+base64; the committed native DOCX revision remains the binary authority.
+
+A raw `image.replace` JSON Patch fails with `BINARY_ASSET_REQUIRED`; accepting a path,
+URL, or base64 field inside model-authored JSON would cross the trust boundary and
+make patch replay ambiguous. `Document.replace_image()` and the CLI bind the verified
+bytes to the metadata operation inside one atomic in-memory transaction.
+
 ## Deliberate opaque boundary
 
 These cases remain native and explicit `opaque`/read-only projections:
@@ -192,7 +286,8 @@ These cases remain native and explicit `opaque`/read-only projections:
 The boundary is intentionally based on what the semantic layer can prove, not what it
 can approximately display. Unrelated edits preserve every original package part and
 unknown XML. Deleting a top-level projected image deletes its mapped paragraph only;
-orphan cleanup and image binary replacement are not claimed in this release.
+orphan cleanup, new image insertion, and replacement outside the proven inline subset
+are not claimed in this release.
 
 ## Preview and visual authority
 

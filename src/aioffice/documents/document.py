@@ -16,6 +16,7 @@ from aioffice.core.diff import DocumentDiff, compute_document_diff
 from aioffice.core.errors import (
     ExportError,
     NativePackageError,
+    SecurityError,
     SpecValidationError,
     UnsupportedFormatError,
 )
@@ -82,7 +83,7 @@ from aioffice.spec.models import (
 from aioffice.styles import style_catalog, theme_named_styles
 from aioffice.themes import get_theme
 
-from .assets import ImageAsset
+from .assets import ImageAsset, prepare_image_asset
 
 
 def _document_fields(spec: AiOfficeDocumentSpec) -> list[DocumentField]:
@@ -380,6 +381,98 @@ class Document:
             overwrite=overwrite,
         )
 
+    def replace_image(
+        self,
+        image_id: str,
+        source: bytes | bytearray | memoryview | str | Path | ImageAsset,
+        *,
+        media_type: str | None = None,
+        dry_run: bool = False,
+        base_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> PatchResult:
+        """Replace one projected native image through a bounded binary channel."""
+
+        if self._native is None:
+            return PatchResult(
+                success=False,
+                base_revision=self.revision,
+                result_revision=self.revision,
+                dry_run=dry_run,
+                diagnostics=[
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            "Image replacement requires an attached native DOCX "
+                            "package."
+                        ),
+                        node_ids=[self.id],
+                        suggested_actions=[
+                            {"action": "open_native_docx"},
+                            {"action": "inspect_capabilities"},
+                        ],
+                    )
+                ],
+                idempotency_key=idempotency_key,
+            )
+        try:
+            prepared = prepare_image_asset(
+                source,
+                media_type=media_type,
+                security_policy=self._native.security_policy,
+            )
+        except (
+            NativePackageError,
+            OSError,
+            SecurityError,
+            TypeError,
+        ) as error:
+            return PatchResult(
+                success=False,
+                base_revision=self.revision,
+                result_revision=self.revision,
+                dry_run=dry_run,
+                diagnostics=[
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_ASSET_INPUT",
+                        message=str(error),
+                        node_ids=[self.id],
+                        suggested_actions=[
+                            {
+                                "action": "use_supported_raster_image",
+                                "media_types": [
+                                    "image/png",
+                                    "image/jpeg",
+                                    "image/gif",
+                                    "image/bmp",
+                                    "image/tiff",
+                                ],
+                            }
+                        ],
+                    )
+                ],
+                idempotency_key=idempotency_key,
+            )
+        operation = {
+            "op": "image.replace",
+            "target": image_id,
+            "asset": prepared.asset.model_dump(
+                mode="json",
+                exclude_none=True,
+            ),
+        }
+        return self._apply(
+            [operation],
+            dry_run=dry_run,
+            base_revision=base_revision,
+            idempotency_key=idempotency_key,
+            image_payloads={
+                prepared.asset.id: prepared.data,
+            },
+        )
+
     def inspect(self, *, response_format: str = "compact") -> dict[str, Any]:
         if response_format not in {"compact", "expanded", "summary"}:
             raise ValueError("response_format must be compact, expanded, or summary.")
@@ -508,7 +601,11 @@ class Document:
                         title=node.title,
                         capabilities=node.capabilities,
                         supported_operations=(
-                            ["image.update", "node.remove"]
+                            [
+                                "image.replace",
+                                "image.update",
+                                "node.remove",
+                            ]
                             if self._native is not None
                             else []
                         ),
@@ -757,6 +854,7 @@ class Document:
                 isinstance(node, ImageBlock)
                 for node in self._spec.content
             ):
+                operations.append("image.replace")
                 operations.append("image.update")
         native_extension = self._spec.extensions.get("dev.aioffice.native", {})
         ambiguous_node_ids = sorted(
@@ -819,8 +917,33 @@ class Document:
                     "wp:inline/wp:extent",
                     "pic:spPr/a:xfrm/a:ext",
                 ],
+                "native_replace_api": (
+                    "Document.replace_image(image_id, source, media_type=None)"
+                ),
+                "native_replace_operation": "image.replace",
+                "binary_write_in_json": False,
+                "binary_write_transport": "out_of_band",
+                "replacement_media_types": [
+                    "image/png",
+                    "image/jpeg",
+                    "image/gif",
+                    "image/bmp",
+                    "image/tiff",
+                ],
+                "replacement_strategy": "occurrence_copy_on_write",
+                "replacement_preserves": [
+                    "image_occurrence_id",
+                    "display_extent",
+                    "alternative_text",
+                    "title",
+                    "unrelated_occurrences",
+                    "original_image_part",
+                ],
                 "cli_extract": (
                     "aioffice extract-image INPUT IMAGE_ID -o OUTPUT"
+                ),
+                "cli_replace": (
+                    "aioffice replace-image INPUT IMAGE_ID REPLACEMENT -o OUTPUT"
                 ),
                 "supported_native_subset": [
                     "one embedded DrawingML picture",
@@ -2350,6 +2473,23 @@ class Document:
         base_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> PatchResult:
+        return self._apply(
+            operations,
+            dry_run=dry_run,
+            base_revision=base_revision,
+            idempotency_key=idempotency_key,
+            image_payloads={},
+        )
+
+    def _apply(
+        self,
+        operations: Sequence[Mapping[str, Any]],
+        *,
+        dry_run: bool,
+        base_revision: int | None,
+        idempotency_key: str | None,
+        image_payloads: Mapping[str, bytes],
+    ) -> PatchResult:
         expected_revision = self.revision if base_revision is None else base_revision
         if expected_revision != self.revision:
             diagnostic = Diagnostic(
@@ -2385,21 +2525,47 @@ class Document:
                 diagnostics=[diagnostic],
                 idempotency_key=idempotency_key,
             )
-        if self._native is None and any(
-            operation.get("op") == "image.update"
+        native_image_operations = {
+            str(operation.get("op"))
             for operation in operations
-        ):
+        }.intersection({"image.update", "image.replace"})
+        if self._native is None and native_image_operations:
             diagnostic = Diagnostic(
                 severity=Severity.ERROR,
                 code="UNSUPPORTED_FEATURE",
                 message=(
-                    "image.update requires an attached native DOCX package; "
+                    f"{', '.join(sorted(native_image_operations))} requires an "
+                    "attached native DOCX package; "
                     "a detached JSON projection cannot safely mutate DrawingML."
                 ),
                 node_ids=[self.id],
                 suggested_actions=[
                     {"action": "open_native_docx"},
                     {"action": "inspect_capabilities"},
+                ],
+            )
+            return PatchResult(
+                success=False,
+                base_revision=self.revision,
+                result_revision=self.revision,
+                dry_run=dry_run,
+                diagnostics=[diagnostic],
+                idempotency_key=idempotency_key,
+            )
+        if any(
+            operation.get("op") == "image.replace"
+            for operation in operations
+        ) and not image_payloads:
+            diagnostic = Diagnostic(
+                severity=Severity.ERROR,
+                code="BINARY_ASSET_REQUIRED",
+                message=(
+                    "image.replace binary data cannot be supplied through a JSON "
+                    "Patch; use Document.replace_image() or the replace-image CLI."
+                ),
+                node_ids=[self.id],
+                suggested_actions=[
+                    {"action": "use_replace_image_api"},
                 ],
             )
             return PatchResult(
@@ -2444,6 +2610,7 @@ class Document:
                     self._spec,
                     updated._spec,
                     operations,
+                    image_payloads=image_payloads,
                 )
                 for node in updated._spec.content:
                     if node.id in identity_updates:
@@ -2492,6 +2659,27 @@ class Document:
                 result_revision=self.revision,
                 dry_run=dry_run,
                 diagnostics=[error.diagnostic],
+                idempotency_key=idempotency_key,
+            )
+        except SecurityError as error:
+            return PatchResult(
+                success=False,
+                base_revision=self.revision,
+                result_revision=self.revision,
+                dry_run=dry_run,
+                diagnostics=[
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="SECURITY_POLICY_VIOLATION",
+                        message=str(error),
+                        node_ids=[self.id],
+                        recoverable=True,
+                        suggested_actions=[
+                            {"action": "inspect_security_policy"},
+                            {"action": "reduce_asset_size"},
+                        ],
+                    )
+                ],
                 idempotency_key=idempotency_key,
             )
         except NativePackageError as error:
@@ -2895,6 +3083,138 @@ class Document:
         payload: dict[str, Any], operation: dict[str, Any], next_revision: int
     ) -> dict[str, Any]:
         operation_name = operation.get("op")
+        if operation_name == "image.replace":
+            unexpected = sorted(
+                set(operation) - {"op", "target", "asset"}
+            )
+            image = Document._find_image(
+                payload,
+                operation.get("target"),
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "image.replace received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[image["id"]],
+                    )
+                )
+            try:
+                replacement = AssetRef.model_validate(
+                    operation.get("asset")
+                )
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="image.replace has invalid asset metadata.",
+                        node_ids=[image["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_asset_ref_schema",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            if (
+                replacement.id != f"asset_{replacement.sha256}"
+                or replacement.filename is None
+                or replacement.size_bytes is None
+                or replacement.size_bytes <= 0
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "image.replace requires a content-addressed asset ID, "
+                            "filename, and positive byte count."
+                        ),
+                        node_ids=[image["id"]],
+                    )
+                )
+
+            before_image = deepcopy(image)
+            before_asset = next(
+                (
+                    deepcopy(asset)
+                    for asset in payload.get("assets", [])
+                    if asset.get("id") == image.get("asset_id")
+                ),
+                None,
+            )
+            replacement_payload = replacement.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+            existing_replacements = [
+                asset
+                for asset in payload.get("assets", [])
+                if asset.get("id") == replacement.id
+            ]
+            if len(existing_replacements) > 1 or (
+                existing_replacements
+                and existing_replacements[0] != replacement_payload
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "image.replace asset identity conflicts with an "
+                            "existing asset record."
+                        ),
+                        node_ids=[image["id"], replacement.id],
+                    )
+                )
+
+            image["asset_id"] = replacement.id
+            image["revision_updated"] = next_revision
+            referenced_asset_ids = {
+                node.get("asset_id")
+                for node in payload.get("content", [])
+                if node.get("type") == "image"
+            }
+            retained_assets = [
+                asset
+                for asset in payload.get("assets", [])
+                if asset.get("id") != replacement.id
+                and not (
+                    asset.get("id") == before_image.get("asset_id")
+                    and asset.get("id") not in referenced_asset_ids
+                )
+            ]
+            retained_assets.append(replacement_payload)
+            payload["assets"] = retained_assets
+            return {
+                "operation": "image.replace",
+                "image_ids": [image["id"]],
+                "replacement_strategy": "occurrence_copy_on_write",
+                "binary_transport": "out_of_band",
+                "asset_change": {
+                    "before": before_asset,
+                    "after": replacement_payload,
+                },
+                "property_changes": [
+                    {
+                        "path": "asset_id",
+                        "before": before_image.get("asset_id"),
+                        "after": replacement.id,
+                    }
+                ],
+            }
+
         if operation_name == "image.update":
             unexpected = sorted(
                 set(operation) - {"op", "target", "set", "clear"}
@@ -4592,8 +4912,8 @@ class Document:
                     "text.replace, paragraph.format, text.format, node.append, "
                     "node.insert_after, node.remove, node.update, style.apply, "
                     "style.define, style.format, section.format, field.update, "
-                    "image.update, table.format, table.column.format, and "
-                    "table.cell.format."
+                    "image.replace, image.update, table.format, "
+                    "table.column.format, and table.cell.format."
                 ),
                 suggested_actions=[{"action": "use_supported_operation"}],
             )

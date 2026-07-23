@@ -31,7 +31,10 @@ from aioffice.formats.docx_fields import (
     native_ref_for_field,
     patch_field_instruction,
 )
-from aioffice.formats.docx_images import patch_simple_inline_image
+from aioffice.formats.docx_images import (
+    patch_simple_inline_image,
+    replace_simple_inline_image,
+)
 from aioffice.formats.docx_section import (
     native_ref_for_section,
     patch_section_layout,
@@ -59,6 +62,7 @@ from aioffice.native.xml import parse_xml, serialize_xml
 from aioffice.operations.text import resolve_text_selection
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
+    AssetRef,
     DocumentField,
     Heading,
     ImageBlock,
@@ -542,6 +546,8 @@ def apply_docx_operations(
     spec: AiOfficeDocumentSpec,
     result_spec: AiOfficeDocumentSpec,
     operations: Sequence[Mapping[str, Any]],
+    *,
+    image_payloads: Mapping[str, bytes] | None = None,
 ) -> tuple[NativePackage, FidelityReport, dict[str, NativeRef]]:
     supported = {
         "text.replace",
@@ -553,6 +559,7 @@ def apply_docx_operations(
         "style.format",
         "section.format",
         "field.update",
+        "image.replace",
         "image.update",
         "table.format",
         "table.column.format",
@@ -564,7 +571,8 @@ def apply_docx_operations(
             "Imported DOCX V0.2 currently supports native lowering for "
             "text.replace, paragraph.format, text.format, node.remove, "
             "style.apply, style.define, style.format, section.format, and "
-            "field.update, image.update, table.format, table.column.format, and "
+            "field.update, image.replace, image.update, table.format, "
+            "table.column.format, and "
             "table.cell.format; "
             f"unsupported: {', '.join(unsupported)}."
         )
@@ -876,6 +884,61 @@ def apply_docx_operations(
                 source_part=source_ref.part_uri,
                 result=result_image,
                 fields=fields,
+            )
+            changed_xml_parts.add(source_ref.part_uri)
+            continue
+        if operation_name == "image.replace":
+            source_image, source_ref = _find_image(
+                spec,
+                operation.get("target"),
+            )
+            _, mapped_elements = elements_for_ref(source_ref)
+            if (
+                len(mapped_elements) != 1
+                or mapped_elements[0].tag != _q(W, "p")
+            ):
+                raise NativePackageError(
+                    "image.replace requires a native reference to one w:p."
+                )
+            result_image = next(
+                (
+                    candidate
+                    for candidate in result_spec.content
+                    if isinstance(candidate, ImageBlock)
+                    and candidate.id == source_image.id
+                ),
+                None,
+            )
+            if result_image is None:
+                raise NativePackageError(
+                    f"Patch result no longer contains image "
+                    f"{source_image.id!r}."
+                )
+            try:
+                asset = AssetRef.model_validate(operation.get("asset"))
+            except ValidationError as error:
+                raise NativePackageError(
+                    f"Could not lower image.replace asset metadata: {error}"
+                ) from error
+            payload = (
+                image_payloads.get(asset.id)
+                if image_payloads is not None
+                else None
+            )
+            if payload is None:
+                raise NativePackageError(
+                    "image.replace requires a verified out-of-band binary payload."
+                )
+            if result_image.asset_id != asset.id:
+                raise NativePackageError(
+                    "image.replace result does not reference its replacement asset."
+                )
+            replace_simple_inline_image(
+                updated,
+                mapped_elements[0],
+                source_part=source_ref.part_uri,
+                asset=asset,
+                payload=payload,
             )
             changed_xml_parts.add(source_ref.part_uri)
             continue
