@@ -1,0 +1,3 @@
+include CHANGELOG.md
+include SECURITY.md
+recursive-include examples *.json

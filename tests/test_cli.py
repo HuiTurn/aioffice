@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+from pathlib import Path
+
+from aioffice.cli import main
+from aioffice.documents import DocumentBuilder
+
+
+class CliTests(unittest.TestCase):
+    def test_build_validate_inspect_and_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "report.json"
+            DocumentBuilder(title="Report").paragraph("Old", id="status").build().export(source)
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(main(["validate", str(source)]), 0)
+            self.assertIn("VALID", stdout.getvalue())
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(main(["inspect", str(source)]), 0)
+            inspection = json.loads(stdout.getvalue())
+            self.assertEqual(inspection["node_count"], 1)
+
+            target = root / "report.docx"
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main(["build", str(source), "--output", str(target)]), 0)
+            self.assertTrue(target.exists())
+
+            patch = root / "patch.json"
+            patch.write_text(
+                json.dumps(
+                    {
+                        "base_revision": 1,
+                        "operations": [
+                            {
+                                "op": "text.replace",
+                                "target": "#status",
+                                "search": "Old",
+                                "replacement": "New",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            updated = root / "updated.json"
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(
+                    main(["apply", str(source), str(patch), "--output", str(updated)]),
+                    0,
+                )
+            self.assertIn("New", updated.read_text(encoding="utf-8"))
+            self.assertIn('"revision": 2', updated.read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    unittest.main()

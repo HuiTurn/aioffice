@@ -1,0 +1,68 @@
+{
+  "$schema": "https://schemas.aioffice.dev/spec/1.0/document.json",
+  "spec_version": "1.0",
+  "engine_version": "0.1.0",
+  "artifact": {
+    "id": "doc_example_report",
+    "kind": "document",
+    "revision": 1
+  },
+  "metadata": {
+    "title": "项目报告",
+    "author": "AiOffice",
+    "keywords": ["AiOffice", "示例"],
+    "custom": {}
+  },
+  "theme": {
+    "ref": "business-clean"
+  },
+  "content": [
+    {
+      "id": "report_title",
+      "type": "heading",
+      "level": 1,
+      "text": "项目报告"
+    },
+    {
+      "id": "status",
+      "type": "paragraph",
+      "text": "本项目已完成第一阶段交付。"
+    },
+    {
+      "id": "deliverables",
+      "type": "bullet_list",
+      "items": [
+        "严格的文档规范",
+        "HTML 与 Markdown 输出",
+        "直接生成 DOCX"
+      ]
+    },
+    {
+      "id": "risk_table",
+      "type": "table",
+      "columns": [
+        {
+          "key": "risk",
+          "title": "风险",
+          "data_type": "text"
+        },
+        {
+          "key": "level",
+          "title": "等级",
+          "data_type": "enum"
+        }
+      ],
+      "rows": [
+        {
+          "id": "risk_row_1",
+          "values": {
+            "risk": "范围扩张",
+            "level": "中"
+          }
+        }
+      ]
+    }
+  ],
+  "assets": [],
+  "extensions": {}
+}
