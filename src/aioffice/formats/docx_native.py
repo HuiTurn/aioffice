@@ -31,6 +31,7 @@ from aioffice.formats.docx_fields import (
     native_ref_for_field,
     patch_field_instruction,
 )
+from aioffice.formats.docx_images import patch_simple_inline_image
 from aioffice.formats.docx_section import (
     native_ref_for_section,
     patch_section_layout,
@@ -60,6 +61,7 @@ from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     DocumentField,
     Heading,
+    ImageBlock,
     NamedStyle,
     NativeRef,
     Paragraph,
@@ -168,6 +170,35 @@ def _find_field(
             f"Field {target_id!r} has no editable DOCX inline source reference."
         )
     return document_field, source_ref
+
+
+def _find_image(
+    spec: AiOfficeDocumentSpec,
+    target: Any,
+) -> tuple[ImageBlock, NativeRef]:
+    target_id = _target_id(target)
+    matches = [
+        node
+        for node in spec.content
+        if isinstance(node, ImageBlock) and node.id == target_id
+    ]
+    if len(matches) != 1:
+        raise NativePackageError(
+            f"Native DOCX image target #{target_id} matched "
+            f"{len(matches)} images."
+        )
+    image = matches[0]
+    source_ref = image.source_ref
+    if (
+        not isinstance(source_ref, NativeRef)
+        or source_ref.format != "docx"
+        or source_ref.native_kind != "w:p"
+        or source_ref.element_index is None
+    ):
+        raise NativePackageError(
+            f"Image {target_id!r} has no editable DOCX paragraph reference."
+        )
+    return image, source_ref
 
 
 def _find_table(
@@ -522,6 +553,7 @@ def apply_docx_operations(
         "style.format",
         "section.format",
         "field.update",
+        "image.update",
         "table.format",
         "table.column.format",
         "table.cell.format",
@@ -532,7 +564,7 @@ def apply_docx_operations(
             "Imported DOCX V0.2 currently supports native lowering for "
             "text.replace, paragraph.format, text.format, node.remove, "
             "style.apply, style.define, style.format, section.format, and "
-            "field.update, table.format, table.column.format, and "
+            "field.update, image.update, table.format, table.column.format, and "
             "table.cell.format; "
             f"unsupported: {', '.join(unsupported)}."
         )
@@ -806,6 +838,45 @@ def apply_docx_operations(
                 raise NativePackageError(
                     f"Could not patch field {source_field.id!r}: {error}"
                 ) from error
+            changed_xml_parts.add(source_ref.part_uri)
+            continue
+        if operation_name == "image.update":
+            source_image, source_ref = _find_image(
+                spec,
+                operation.get("target"),
+            )
+            _, mapped_elements = elements_for_ref(source_ref)
+            if (
+                len(mapped_elements) != 1
+                or mapped_elements[0].tag != _q(W, "p")
+            ):
+                raise NativePackageError(
+                    "image.update requires a native reference to one w:p."
+                )
+            result_image = next(
+                (
+                    candidate
+                    for candidate in result_spec.content
+                    if isinstance(candidate, ImageBlock)
+                    and candidate.id == source_image.id
+                ),
+                None,
+            )
+            if result_image is None:
+                raise NativePackageError(
+                    f"Patch result no longer contains image "
+                    f"{source_image.id!r}."
+                )
+            fields = set(operation.get("set", {})) | set(
+                operation.get("clear", [])
+            )
+            patch_simple_inline_image(
+                updated,
+                mapped_elements[0],
+                source_part=source_ref.part_uri,
+                result=result_image,
+                fields=fields,
+            )
             changed_xml_parts.add(source_ref.part_uri)
             continue
         if operation_name == "table.format":

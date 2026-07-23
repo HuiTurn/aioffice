@@ -10,7 +10,7 @@ from aioffice.core.errors import NativePackageError
 from aioffice.formats.docx_header_footer import resolve_relationship_target
 from aioffice.native import NativePackage
 from aioffice.native.xml import parse_xml
-from aioffice.spec.models import Length, NativeRef
+from aioffice.spec.models import ImageBlock, Length, NativeRef
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -241,7 +241,26 @@ def simple_inline_image(
         for child in shape_properties
     ):
         return None
-    for transform in picture.findall(f".//{_q(A, 'xfrm')}"):
+    transforms = shape_properties.findall(f"./{_q(A, 'xfrm')}")
+    if len(transforms) != 1:
+        return None
+    transform_extent = transforms[0].find(f"./{_q(A, 'ext')}")
+    if (
+        transform_extent is None
+        or len(transforms[0].findall(f"./{_q(A, 'ext')}")) != 1
+    ):
+        return None
+    try:
+        transform_width = int(transform_extent.attrib.get("cx", ""))
+        transform_height = int(transform_extent.attrib.get("cy", ""))
+    except ValueError:
+        return None
+    if (
+        transform_width != width_emu
+        or transform_height != height_emu
+    ):
+        return None
+    for transform in transforms:
         if (
             _enabled(transform.attrib.get("flipH"))
             or _enabled(transform.attrib.get("flipV"))
@@ -366,10 +385,90 @@ def simple_inline_image_from_ref(
     return image
 
 
+def patch_simple_inline_image(
+    package: NativePackage,
+    paragraph: ET.Element,
+    *,
+    source_part: str,
+    result: ImageBlock,
+    fields: set[str],
+) -> None:
+    """Selectively update one already-proven inline image occurrence."""
+
+    if simple_inline_image(
+        package,
+        paragraph,
+        source_part=source_part,
+    ) is None:
+        raise NativePackageError(
+            "image.update requires one supported native inline picture."
+        )
+    inline = paragraph.find(
+        f"./{_q(W, 'r')}/{_q(W, 'drawing')}/{_q(WP, 'inline')}"
+    )
+    if inline is None:
+        raise NativePackageError(
+            "Supported native image has no wp:inline element."
+        )
+    document_properties = inline.find(f"./{_q(WP, 'docPr')}")
+    if document_properties is None:
+        raise NativePackageError(
+            "Supported native image has no wp:docPr element."
+        )
+
+    if fields.intersection({"width", "height"}):
+        width_emu = round(result.width.to_points() * EMU_PER_POINT)
+        height_emu = round(result.height.to_points() * EMU_PER_POINT)
+        if (
+            width_emu <= 0
+            or height_emu <= 0
+            or width_emu > 2**63 - 1
+            or height_emu > 2**63 - 1
+        ):
+            raise NativePackageError(
+                "image.update dimensions do not fit positive OOXML Int64 EMUs."
+            )
+        outer_extent = inline.find(f"./{_q(WP, 'extent')}")
+        inner_extent = inline.find(
+            f"./{_q(A, 'graphic')}/{_q(A, 'graphicData')}/"
+            f"{_q(PIC, 'pic')}/{_q(PIC, 'spPr')}/"
+            f"{_q(A, 'xfrm')}/{_q(A, 'ext')}"
+        )
+        if outer_extent is None or inner_extent is None:
+            raise NativePackageError(
+                "Supported native image has incomplete size geometry."
+            )
+        for extent in (outer_extent, inner_extent):
+            extent.set("cx", str(width_emu))
+            extent.set("cy", str(height_emu))
+
+    for field_name, attribute_name in (
+        ("alt_text", "descr"),
+        ("title", "title"),
+    ):
+        if field_name not in fields:
+            continue
+        value = getattr(result, field_name)
+        if value is None:
+            document_properties.attrib.pop(attribute_name, None)
+        else:
+            document_properties.set(attribute_name, value)
+
+    if simple_inline_image(
+        package,
+        paragraph,
+        source_part=source_part,
+    ) is None:
+        raise NativePackageError(
+            "image.update would leave the picture outside the supported subset."
+        )
+
+
 __all__ = [
     "EMU_PER_POINT",
     "IMAGE_RELATIONSHIP_TYPE",
     "SimpleInlineImage",
+    "patch_simple_inline_image",
     "simple_inline_image",
     "simple_inline_image_from_ref",
 ]

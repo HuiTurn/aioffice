@@ -17,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.14"
+SPEC_VERSION = "0.2-draft.15"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1038,6 +1038,44 @@ class ImageBlock(NodeBase):
         return self
 
 
+class ImageUpdate(StrictModel):
+    """Fields accepted by the selective ``image.update`` operation."""
+
+    width: Length | None = None
+    height: Length | None = None
+    alt_text: str | None = Field(default=None, min_length=1, max_length=4096)
+    title: str | None = Field(default=None, min_length=1, max_length=1024)
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "ImageUpdate":
+        for field_name in ("width", "height"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            emu = round(value.to_points() * 12_700)
+            if emu <= 0 or emu > 2**63 - 1:
+                raise ValueError(
+                    f"Image {field_name} must fit a positive OOXML Int64 EMU."
+                )
+        for field_name in ("alt_text", "title"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if not value.strip():
+                raise ValueError(
+                    f"Image {field_name} cannot be blank; clear it explicitly."
+                )
+            if any(
+                ord(character) < 0x20
+                and character not in {"\t", "\n", "\r"}
+                for character in value
+            ):
+                raise ValueError(
+                    f"Image {field_name} contains an invalid XML character."
+                )
+        return self
+
+
 class OpaqueBlock(NodeBase):
     id: NodeId = Field(default_factory=lambda: new_id("opaque"))
     type: Literal["opaque"] = "opaque"
@@ -1100,6 +1138,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.12",
         "0.2-draft.13",
         "0.2-draft.14",
+        "0.2-draft.15",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

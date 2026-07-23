@@ -142,6 +142,14 @@
 - Added verified `Document.read_image()`, `image_bytes()`, and `extract_image()` APIs
   plus `aioffice extract-image`; every read re-resolves the trusted native paragraph
   and OPC relationship and rechecks the binary hash and size.
+- Added selective native `image.update` for alternative text, title, and displayed
+  width/height, including aspect-ratio preservation when only one dimension is set.
+- Added coordinated `wp:extent` and DrawingML transform extent mutation while
+  preserving image bytes, relationships, asset identity, and unrelated OPC parts.
+- Added strict native-package, selector, positive-EMU, clearability, XML-text, and
+  pre/post image-shape validation with atomic failure outside the proven subset.
+- Exposed the image update schema and machine-readable supported-operation,
+  update-field, resize-mode, and native-geometry capabilities for AI planning.
 - Changed mixed text/drawing paragraphs and complex image cases to explicit opaque
   projections so the semantic layer can no longer hide a picture inside an ordinary
   text node.
@@ -154,7 +162,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.14`.
+- Advanced the AiOffice Document Spec to `0.2-draft.15`.
 
 ## 0.1.0
 

@@ -53,6 +53,12 @@ The model stores no base64, relationship target, local path, URL, or arbitrary r
 location. `metadata.native_part_uri` is inspection evidence only; it is never trusted
 as a filesystem or package read request.
 
+`editable: false` means the image binary and full DrawingML object are not represented
+as generally editable JSON. On an attached native DOCX, compact inspection separately
+advertises `supported_operations: ["image.update", "node.remove"]`. This keeps the
+lossless boundary explicit while still exposing the small set of native mutations that
+AiOffice can prove safe.
+
 ## Conservative projection proof
 
 An image becomes an `image` block only when all of these conditions hold:
@@ -119,6 +125,57 @@ aioffice extract-image report.docx IMAGE_ID -o image.png
 It refuses to overwrite by default and reports the image ID, asset ID, media type,
 filename, size, SHA-256, and output path as JSON.
 
+## Selective native updates
+
+`image.update` changes only the supported inline picture's accessibility metadata
+and/or displayed extent:
+
+```python
+result = document.apply([
+    {
+        "op": "image.update",
+        "target": "#image_3A17C04E",
+        "set": {
+            "width": {"value": 3, "unit": "in"},
+            "alt_text": "Expert workflow with three approval stages",
+            "title": "Expert workflow",
+        },
+    }
+])
+assert result.success
+```
+
+The operation accepts `width`, `height`, `alt_text`, and `title` in `set`.
+`alt_text` and `title` are the only clearable fields:
+
+```json
+{
+  "op": "image.update",
+  "target": "#image_3A17C04E",
+  "clear": ["alt_text", "title"]
+}
+```
+
+Widths and heights must convert to a positive signed 64-bit EMU value. Setting one
+dimension preserves the current aspect ratio; setting both dimensions uses the exact
+requested size. AiOffice writes the final EMU values to both
+`wp:inline/wp:extent` and `pic:spPr/a:xfrm/a:ext`. The latter uses DrawingML's
+[`PositiveSize2DType`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.positivesize2dtype?view=openxml-2.20.0);
+the former follows the Wordprocessing Drawing
+[`Extent`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.extent?view=openxml-3.0.1)
+contract. A picture is projected as editable by this operation only when both native
+extent records exist once and agree before the patch.
+
+The native lowering re-proves the conservative image shape before and after mutation.
+It does not decode, resample, replace, or recompress the image, and it does not change
+the OPC image part or relationship. The asset ID, filename, media type, byte count,
+SHA-256, and image occurrence ID therefore remain stable.
+
+The operation fails atomically when the target is not a supported image, the request
+is empty or malformed, a dimension is cleared, metadata is blank or invalid XML text,
+the geometry is unsafe, or the native package is detached. A detached JSON snapshot
+may still be inspected but cannot authorize a native DrawingML mutation.
+
 ## Deliberate opaque boundary
 
 These cases remain native and explicit `opaque`/read-only projections:
@@ -135,7 +192,7 @@ These cases remain native and explicit `opaque`/read-only projections:
 The boundary is intentionally based on what the semantic layer can prove, not what it
 can approximately display. Unrelated edits preserve every original package part and
 unknown XML. Deleting a top-level projected image deletes its mapped paragraph only;
-orphan cleanup and image mutation are not claimed in this release.
+orphan cleanup and image binary replacement are not claimed in this release.
 
 ## Preview and visual authority
 

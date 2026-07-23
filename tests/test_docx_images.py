@@ -219,6 +219,10 @@ class DocxImageTests(unittest.TestCase):
                 "asset-ref",
                 {"id", "sha256", "media_type", "size_bytes"},
             ),
+            (
+                "image-update",
+                {"width", "height", "alt_text", "title"},
+            ),
         ):
             stdout = io.StringIO()
             with self.subTest(kind=kind), redirect_stdout(stdout):
@@ -237,7 +241,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.14")
+        self.assertEqual(spec["spec_version"], "0.2-draft.15")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -274,8 +278,26 @@ class DocxImageTests(unittest.TestCase):
             inspected["nodes"][0]["asset"]["media_type"],
             "image/png",
         )
-        capabilities = document.capabilities()["assets"]
+        self.assertEqual(
+            inspected["nodes"][0]["supported_operations"],
+            ["image.update", "node.remove"],
+        )
+        document_capabilities = document.capabilities()
+        self.assertIn("image.update", document_capabilities["operations"])
+        capabilities = document_capabilities["assets"]
         self.assertFalse(capabilities["binary_in_json"])
+        self.assertEqual(
+            capabilities["native_update_fields"],
+            ["width", "height", "alt_text", "title"],
+        )
+        self.assertEqual(
+            capabilities["clearable_update_fields"],
+            ["alt_text", "title"],
+        )
+        self.assertEqual(
+            capabilities["single_dimension_resize"],
+            "preserve_aspect_ratio",
+        )
         self.assertTrue(capabilities["native_render_is_visual_authority"])
 
         html = document.to_bytes("html").decode()
@@ -386,6 +408,31 @@ class DocxImageTests(unittest.TestCase):
         ).to_spec()["content"][0]
         self.assertIn("with text", mixed["summary"])
 
+    def test_mismatched_picture_extents_remain_opaque(self) -> None:
+        source = _image_document()
+        with ZipFile(io.BytesIO(source)) as archive:
+            document_root = parse_xml(
+                archive.read("word/document.xml")
+            )
+        inner_extent = document_root.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}/{_q(A, 'ext')}"
+        )
+        assert inner_extent is not None
+        inner_extent.set("cx", "914400")
+        source = _rewrite_package(
+            source,
+            replacements={
+                "word/document.xml": serialize_xml(document_root),
+            },
+            additions={},
+        )
+
+        document = Document.from_docx(source)
+        self.assertEqual(document.to_spec()["content"][0]["type"], "opaque")
+        self.assertEqual(document.to_spec()["assets"], [])
+        self.assertNotIn("image.update", document.capabilities()["operations"])
+        self.assertEqual(document.to_bytes("docx"), source)
+
     def test_native_patch_reindexes_image_reference_and_preserves_identity(self) -> None:
         document = Document.from_docx(
             _image_document(preceding_text="Before")
@@ -412,6 +459,261 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(reopened_image["id"], image_id)
         self.assertEqual(reopened.image_bytes(image_id), PNG)
+
+    def test_image_update_patches_metadata_and_both_native_extents(self) -> None:
+        source = _image_document(preceding_text="Before")
+        document = Document.from_docx(source)
+        image = next(
+            node
+            for node in document.to_spec()["content"]
+            if node["type"] == "image"
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": f"#{image['id']}",
+                    "set": {
+                        "alt_text": "Updated accessible diagram",
+                        "title": "Updated workflow",
+                        "width": {"value": 1.5, "unit": "in"},
+                        "height": {"value": 0.75, "unit": "in"},
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(
+            result.changes[0]["resize_mode"],
+            "exact",
+        )
+        self.assertEqual(
+            result.fidelity.affected_parts if result.fidelity else None,
+            ["/customXml/aioffice-manifest.xml", "/word/document.xml"],
+        )
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            for name in before.namelist():
+                if name not in {
+                    "word/document.xml",
+                    "customXml/aioffice-manifest.xml",
+                }:
+                    self.assertEqual(
+                        after.read(name),
+                        before.read(name),
+                        name,
+                    )
+            root = parse_xml(after.read("word/document.xml"))
+            media_payload = after.read("word/media/image1.png")
+        outer_extent = root.find(f".//{_q(WP, 'extent')}")
+        inner_extent = root.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}/{_q(A, 'ext')}"
+        )
+        document_properties = root.find(f".//{_q(WP, 'docPr')}")
+        assert outer_extent is not None
+        assert inner_extent is not None
+        assert document_properties is not None
+        self.assertEqual(
+            (outer_extent.get("cx"), outer_extent.get("cy")),
+            ("1371600", "685800"),
+        )
+        self.assertEqual(
+            (inner_extent.get("cx"), inner_extent.get("cy")),
+            ("1371600", "685800"),
+        )
+        self.assertEqual(
+            document_properties.get("descr"),
+            "Updated accessible diagram",
+        )
+        self.assertEqual(
+            document_properties.get("title"),
+            "Updated workflow",
+        )
+        self.assertEqual(media_payload, PNG)
+
+        reopened = Document.from_docx(output)
+        reopened_image = next(
+            node
+            for node in reopened.to_spec()["content"]
+            if node["type"] == "image"
+        )
+        self.assertEqual(reopened_image["id"], image["id"])
+        self.assertEqual(
+            reopened_image["width"],
+            {"value": 108.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            reopened_image["height"],
+            {"value": 54.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            reopened_image["alt_text"],
+            "Updated accessible diagram",
+        )
+        self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+
+    def test_single_dimension_resize_preserves_aspect_ratio(self) -> None:
+        document = Document.from_docx(_image_document())
+        image = document.to_spec()["content"][0]
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "width": {"value": 3, "unit": "in"},
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(
+            result.changes[0]["resize_mode"],
+            "preserve_aspect_ratio",
+        )
+        assert result.document is not None
+        updated = result.document.to_spec()["content"][0]
+        self.assertEqual(
+            updated["width"],
+            {"value": 3.0, "unit": "in"},
+        )
+        self.assertEqual(
+            updated["height"],
+            {"value": 108.0, "unit": "pt"},
+        )
+        reopened = Document.from_docx(
+            result.document.to_bytes("docx")
+        ).to_spec()["content"][0]
+        self.assertEqual(
+            reopened["width"],
+            {"value": 216.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            reopened["height"],
+            {"value": 108.0, "unit": "pt"},
+        )
+
+    def test_height_only_resize_preserves_aspect_ratio(self) -> None:
+        document = Document.from_docx(_image_document())
+        image = document.to_spec()["content"][0]
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "height": {"value": 0.5, "unit": "in"},
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(
+            result.changes[0]["resize_mode"],
+            "preserve_aspect_ratio",
+        )
+        assert result.document is not None
+        reopened = Document.from_docx(
+            result.document.to_bytes("docx")
+        ).to_spec()["content"][0]
+        self.assertEqual(
+            reopened["width"],
+            {"value": 72.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            reopened["height"],
+            {"value": 36.0, "unit": "pt"},
+        )
+
+    def test_image_update_can_clear_accessibility_metadata(self) -> None:
+        document = Document.from_docx(_image_document())
+        image = document.to_spec()["content"][0]
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "clear": ["alt_text", "title"],
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        root = parse_xml(
+            ZipFile(io.BytesIO(output)).read("word/document.xml")
+        )
+        document_properties = root.find(f".//{_q(WP, 'docPr')}")
+        assert document_properties is not None
+        self.assertNotIn("descr", document_properties.attrib)
+        self.assertNotIn("title", document_properties.attrib)
+        reopened = Document.from_docx(output)
+        reopened_image = reopened.to_spec()["content"][0]
+        self.assertNotIn("alt_text", reopened_image)
+        self.assertNotIn("title", reopened_image)
+        self.assertTrue(
+            any(
+                diagnostic.code == "IMAGE_ALT_TEXT_MISSING"
+                for diagnostic in reopened.validate().warnings
+            )
+        )
+
+    def test_image_update_rejects_unsafe_or_detached_requests(self) -> None:
+        document = Document.from_docx(
+            _image_document(preceding_text="Text")
+        )
+        image = next(
+            node
+            for node in document.to_spec()["content"]
+            if node["type"] == "image"
+        )
+        invalid_operations = [
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "clear": ["width"],
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"alt_text": "   "},
+            },
+            {
+                "op": "image.update",
+                "target": "#before",
+                "set": {"title": "Wrong node type"},
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"width": {"value": 0, "unit": "pt"}},
+            },
+        ]
+        for operation in invalid_operations:
+            with self.subTest(operation=operation):
+                result = document.apply([operation])
+                self.assertFalse(result.success)
+                self.assertEqual(result.result_revision, document.revision)
+
+        detached = Document.from_spec(document.to_spec())
+        detached_result = detached.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"title": "Detached"},
+                }
+            ]
+        )
+        self.assertFalse(detached_result.success)
+        self.assertEqual(
+            detached_result.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
 
     def test_semantic_image_without_native_package_is_rejected(self) -> None:
         document = Document.from_spec(

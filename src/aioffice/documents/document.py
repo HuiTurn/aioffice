@@ -61,6 +61,7 @@ from aioffice.spec.models import (
     DocumentField,
     Heading,
     ImageBlock,
+    ImageUpdate,
     LEGACY_DOCUMENT_SCHEMA_URL,
     LEGACY_SPEC_VERSION,
     Length,
@@ -506,6 +507,11 @@ class Document:
                         alt_text=node.alt_text,
                         title=node.title,
                         capabilities=node.capabilities,
+                        supported_operations=(
+                            ["image.update", "node.remove"]
+                            if self._native is not None
+                            else []
+                        ),
                         editable=node.editable,
                         asset=(
                             asset.model_dump(
@@ -747,6 +753,11 @@ class Document:
                 "table.column.format",
                 "table.cell.format",
             ]
+            if any(
+                isinstance(node, ImageBlock)
+                for node in self._spec.content
+            ):
+                operations.append("image.update")
         native_extension = self._spec.extensions.get("dev.aioffice.native", {})
         ambiguous_node_ids = sorted(
             {
@@ -791,6 +802,23 @@ class Document:
                 "extract_api": (
                     "Document.extract_image(image_id, target, overwrite=False)"
                 ),
+                "native_update_operation": "image.update",
+                "native_update_fields": [
+                    "width",
+                    "height",
+                    "alt_text",
+                    "title",
+                ],
+                "clearable_update_fields": [
+                    "alt_text",
+                    "title",
+                ],
+                "single_dimension_resize": "preserve_aspect_ratio",
+                "two_dimension_resize": "exact",
+                "native_geometry_patch": [
+                    "wp:inline/wp:extent",
+                    "pic:spPr/a:xfrm/a:ext",
+                ],
                 "cli_extract": (
                     "aioffice extract-image INPUT IMAGE_ID -o OUTPUT"
                 ),
@@ -2357,6 +2385,31 @@ class Document:
                 diagnostics=[diagnostic],
                 idempotency_key=idempotency_key,
             )
+        if self._native is None and any(
+            operation.get("op") == "image.update"
+            for operation in operations
+        ):
+            diagnostic = Diagnostic(
+                severity=Severity.ERROR,
+                code="UNSUPPORTED_FEATURE",
+                message=(
+                    "image.update requires an attached native DOCX package; "
+                    "a detached JSON projection cannot safely mutate DrawingML."
+                ),
+                node_ids=[self.id],
+                suggested_actions=[
+                    {"action": "open_native_docx"},
+                    {"action": "inspect_capabilities"},
+                ],
+            )
+            return PatchResult(
+                success=False,
+                base_revision=self.revision,
+                result_revision=self.revision,
+                dry_run=dry_run,
+                diagnostics=[diagnostic],
+                idempotency_key=idempotency_key,
+            )
 
         payload = self.to_spec()
         next_revision = self.revision + 1
@@ -2598,6 +2651,26 @@ class Document:
         return matches[0]
 
     @staticmethod
+    def _find_image(
+        payload: dict[str, Any],
+        target: Any,
+    ) -> dict[str, Any]:
+        _, node = Document._find_content_node(payload, target)
+        if node.get("type") != "image":
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="TARGET_TYPE_MISMATCH",
+                    message=(
+                        f"Target #{node.get('id')} is not an image block."
+                    ),
+                    node_ids=[str(node.get("id"))],
+                    suggested_actions=[{"action": "inspect_images"}],
+                )
+            )
+        return node
+
+    @staticmethod
     def _find_field(
         payload: dict[str, Any],
         target: Any,
@@ -2822,6 +2895,224 @@ class Document:
         payload: dict[str, Any], operation: dict[str, Any], next_revision: int
     ) -> dict[str, Any]:
         operation_name = operation.get("op")
+        if operation_name == "image.update":
+            unexpected = sorted(
+                set(operation) - {"op", "target", "set", "clear"}
+            )
+            image = Document._find_image(
+                payload,
+                operation.get("target"),
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "image.update received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[image["id"]],
+                    )
+                )
+            set_values = operation.get("set", {})
+            clear_values = operation.get("clear", [])
+            valid_shape = (
+                isinstance(set_values, dict)
+                and isinstance(clear_values, list)
+                and all(
+                    isinstance(value, str)
+                    for value in clear_values
+                )
+                and len(clear_values) == len(set(clear_values))
+            )
+            known_fields = set(ImageUpdate.model_fields)
+            unknown = (
+                sorted(
+                    (set(set_values) | set(clear_values))
+                    - known_fields
+                )
+                if valid_shape
+                else []
+            )
+            overlap = (
+                sorted(set(set_values) & set(clear_values))
+                if valid_shape
+                else []
+            )
+            invalid_clear = (
+                sorted(set(clear_values) - {"alt_text", "title"})
+                if valid_shape
+                else []
+            )
+            has_null = (
+                any(value is None for value in set_values.values())
+                if isinstance(set_values, dict)
+                else False
+            )
+            if (
+                not valid_shape
+                or not set_values
+                and not clear_values
+                or unknown
+                or overlap
+                or invalid_clear
+                or has_null
+            ):
+                detail = (
+                    "set must be an object and clear a unique string list"
+                    if not valid_shape
+                    else "at least one change is required"
+                    if not set_values and not clear_values
+                    else f"unknown properties: {', '.join(unknown)}"
+                    if unknown
+                    else (
+                        "properties both set and cleared: "
+                        f"{', '.join(overlap)}"
+                    )
+                    if overlap
+                    else (
+                        "properties cannot be cleared: "
+                        f"{', '.join(invalid_clear)}"
+                    )
+                    if invalid_clear
+                    else "set values cannot be null"
+                )
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"Invalid image.update: {detail}.",
+                        node_ids=[image["id"]],
+                    )
+                )
+            try:
+                normalized_set = ImageUpdate.model_validate(
+                    set_values
+                ).model_dump(mode="json", exclude_none=True)
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="image.update has invalid values.",
+                        node_ids=[image["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_image_update_schema",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            before = deepcopy(image)
+            candidate = {
+                **before,
+                **deepcopy(normalized_set),
+            }
+            for field_name in clear_values:
+                candidate.pop(field_name, None)
+            geometry_fields = {
+                field_name
+                for field_name in ("width", "height")
+                if field_name in normalized_set
+            }
+            if geometry_fields == {"width"}:
+                old_width = Length.model_validate(before["width"])
+                old_height = Length.model_validate(before["height"])
+                new_width = Length.model_validate(candidate["width"])
+                candidate["height"] = Length(
+                    value=round(
+                        new_width.to_points()
+                        * old_height.to_points()
+                        / old_width.to_points(),
+                        6,
+                    ),
+                    unit="pt",
+                ).model_dump(mode="json")
+                geometry_fields.add("height")
+            elif geometry_fields == {"height"}:
+                old_width = Length.model_validate(before["width"])
+                old_height = Length.model_validate(before["height"])
+                new_height = Length.model_validate(candidate["height"])
+                candidate["width"] = Length(
+                    value=round(
+                        new_height.to_points()
+                        * old_width.to_points()
+                        / old_height.to_points(),
+                        6,
+                    ),
+                    unit="pt",
+                ).model_dump(mode="json")
+                geometry_fields.add("width")
+            candidate["revision_updated"] = next_revision
+            try:
+                normalized = ImageBlock.model_validate(
+                    candidate
+                ).model_dump(mode="json", exclude_none=True)
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="image.update produced an invalid image block.",
+                        node_ids=[image["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_image_block_schema",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            image.clear()
+            image.update(normalized)
+            changed_fields = sorted(
+                set(set_values)
+                | set(clear_values)
+                | geometry_fields
+            )
+            return {
+                "operation": "image.update",
+                "image_ids": [image["id"]],
+                "resize_mode": (
+                    "preserve_aspect_ratio"
+                    if len(
+                        {
+                            field_name
+                            for field_name in ("width", "height")
+                            if field_name in set_values
+                        }
+                    )
+                    == 1
+                    else (
+                        "exact"
+                        if geometry_fields
+                        else None
+                    )
+                ),
+                "property_changes": [
+                    {
+                        "path": field_name,
+                        "before": before.get(field_name),
+                        "after": normalized.get(field_name),
+                    }
+                    for field_name in changed_fields
+                    if before.get(field_name)
+                    != normalized.get(field_name)
+                ],
+            }
+
         if operation_name == "table.format":
             unexpected = sorted(
                 set(operation) - {"op", "target", "set", "clear"}
@@ -4300,7 +4591,9 @@ class Document:
                     f"Unsupported operation {operation_name!r}; AiOffice supports "
                     "text.replace, paragraph.format, text.format, node.append, "
                     "node.insert_after, node.remove, node.update, style.apply, "
-                    "style.define, style.format, and section.format."
+                    "style.define, style.format, section.format, field.update, "
+                    "image.update, table.format, table.column.format, and "
+                    "table.cell.format."
                 ),
                 suggested_actions=[{"action": "use_supported_operation"}],
             )

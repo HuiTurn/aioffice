@@ -16,16 +16,16 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev14`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev15`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
 parts, structured dynamic fields, explicit table geometry, logical merged cells,
 rich table-cell paragraphs, explicit table/cell border control, paragraph
-background/border surfaces, conservative native image projection and verified asset
-extraction, semantic diffs, isolated LibreOffice/Poppler native rendering, consistent
-multi-page evidence, page occupancy diagnostics, visual-regression contracts, and
-fidelity reports.
+background/border surfaces, conservative native image projection, verified asset
+extraction, selective native image metadata and geometry updates, semantic diffs,
+isolated LibreOffice/Poppler native rendering, consistent multi-page evidence, page
+occupancy diagnostics, visual-regression contracts, and fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -99,6 +99,31 @@ verified = doc.read_image(image["id"])
 assert verified.sha256 == image["asset"]["sha256"]
 verified.write("extracted/" + verified.filename)
 ```
+
+Supported projected images can be resized or given accessible metadata without
+rewriting their binary part or relationship:
+
+```python
+result = doc.apply([
+    {
+        "op": "image.update",
+        "target": f"#{image['id']}",
+        "set": {
+            "width": {"value": 3, "unit": "in"},
+            "alt_text": "Quarterly revenue by region",
+            "title": "Revenue chart",
+        },
+    }
+])
+assert result.success
+result.document.export("updated.docx")
+```
+
+Setting one dimension preserves the current aspect ratio; setting both applies the
+exact requested extent. `alt_text` and `title` may be removed with
+`"clear": ["alt_text", "title"]`. The native patch updates both DrawingML extent
+records while preserving image bytes and package relationships. It requires the
+attached native DOCX, so a detached JSON snapshot cannot perform this operation.
 
 The equivalent CLI is:
 
