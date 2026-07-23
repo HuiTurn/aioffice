@@ -5,7 +5,7 @@ import unittest
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
-from aioffice.documents import Document, DocumentBuilder
+from aioffice.documents import DocumentBuilder
 from aioffice.formats.docx import compile_docx
 from aioffice.formats.html import export_html
 from aioffice.formats.markdown import export_markdown, import_markdown

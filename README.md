@@ -4,8 +4,8 @@ AiOffice is an AI-native, declarative document engine. It lets an agent describe
 document it wants, validates that intent as a strict spec, and compiles it into office
 formats without exposing low-level Word object APIs.
 
-This first `0.1.0` release is an intentionally small, usable vertical slice of the
-larger AiOffice architecture:
+The `0.1.0` release is an intentionally small, usable vertical slice of the larger
+AiOffice architecture:
 
 - strict AiOffice Document Spec 1.0 draft models;
 - stable semantic node IDs;
@@ -16,8 +16,10 @@ larger AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-Workbook, presentation, PDF, DOCX import, persistent revision history, rendering, and
-MCP are planned, but are not claimed by this release.
+The development branch is now `0.2.0.dev0`. It adds lossless DOCX opening, semantic
+projection over a native package, copy-on-write native parts, and fidelity reports.
+Workbook, presentation, PDF, persistent revision history, rendering, and MCP remain
+planned.
 
 ## Install
 
@@ -47,6 +49,40 @@ doc.export("report.json")
 doc.export("report.md")
 doc.export("report.html")
 doc.export("report.docx")
+```
+
+Open an existing DOCX without rebuilding its unknown or unsupported parts:
+
+```python
+import aioffice
+
+doc = aioffice.open("existing.docx", roundtrip="preserve_unknown")
+assert doc.origin == "native"
+
+result = doc.apply([
+    {
+        "op": "text.replace",
+        "target": "#para_000001",
+        "search": "Draft",
+        "replacement": "Approved",
+    }
+], dry_run=True)
+
+assert result.success
+print(result.fidelity)
+result.document.export("updated.docx")
+```
+
+Exporting an imported DOCX without changes returns the exact original package bytes.
+When a supported edit is applied, AiOffice rewrites only the affected native part and
+preserves untouched part payloads.
+
+Native DOCX lowering in this development version intentionally supports only
+`text.replace` and `node.remove`. Ask the artifact before planning an edit:
+
+```python
+capabilities = doc.capabilities()
+assert "text.replace" in capabilities["operations"]
 ```
 
 You can also create a document directly from the strict spec:
@@ -94,6 +130,7 @@ V0.1 supports `text.replace`, `node.append`, `node.insert_after`, `node.remove`,
 
 ```bash
 aioffice inspect examples/report.json
+aioffice capabilities existing.docx
 aioffice validate examples/report.json
 aioffice build examples/report.json --output report.docx
 aioffice export examples/report.json --to report.html
@@ -137,8 +174,8 @@ version in `src/aioffice/_version.py`; pushing it starts
 `.github/workflows/publish.yml`:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 No long-lived PyPI API token is stored in GitHub.

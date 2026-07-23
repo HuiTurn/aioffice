@@ -9,6 +9,7 @@ description = "An AI-native, declarative document engine for creating and valida
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "defusedxml>=0.7.1,<1",
     "pydantic>=2.7,<3",
 ]
 classifiers = [

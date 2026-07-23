@@ -23,3 +23,11 @@ class UnsupportedFormatError(AiOfficeError):
 
 class ExportError(AiOfficeError):
     """Raised when a valid artifact cannot be exported."""
+
+
+class SecurityError(AiOfficeError):
+    """Raised when an untrusted input violates the active security policy."""
+
+
+class NativePackageError(AiOfficeError):
+    """Raised when an Office package is malformed or cannot be patched safely."""

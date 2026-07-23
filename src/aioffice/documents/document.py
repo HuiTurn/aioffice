@@ -6,20 +6,36 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from pydantic import TypeAdapter, ValidationError
 
 from aioffice.core.diagnostics import Diagnostic, Severity, ValidationResult
-from aioffice.core.errors import ExportError, SpecValidationError, UnsupportedFormatError
+from aioffice.core.errors import (
+    ExportError,
+    NativePackageError,
+    SpecValidationError,
+    UnsupportedFormatError,
+)
 from aioffice.formats.docx import export_docx
+from aioffice.formats.docx_import import import_docx
+from aioffice.formats.docx_native import apply_docx_operations
 from aioffice.formats.html import export_html
 from aioffice.formats.markdown import export_markdown, import_markdown
+from aioffice.native import FidelityPolicy, FidelityReport, NativePackage
+from aioffice.security import SecurityPolicy
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     Block,
+    DOCUMENT_SCHEMA_URL,
+    BulletList,
     Heading,
+    LEGACY_DOCUMENT_SCHEMA_URL,
+    LEGACY_SPEC_VERSION,
+    OpaqueBlock,
+    OrderedList,
     Paragraph,
+    SPEC_VERSION,
     Table,
 )
 from aioffice.themes import get_theme
@@ -46,6 +62,10 @@ def _parse_spec(value: AiOfficeDocumentSpec | Mapping[str, Any]) -> AiOfficeDocu
     if isinstance(value, AiOfficeDocumentSpec):
         return value.model_copy(deep=True)
     payload = deepcopy(dict(value))
+    if payload.get("spec_version") == LEGACY_SPEC_VERSION:
+        payload["spec_version"] = SPEC_VERSION
+        if payload.get("$schema") in {None, LEGACY_DOCUMENT_SCHEMA_URL}:
+            payload["$schema"] = DOCUMENT_SCHEMA_URL
     try:
         return AiOfficeDocumentSpec.model_validate(payload)
     except ValidationError as error:
@@ -66,6 +86,7 @@ class PatchResult:
     changes: list[dict[str, Any]] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
     idempotency_key: str | None = None
+    fidelity: FidelityReport | None = None
 
     def model_dump(self) -> dict[str, Any]:
         return {
@@ -76,6 +97,9 @@ class PatchResult:
             "changes": deepcopy(self.changes),
             "diagnostics": [item.model_dump(mode="json") for item in self.diagnostics],
             "idempotency_key": self.idempotency_key,
+            "fidelity": (
+                self.fidelity.model_dump(mode="json") if self.fidelity is not None else None
+            ),
         }
 
 
@@ -88,8 +112,14 @@ class _PatchFailure(Exception):
 class Document:
     """A validated, logically immutable Document artifact."""
 
-    def __init__(self, spec: AiOfficeDocumentSpec) -> None:
+    def __init__(
+        self,
+        spec: AiOfficeDocumentSpec,
+        *,
+        native: NativePackage | None = None,
+    ) -> None:
         self._spec = spec.model_copy(deep=True)
+        self._native = native.clone() if native is not None else None
 
     @classmethod
     def from_spec(cls, spec: AiOfficeDocumentSpec | Mapping[str, Any]) -> "Document":
@@ -129,6 +159,21 @@ class Document:
             text = source
         return cls(import_markdown(text, title=title))
 
+    @classmethod
+    def from_docx(
+        cls,
+        source: str | Path | bytes,
+        *,
+        roundtrip: FidelityPolicy | str = FidelityPolicy.PRESERVE_UNKNOWN,
+        security_policy: SecurityPolicy | None = None,
+    ) -> "Document":
+        imported = import_docx(
+            source,
+            roundtrip=roundtrip,
+            security_policy=security_policy,
+        )
+        return cls(imported.spec, native=imported.native)
+
     @property
     def id(self) -> str:
         return self._spec.artifact.id
@@ -149,6 +194,14 @@ class Document:
     def spec(self) -> AiOfficeDocumentSpec:
         return self._spec.model_copy(deep=True)
 
+    @property
+    def origin(self) -> str:
+        return "native" if self._native is not None else "semantic"
+
+    @property
+    def fidelity(self) -> FidelityReport | None:
+        return self._native.fidelity_report() if self._native is not None else None
+
     def to_spec(self) -> dict[str, Any]:
         return self._spec.model_dump(mode="json", by_alias=True, exclude_none=True)
 
@@ -167,27 +220,72 @@ class Document:
             "revision": self.revision,
             "spec_version": self.spec_version,
             "title": self._spec.metadata.title,
+            "origin": self.origin,
             "node_count": len(self._spec.content),
             "node_types": counts,
         }
         if response_format == "compact":
-            result["nodes"] = [
-                {
+            nodes: list[dict[str, Any]] = []
+            for node in self._spec.content:
+                compact: dict[str, Any] = {
                     "id": node.id,
                     "type": node.type,
-                    **(
-                        {"text": node.text, "level": node.level}
-                        if isinstance(node, Heading)
-                        else {}
-                    ),
                 }
-                for node in self._spec.content
-            ]
+                if isinstance(node, Heading):
+                    compact.update(text=node.text, level=node.level)
+                elif isinstance(node, Paragraph):
+                    compact["text"] = node.plain_text
+                elif isinstance(node, (BulletList, OrderedList)):
+                    compact.update(item_count=len(node.items), items=node.items[:3])
+                elif isinstance(node, Table):
+                    compact.update(
+                        column_count=len(node.columns),
+                        row_count=len(node.rows),
+                    )
+                elif isinstance(node, OpaqueBlock):
+                    compact.update(
+                        summary=node.summary,
+                        capabilities=node.capabilities,
+                        editable=node.editable,
+                    )
+                nodes.append(compact)
+            result["nodes"] = nodes
         elif response_format == "expanded":
             result["nodes"] = [
                 node.model_dump(mode="json", exclude_none=True) for node in self._spec.content
             ]
         return result
+
+    def capabilities(self) -> dict[str, Any]:
+        operations = [
+            "text.replace",
+            "node.append",
+            "node.insert_after",
+            "node.remove",
+            "node.update",
+        ]
+        if self._native is not None:
+            operations = ["text.replace", "node.remove"]
+        return {
+            "artifact_id": self.id,
+            "kind": self.kind,
+            "origin": self.origin,
+            "spec_version": self.spec_version,
+            "import_formats": ["json", "markdown", "docx"],
+            "export_formats": ["json", "markdown", "html", "docx"],
+            "operations": operations,
+            "selectors": ["#node_id"],
+            "roundtrip": (
+                {
+                    "format": self._native.format_name,
+                    "policy": self._native.policy.value,
+                    "affected_parts": list(self._native.affected_parts),
+                    "noop_exact": not self._native.affected_parts,
+                }
+                if self._native is not None
+                else None
+            ),
+        }
 
     def validate(self) -> ValidationResult:
         diagnostics: list[Diagnostic] = []
@@ -339,7 +437,10 @@ class Document:
         elif suffix in {".html", ".htm"}:
             path.write_text(export_html(self._spec), encoding="utf-8")
         elif suffix == ".docx":
-            export_docx(self._spec, path)
+            if self._native is not None:
+                self._native.write(path)
+            else:
+                export_docx(self._spec, path)
         else:
             raise UnsupportedFormatError(
                 f"Unsupported export format {suffix or '<none>'!r}; "
@@ -394,6 +495,7 @@ class Document:
         payload = self.to_spec()
         next_revision = self.revision + 1
         changes: list[dict[str, Any]] = []
+        fidelity: FidelityReport | None = None
         try:
             for operation in operations:
                 changes.append(self._apply_operation(payload, dict(operation), next_revision))
@@ -417,6 +519,16 @@ class Document:
                         ],
                     )
                 )
+            if self._native is not None:
+                native, fidelity, identity_updates = apply_docx_operations(
+                    self._native,
+                    self._spec,
+                    operations,
+                )
+                for node in updated._spec.content:
+                    if node.id in identity_updates:
+                        node.source_ref = identity_updates[node.id]
+                updated._native = native
         except _PatchFailure as error:
             return PatchResult(
                 success=False,
@@ -424,6 +536,27 @@ class Document:
                 result_revision=self.revision,
                 dry_run=dry_run,
                 diagnostics=[error.diagnostic],
+                idempotency_key=idempotency_key,
+            )
+        except NativePackageError as error:
+            return PatchResult(
+                success=False,
+                base_revision=self.revision,
+                result_revision=self.revision,
+                dry_run=dry_run,
+                diagnostics=[
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="NATIVE_PATCH_FAILED",
+                        message=str(error),
+                        node_ids=[self.id],
+                        recoverable=True,
+                        suggested_actions=[
+                            {"action": "use_supported_native_operation"},
+                            {"action": "inspect_capabilities"},
+                        ],
+                    )
+                ],
                 idempotency_key=idempotency_key,
             )
         except SpecValidationError as error:
@@ -445,6 +578,7 @@ class Document:
             changes=changes,
             diagnostics=validation.warnings,
             idempotency_key=idempotency_key,
+            fidelity=fidelity,
         )
 
     @staticmethod
@@ -681,19 +815,30 @@ class Document:
         )
 
 
-def open_artifact(source: str | Path) -> Document:
+def open_artifact(
+    source: str | Path,
+    *,
+    roundtrip: FidelityPolicy | str = FidelityPolicy.PRESERVE_UNKNOWN,
+    security_policy: SecurityPolicy | None = None,
+) -> Document:
     path = Path(source)
     suffix = path.suffix.lower()
     if suffix == ".json":
         return Document.from_json(path)
     if suffix in {".md", ".markdown"}:
         return Document.from_markdown(path)
-    if suffix in {".docx", ".html", ".htm"}:
+    if suffix == ".docx":
+        return Document.from_docx(
+            path,
+            roundtrip=roundtrip,
+            security_policy=security_policy,
+        )
+    if suffix in {".html", ".htm"}:
         raise UnsupportedFormatError(
-            f"Importing {suffix} is planned for a later release; V0.1 imports .json and .md."
+            f"Importing {suffix} is planned for a later release."
         )
     raise UnsupportedFormatError(
-        f"Unsupported source format {suffix or '<none>'!r}; use .json or .md."
+        f"Unsupported source format {suffix or '<none>'!r}; use .json, .md, or .docx."
     )
 
 

@@ -7,6 +7,8 @@ from .core import (
     AiOfficeError,
     Diagnostic,
     ExportError,
+    NativePackageError,
+    SecurityError,
     Severity,
     SpecValidationError,
     UnsupportedFormatError,
@@ -14,6 +16,8 @@ from .core import (
     new_id,
 )
 from .documents import Document, DocumentBuilder, PatchResult, open_artifact
+from .native import FidelityLevel, FidelityPolicy, FidelityReport
+from .security import SecurityPolicy
 
 # The product specification intentionally exposes ``aioffice.open(...)``.
 open = open_artifact
@@ -24,8 +28,14 @@ __all__ = [
     "Document",
     "DocumentBuilder",
     "ExportError",
+    "FidelityLevel",
+    "FidelityPolicy",
+    "FidelityReport",
+    "NativePackageError",
     "PatchResult",
     "Severity",
+    "SecurityError",
+    "SecurityPolicy",
     "SpecValidationError",
     "UnsupportedFormatError",
     "ValidationResult",

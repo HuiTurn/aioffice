@@ -6,9 +6,10 @@ Security fixes are applied to the latest released `0.1.x` version.
 
 ## Scope of the first release
 
-AiOffice `0.1.0` generates DOCX packages but does not import Office Open XML packages.
-JSON and Markdown inputs are still untrusted data: callers should impose file-size and
-workspace path limits appropriate to their environment.
+AiOffice `0.2.0.dev0` imports DOCX packages through a bounded security scanner. It
+rejects path traversal, duplicate or encrypted ZIP entries, suspicious compression
+ratios, oversized packages and XML parts, DTD/entity expansion, and macro payloads.
+External relationships may be indexed but are never fetched by the core engine.
 
 The CLI never overwrites an input document when applying a patch. A committed patch
 requires an explicit output path.

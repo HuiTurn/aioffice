@@ -34,6 +34,14 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["build", str(source), "--output", str(target)]), 0)
             self.assertTrue(target.exists())
 
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(main(["capabilities", str(target)]), 0)
+            capabilities = json.loads(stdout.getvalue())
+            self.assertEqual(capabilities["origin"], "native")
+            self.assertEqual(capabilities["operations"], ["text.replace", "node.remove"])
+            self.assertTrue(capabilities["roundtrip"]["noop_exact"])
+
             patch = root / "patch.json"
             patch.write_text(
                 json.dumps(

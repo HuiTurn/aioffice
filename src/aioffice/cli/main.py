@@ -10,7 +10,7 @@ from typing import Any, Sequence
 
 from aioffice._version import __version__
 from aioffice.core.errors import AiOfficeError
-from aioffice.documents import Document, DocumentBuilder, open_artifact
+from aioffice.documents import DocumentBuilder, open_artifact
 from aioffice.spec.models import AiOfficeDocumentSpec
 
 
@@ -51,6 +51,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="compact",
     )
 
+    capabilities = subparsers.add_parser(
+        "capabilities", help="Report operations and fidelity available for a document."
+    )
+    capabilities.add_argument("input", type=Path)
+
     validate = subparsers.add_parser("validate", help="Validate a document.")
     validate.add_argument("input", type=Path)
     validate.add_argument("--json", action="store_true", dest="as_json")
@@ -85,6 +90,11 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "inspect":
         document = open_artifact(args.input)
         _json_dump(document.inspect(response_format=args.response_format))
+        return 0
+
+    if args.command == "capabilities":
+        document = open_artifact(args.input)
+        _json_dump(document.capabilities())
         return 0
 
     if args.command == "validate":

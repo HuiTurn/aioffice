@@ -61,6 +61,20 @@ class DocumentTests(unittest.TestCase):
         with self.assertRaises(SpecValidationError):
             Document.from_json(json.dumps([]))
 
+    def test_legacy_draft_spec_is_migrated(self) -> None:
+        document = Document.from_spec(
+            {
+                "$schema": "https://schemas.aioffice.dev/spec/1.0/document.json",
+                "spec_version": "1.0",
+                "content": [{"type": "paragraph", "text": "Legacy"}],
+            }
+        )
+        self.assertEqual(document.spec_version, "0.2-draft.1")
+        self.assertEqual(
+            document.to_spec()["$schema"],
+            "https://schemas.aioffice.dev/spec/draft/0.2/document.json",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

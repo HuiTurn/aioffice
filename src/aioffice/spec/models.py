@@ -16,8 +16,10 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "1.0"
-DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
+SPEC_VERSION = "0.2-draft.1"
+DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
+LEGACY_SPEC_VERSION = "1.0"
+LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
 
 NodeId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")]
 Mark = Literal[
@@ -63,6 +65,18 @@ class AssetRef(StrictModel):
     filename: str | None = None
 
 
+class NativeRef(StrictModel):
+    format: Literal["docx", "xlsx", "pptx"]
+    part_uri: Annotated[str, StringConstraints(pattern=r"^/[^\\\x00]*$")]
+    native_kind: str
+    element_index: int | None = Field(default=None, ge=0)
+    path_hint: str | None = None
+    fingerprint: Annotated[
+        str,
+        StringConstraints(pattern=r"^sha256:[a-fA-F0-9]{64}$"),
+    ] | None = None
+
+
 class TextSpan(StrictModel):
     type: Literal["text"] = "text"
     text: str
@@ -82,7 +96,7 @@ class NodeBase(StrictModel):
     id: NodeId = Field(default_factory=lambda: new_id("node"))
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
-    source_ref: str | None = None
+    source_ref: NativeRef | str | None = None
     revision_added: int = Field(default=1, ge=1)
     revision_updated: int = Field(default=1, ge=1)
 
@@ -159,18 +173,30 @@ class PageBreak(NodeBase):
     type: Literal["page_break"] = "page_break"
 
 
+class OpaqueBlock(NodeBase):
+    id: NodeId = Field(default_factory=lambda: new_id("opaque"))
+    type: Literal["opaque"] = "opaque"
+    summary: str
+    capabilities: list[
+        Literal["inspect", "move", "delete", "render"]
+    ] = Field(default_factory=lambda: ["inspect", "render"])
+    editable: Literal[False] = False
+
+
 Block = Annotated[
-    Heading | Paragraph | BulletList | OrderedList | Table | PageBreak,
+    Heading | Paragraph | BulletList | OrderedList | Table | PageBreak | OpaqueBlock,
     Field(discriminator="type"),
 ]
 
 
 class AiOfficeDocumentSpec(StrictModel):
-    schema_url: Literal[DOCUMENT_SCHEMA_URL] = Field(
+    schema_url: Literal[
+        "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
+    ] = Field(
         default=DOCUMENT_SCHEMA_URL,
         alias="$schema",
     )
-    spec_version: Literal[SPEC_VERSION] = SPEC_VERSION
+    spec_version: Literal["0.2-draft.1"] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)
     metadata: DocumentMetadata = Field(default_factory=DocumentMetadata)
