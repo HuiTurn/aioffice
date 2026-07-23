@@ -23,6 +23,7 @@ from aioffice.formats.docx_named_styles import (
 )
 from aioffice.formats.docx_header_footer import (
     native_ref_for_header_footer_part,
+    resolve_relationship_target,
 )
 from aioffice.formats.docx_fields import (
     FieldStructureError,
@@ -32,6 +33,7 @@ from aioffice.formats.docx_fields import (
     patch_field_instruction,
 )
 from aioffice.formats.docx_images import (
+    insert_simple_inline_image_after,
     patch_simple_inline_image,
     replace_simple_inline_image,
 )
@@ -53,6 +55,7 @@ from aioffice.formats.docx_tables import (
 from aioffice.native import (
     FidelityReport,
     MANIFEST_PART_URI,
+    MANIFEST_RELATIONSHIP_TYPE,
     NativePackage,
     build_identity_manifest,
     native_ref_for_part_elements,
@@ -66,6 +69,7 @@ from aioffice.spec.models import (
     DocumentField,
     Heading,
     ImageBlock,
+    ImageInsert,
     NamedStyle,
     NativeRef,
     Paragraph,
@@ -79,7 +83,10 @@ from aioffice.spec.models import (
 )
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
 XML = "http://www.w3.org/XML/1998/namespace"
+REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 
 
 def _q(namespace: str, local: str) -> str:
@@ -90,6 +97,93 @@ def _target_id(value: Any) -> str:
     if not isinstance(value, str) or not value:
         raise NativePackageError("Native DOCX patch target must be a node ID.")
     return value[1:] if value.startswith("#") else value
+
+
+def _ensure_identity_manifest_parts(package: NativePackage) -> None:
+    """Attach the AiOffice identity part to a third-party OPC package."""
+
+    root_relationships = parse_xml(package.get_part("/_rels/.rels"))
+    manifest_relationships = [
+        relationship
+        for relationship in root_relationships.findall(
+            _q(REL, "Relationship")
+        )
+        if relationship.get("Type") == MANIFEST_RELATIONSHIP_TYPE
+    ]
+    if len(manifest_relationships) > 1:
+        raise NativePackageError(
+            "Root relationships contain duplicate AiOffice manifest links."
+        )
+    if manifest_relationships:
+        if manifest_relationships[0].get("TargetMode") is not None:
+            raise NativePackageError(
+                "AiOffice manifest relationship must be internal."
+            )
+        target = manifest_relationships[0].get("Target", "")
+        if (
+            resolve_relationship_target("/", target)
+            != MANIFEST_PART_URI
+        ):
+            raise NativePackageError(
+                "Existing AiOffice manifest relationship targets another part."
+            )
+    else:
+        relationship_ids = {
+            relationship.get("Id", "")
+            for relationship in root_relationships.findall(
+                _q(REL, "Relationship")
+            )
+        }
+        relationship_number = 1
+        while (
+            f"rIdAiOfficeManifest{relationship_number}"
+            in relationship_ids
+        ):
+            relationship_number += 1
+        ET.SubElement(
+            root_relationships,
+            _q(REL, "Relationship"),
+            {
+                "Id": f"rIdAiOfficeManifest{relationship_number}",
+                "Type": MANIFEST_RELATIONSHIP_TYPE,
+                "Target": MANIFEST_PART_URI.lstrip("/"),
+            },
+        )
+        package.set_part(
+            "/_rels/.rels",
+            serialize_xml(root_relationships),
+        )
+
+    content_types = parse_xml(
+        package.get_part("/[Content_Types].xml")
+    )
+    overrides = [
+        override
+        for override in content_types.findall(_q(CT, "Override"))
+        if override.get("PartName") == MANIFEST_PART_URI
+    ]
+    if len(overrides) > 1:
+        raise NativePackageError(
+            "Content types contain duplicate AiOffice manifest overrides."
+        )
+    if overrides:
+        if overrides[0].get("ContentType") != "application/xml":
+            raise NativePackageError(
+                "AiOffice manifest content type is not application/xml."
+            )
+    else:
+        ET.SubElement(
+            content_types,
+            _q(CT, "Override"),
+            {
+                "PartName": MANIFEST_PART_URI,
+                "ContentType": "application/xml",
+            },
+        )
+        package.set_part(
+            "/[Content_Types].xml",
+            serialize_xml(content_types),
+        )
 
 
 def _find_source_ref(spec: AiOfficeDocumentSpec, target: Any) -> NativeRef:
@@ -559,6 +653,7 @@ def apply_docx_operations(
         "style.format",
         "section.format",
         "field.update",
+        "image.insert_after",
         "image.replace",
         "image.update",
         "table.format",
@@ -571,7 +666,8 @@ def apply_docx_operations(
             "Imported DOCX V0.2 currently supports native lowering for "
             "text.replace, paragraph.format, text.format, node.remove, "
             "style.apply, style.define, style.format, section.format, and "
-            "field.update, image.replace, image.update, table.format, "
+            "field.update, image.insert_after, image.replace, image.update, "
+            "table.format, "
             "table.column.format, and "
             "table.cell.format; "
             f"unsupported: {', '.join(unsupported)}."
@@ -728,6 +824,7 @@ def apply_docx_operations(
                 original_elements,
                 source_ref,
             )
+    inserted_images: dict[str, ET.Element] = {}
 
     for operation in operations:
         operation_name = operation.get("op")
@@ -885,6 +982,59 @@ def apply_docx_operations(
                 result=result_image,
                 fields=fields,
             )
+            changed_xml_parts.add(source_ref.part_uri)
+            continue
+        if operation_name == "image.insert_after":
+            source_ref = _find_source_ref(
+                spec,
+                operation.get("target"),
+            )
+            container, mapped_elements = elements_for_ref(source_ref)
+            try:
+                image_insert = ImageInsert.model_validate(
+                    operation.get("image")
+                )
+                asset = AssetRef.model_validate(operation.get("asset"))
+            except ValidationError as error:
+                raise NativePackageError(
+                    f"Could not lower image.insert_after metadata: {error}"
+                ) from error
+            payload = (
+                image_payloads.get(asset.id)
+                if image_payloads is not None
+                else None
+            )
+            if payload is None:
+                raise NativePackageError(
+                    "image.insert_after requires a verified out-of-band "
+                    "binary payload."
+                )
+            result_image = next(
+                (
+                    candidate
+                    for candidate in result_spec.content
+                    if isinstance(candidate, ImageBlock)
+                    and candidate.id == image_insert.id
+                ),
+                None,
+            )
+            if (
+                result_image is None
+                or result_image.asset_id != asset.id
+            ):
+                raise NativePackageError(
+                    "image.insert_after result does not contain its new image."
+                )
+            inserted = insert_simple_inline_image_after(
+                updated,
+                container,
+                mapped_elements,
+                source_part=source_ref.part_uri,
+                image=image_insert,
+                asset=asset,
+                payload=payload,
+            )
+            inserted_images[image_insert.id] = inserted
             changed_xml_parts.add(source_ref.part_uri)
             continue
         if operation_name == "image.replace":
@@ -1244,6 +1394,20 @@ def apply_docx_operations(
             root_path=root_path,
             native_id=original_ref.native_id,
         )
+    for image_id, paragraph in inserted_images.items():
+        paragraph_index = current_indices.get(id(paragraph))
+        if paragraph_index is None:
+            raise NativePackageError(
+                f"Inserted image {image_id!r} is no longer in the document body."
+            )
+        identity_updates[image_id] = native_ref_for_part_elements(
+            [paragraph],
+            [paragraph_index],
+            part_uri="/word/document.xml",
+            native_kind="w:p",
+            root_path="/w:document/w:body",
+            native_id=paragraph.get(_q(W14, "paraId")),
+        )
     for field_id, (paragraph, original_ref) in source_fields.items():
         if original_ref.sub_index is None:
             continue
@@ -1455,7 +1619,9 @@ def apply_docx_operations(
     if styles_changed:
         assert styles_root is not None
         updated.set_part("/word/styles.xml", serialize_xml(styles_root))
-    if updated.has_part(MANIFEST_PART_URI):
+    if inserted_images:
+        _ensure_identity_manifest_parts(updated)
+    if updated.has_part(MANIFEST_PART_URI) or inserted_images:
         manifest_spec = result_spec.model_copy(deep=True)
         for node in manifest_spec.content:
             if node.id in identity_updates:
@@ -1496,6 +1662,7 @@ def apply_docx_operations(
         updated.set_part(
             MANIFEST_PART_URI,
             serialize_identity_manifest(build_identity_manifest(manifest_spec)),
+            content_type="application/xml",
         )
     return updated, updated.fidelity_report(), identity_updates
 

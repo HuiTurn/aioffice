@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev16`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev17`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -24,9 +24,9 @@ parts, structured dynamic fields, explicit table geometry, logical merged cells,
 rich table-cell paragraphs, explicit table/cell border control, paragraph
 background/border surfaces, conservative native image projection, verified asset
 extraction, selective native image metadata and geometry updates, occurrence-scoped
-copy-on-write image replacement, semantic diffs, isolated LibreOffice/Poppler native
-rendering, consistent multi-page evidence, page occupancy diagnostics,
-visual-regression contracts, and fidelity reports.
+copy-on-write image replacement, addressable native inline image insertion, semantic
+diffs, isolated LibreOffice/Poppler native rendering, consistent multi-page evidence,
+page occupancy diagnostics, visual-regression contracts, and fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -143,16 +143,42 @@ native image part and a new relationship for only that occurrence, and preserves
 stable image ID, displayed extent, alternative text, and title. Other occurrences
 that shared the old image remain unchanged. Raw JSON Patch cannot carry the binary.
 
+New inline pictures use the same bounded asset channel and require explicit layout:
+
+```python
+result = doc.insert_image_after(
+    "#status",
+    "assets/expert-workflow.png",
+    width={"value": 3, "unit": "in"},
+    height={"value": 1.5, "unit": "in"},
+    alt_text="Expert workflow with three approval stages",
+    image_id="expert_workflow",
+    paragraph_style={"alignment": "center"},
+)
+assert result.success
+result.document.export("inserted.docx")
+```
+
+The target must be a mapped top-level body node. AiOffice inserts after its last
+native element, which keeps multi-paragraph lists addressable as one semantic node.
+The new paragraph, DrawingML geometry, relationship, asset and identity manifest are
+created atomically. Explicit width, height and nonblank alternative text avoid
+model-side DPI guessing and inaccessible output.
+
 The equivalent CLI is:
 
 ```bash
 aioffice extract-image existing.docx IMAGE_ID -o extracted.png
 aioffice replace-image existing.docx IMAGE_ID replacement.png -o replaced.docx
+aioffice insert-image-after existing.docx TARGET replacement.png \
+  --width 3 --width-unit in --height 1.5 --height-unit in \
+  --alt-text "Expert workflow" --align center -o inserted.docx
 ```
 
-Persistent workspaces expose the same operation through
-`Workspace.replace_image(...)` and `aioffice workspace replace-image`, recording the
-verified asset metadata but never base64 in the revision log.
+Persistent workspaces expose the same operations through
+`Workspace.replace_image(...)`, `Workspace.insert_image_after(...)`, and matching
+CLI commands, recording verified asset and insertion metadata but never base64 in the
+revision log.
 
 The read path re-resolves the trusted native paragraph and OPC relationship, then
 verifies the asset record, media type, size, and content hash before returning bytes.

@@ -10,9 +10,16 @@ from xml.etree import ElementTree as ET
 
 from aioffice.core.errors import NativePackageError
 from aioffice.formats.docx_header_footer import resolve_relationship_target
+from aioffice.formats.docx_style import apply_paragraph_style
 from aioffice.native import NativePackage
 from aioffice.native.xml import parse_xml, serialize_xml
-from aioffice.spec.models import AssetRef, ImageBlock, Length, NativeRef
+from aioffice.spec.models import (
+    AssetRef,
+    ImageBlock,
+    ImageInsert,
+    Length,
+    NativeRef,
+)
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -21,6 +28,7 @@ A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
 _REPLACEMENT_EXTENSIONS = {
     "image/png": "png",
     "image/jpeg": "jpg",
@@ -31,6 +39,9 @@ _REPLACEMENT_EXTENSIONS = {
 
 IMAGE_RELATIONSHIP_TYPE = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+)
+RELATIONSHIPS_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-package.relationships+xml"
 )
 EMU_PER_POINT = 12_700
 
@@ -484,25 +495,15 @@ def _relationship_part_uri(source_part: str) -> str:
     )
 
 
-def replace_simple_inline_image(
+def _attach_image_asset(
     package: NativePackage,
-    paragraph: ET.Element,
     *,
     source_part: str,
     asset: AssetRef,
     payload: bytes,
-) -> None:
-    """Replace one image occurrence through a new part and relationship."""
+) -> tuple[str, str]:
+    """Add/reuse one content-addressed image part and add a fresh relationship."""
 
-    original = simple_inline_image(
-        package,
-        paragraph,
-        source_part=source_part,
-    )
-    if original is None:
-        raise NativePackageError(
-            "image.replace requires one supported native inline picture."
-        )
     if (
         asset.size_bytes is None
         or asset.size_bytes != len(payload)
@@ -511,7 +512,7 @@ def replace_simple_inline_image(
         or not asset.filename
     ):
         raise NativePackageError(
-            "image.replace asset metadata does not match its binary payload."
+            "Image asset metadata does not match its binary payload."
         )
     expected_extension = _REPLACEMENT_EXTENSIONS.get(asset.media_type)
     expected_filename = (
@@ -521,7 +522,7 @@ def replace_simple_inline_image(
     )
     if asset.filename != expected_filename:
         raise NativePackageError(
-            "image.replace requires a supported media type and canonical "
+            "Native image mutation requires a supported media type and canonical "
             "content-addressed native filename."
         )
     media_part_uri = f"/word/media/{asset.filename}"
@@ -554,12 +555,12 @@ def replace_simple_inline_image(
     ]
     if len(overrides) > 1:
         raise NativePackageError(
-            "DOCX content types contain duplicate replacement image overrides."
+            "DOCX content types contain duplicate native image overrides."
         )
     if overrides:
         if overrides[0].get("ContentType") != asset.media_type:
             raise NativePackageError(
-                "Replacement image content-type override is inconsistent."
+                "Native image content-type override is inconsistent."
             )
     else:
         ET.SubElement(
@@ -576,11 +577,19 @@ def replace_simple_inline_image(
         )
 
     relationship_part_uri = _relationship_part_uri(source_part)
-    if not package.has_part(relationship_part_uri):
+    relationship_part_exists = package.has_part(
+        relationship_part_uri
+    )
+    relationships = (
+        parse_xml(package.get_part(relationship_part_uri))
+        if relationship_part_exists
+        else ET.Element(_q(REL, "Relationships"))
+    )
+    if relationships.tag != _q(REL, "Relationships"):
         raise NativePackageError(
-            f"DOCX image source has no relationship part {relationship_part_uri!r}."
+            f"DOCX relationship part {relationship_part_uri!r} has "
+            "an invalid root."
         )
-    relationships = parse_xml(package.get_part(relationship_part_uri))
     relationship_ids = {
         element.get("Id", "")
         for element in relationships.findall(_q(REL, "Relationship"))
@@ -605,6 +614,39 @@ def replace_simple_inline_image(
     package.set_part(
         relationship_part_uri,
         serialize_xml(relationships),
+        content_type=(
+            None
+            if relationship_part_exists
+            else RELATIONSHIPS_CONTENT_TYPE
+        ),
+    )
+    return relationship_id, media_part_uri
+
+
+def replace_simple_inline_image(
+    package: NativePackage,
+    paragraph: ET.Element,
+    *,
+    source_part: str,
+    asset: AssetRef,
+    payload: bytes,
+) -> None:
+    """Replace one image occurrence through a new part and relationship."""
+
+    original = simple_inline_image(
+        package,
+        paragraph,
+        source_part=source_part,
+    )
+    if original is None:
+        raise NativePackageError(
+            "image.replace requires one supported native inline picture."
+        )
+    relationship_id, media_part_uri = _attach_image_asset(
+        package,
+        source_part=source_part,
+        asset=asset,
+        payload=payload,
     )
 
     blips = paragraph.findall(f".//{_q(A, 'blip')}")
@@ -632,10 +674,217 @@ def replace_simple_inline_image(
         )
 
 
+def _native_paragraph_anchor(
+    container: ET.Element,
+    image_id: str,
+) -> str:
+    existing = {
+        value
+        for paragraph in container.findall(_q(W, "p"))
+        if (value := paragraph.get(_q(W14, "paraId"))) is not None
+    }
+    ordinal = 0
+    while True:
+        candidate = hashlib.sha256(
+            f"{image_id}:{ordinal}".encode()
+        ).hexdigest()[:8].upper()
+        if candidate == "00000000":
+            candidate = "00000001"
+        if candidate not in existing:
+            return candidate
+        ordinal += 1
+
+
+def _next_drawing_id(
+    package: NativePackage,
+    container: ET.Element,
+) -> int:
+    used: set[int] = set()
+    roots = [container]
+    for part in package.parts:
+        if (
+            part.uri == "/word/document.xml"
+            or part.uri.startswith("/word/header")
+            or part.uri.startswith("/word/footer")
+        ) and part.uri.endswith(".xml"):
+            try:
+                roots.append(parse_xml(package.get_part(part.uri)))
+            except NativePackageError:
+                continue
+    for root in roots:
+        for properties in root.findall(f".//{_q(WP, 'docPr')}"):
+            try:
+                value = int(properties.get("id", ""))
+            except ValueError:
+                continue
+            if 0 < value <= 2**32 - 1:
+                used.add(value)
+    candidate = 1
+    while candidate in used:
+        candidate += 1
+    if candidate > 2**32 - 1:
+        raise NativePackageError(
+            "DOCX has no available unsigned drawing property ID."
+        )
+    return candidate
+
+
+def insert_simple_inline_image_after(
+    package: NativePackage,
+    container: ET.Element,
+    after_elements: list[ET.Element],
+    *,
+    source_part: str,
+    image: ImageInsert,
+    asset: AssetRef,
+    payload: bytes,
+) -> ET.Element:
+    """Insert one conservative inline-picture paragraph after mapped elements."""
+
+    if (
+        source_part != "/word/document.xml"
+        or container.tag != _q(W, "body")
+        or not after_elements
+        or any(element not in list(container) for element in after_elements)
+    ):
+        raise NativePackageError(
+            "image.insert_after requires mapped top-level document body elements."
+        )
+    relationship_id, _ = _attach_image_asset(
+        package,
+        source_part=source_part,
+        asset=asset,
+        payload=payload,
+    )
+    width_emu = round(image.width.to_points() * EMU_PER_POINT)
+    height_emu = round(image.height.to_points() * EMU_PER_POINT)
+    if (
+        width_emu <= 0
+        or height_emu <= 0
+        or width_emu > 2**63 - 1
+        or height_emu > 2**63 - 1
+    ):
+        raise NativePackageError(
+            "image.insert_after dimensions do not fit positive OOXML Int64 EMUs."
+        )
+    paragraph = ET.Element(
+        _q(W, "p"),
+        {
+            _q(W14, "paraId"): _native_paragraph_anchor(
+                container,
+                image.id,
+            )
+        },
+    )
+    apply_paragraph_style(
+        paragraph,
+        image.paragraph_style,
+    )
+    run = ET.SubElement(paragraph, _q(W, "r"))
+    drawing = ET.SubElement(run, _q(W, "drawing"))
+    inline = ET.SubElement(drawing, _q(WP, "inline"))
+    ET.SubElement(
+        inline,
+        _q(WP, "extent"),
+        {"cx": str(width_emu), "cy": str(height_emu)},
+    )
+    ET.SubElement(
+        inline,
+        _q(WP, "effectExtent"),
+        {"l": "0", "t": "0", "r": "0", "b": "0"},
+    )
+    document_properties = {
+        "id": str(_next_drawing_id(package, container)),
+        "name": image.name or asset.filename or "AiOffice image",
+        "descr": image.alt_text,
+    }
+    if image.title is not None:
+        document_properties["title"] = image.title
+    ET.SubElement(
+        inline,
+        _q(WP, "docPr"),
+        document_properties,
+    )
+    frame_properties = ET.SubElement(
+        inline,
+        _q(WP, "cNvGraphicFramePr"),
+    )
+    ET.SubElement(
+        frame_properties,
+        _q(A, "graphicFrameLocks"),
+        {"noChangeAspect": "1"},
+    )
+    graphic = ET.SubElement(inline, _q(A, "graphic"))
+    graphic_data = ET.SubElement(
+        graphic,
+        _q(A, "graphicData"),
+        {"uri": PIC},
+    )
+    picture = ET.SubElement(graphic_data, _q(PIC, "pic"))
+    non_visual = ET.SubElement(picture, _q(PIC, "nvPicPr"))
+    ET.SubElement(
+        non_visual,
+        _q(PIC, "cNvPr"),
+        {
+            "id": "0",
+            "name": asset.filename or "AiOffice image",
+        },
+    )
+    ET.SubElement(non_visual, _q(PIC, "cNvPicPr"))
+    blip_fill = ET.SubElement(picture, _q(PIC, "blipFill"))
+    ET.SubElement(
+        blip_fill,
+        _q(A, "blip"),
+        {_q(R, "embed"): relationship_id},
+    )
+    stretch = ET.SubElement(blip_fill, _q(A, "stretch"))
+    ET.SubElement(stretch, _q(A, "fillRect"))
+    shape = ET.SubElement(picture, _q(PIC, "spPr"))
+    transform = ET.SubElement(shape, _q(A, "xfrm"))
+    ET.SubElement(transform, _q(A, "off"), {"x": "0", "y": "0"})
+    ET.SubElement(
+        transform,
+        _q(A, "ext"),
+        {"cx": str(width_emu), "cy": str(height_emu)},
+    )
+    geometry = ET.SubElement(
+        shape,
+        _q(A, "prstGeom"),
+        {"prst": "rect"},
+    )
+    ET.SubElement(geometry, _q(A, "avLst"))
+
+    insert_index = max(
+        list(container).index(element)
+        for element in after_elements
+    ) + 1
+    container.insert(insert_index, paragraph)
+    projected = simple_inline_image(
+        package,
+        paragraph,
+        source_part=source_part,
+    )
+    if (
+        projected is None
+        or projected.asset_id != asset.id
+        or round(projected.width.to_points() * EMU_PER_POINT)
+        != width_emu
+        or round(projected.height.to_points() * EMU_PER_POINT)
+        != height_emu
+        or projected.alt_text != image.alt_text
+        or projected.title != image.title
+    ):
+        raise NativePackageError(
+            "image.insert_after would create an unsupported native picture."
+        )
+    return paragraph
+
+
 __all__ = [
     "EMU_PER_POINT",
     "IMAGE_RELATIONSHIP_TYPE",
     "SimpleInlineImage",
+    "insert_simple_inline_image_after",
     "patch_simple_inline_image",
     "replace_simple_inline_image",
     "simple_inline_image",

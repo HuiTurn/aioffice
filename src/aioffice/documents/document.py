@@ -62,6 +62,7 @@ from aioffice.spec.models import (
     DocumentField,
     Heading,
     ImageBlock,
+    ImageInsert,
     ImageUpdate,
     LEGACY_DOCUMENT_SCHEMA_URL,
     LEGACY_SPEC_VERSION,
@@ -473,6 +474,139 @@ class Document:
             },
         )
 
+    def insert_image_after(
+        self,
+        target: str,
+        source: bytes | bytearray | memoryview | str | Path | ImageAsset,
+        *,
+        width: Length | Mapping[str, Any],
+        height: Length | Mapping[str, Any],
+        alt_text: str,
+        media_type: str | None = None,
+        image_id: str | None = None,
+        name: str | None = None,
+        title: str | None = None,
+        paragraph_style: ParagraphStyle | Mapping[str, Any] | None = None,
+        dry_run: bool = False,
+        base_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> PatchResult:
+        """Insert one native inline image after a mapped top-level node."""
+
+        if self._native is None:
+            return PatchResult(
+                success=False,
+                base_revision=self.revision,
+                result_revision=self.revision,
+                dry_run=dry_run,
+                diagnostics=[
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            "Image insertion requires an attached native DOCX "
+                            "package."
+                        ),
+                        node_ids=[self.id],
+                        suggested_actions=[
+                            {"action": "open_native_docx"},
+                            {"action": "inspect_capabilities"},
+                        ],
+                    )
+                ],
+                idempotency_key=idempotency_key,
+            )
+        try:
+            prepared = prepare_image_asset(
+                source,
+                media_type=media_type,
+                security_policy=self._native.security_policy,
+            )
+        except (
+            NativePackageError,
+            OSError,
+            SecurityError,
+            TypeError,
+        ) as error:
+            return PatchResult(
+                success=False,
+                base_revision=self.revision,
+                result_revision=self.revision,
+                dry_run=dry_run,
+                diagnostics=[
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_ASSET_INPUT",
+                        message=str(error),
+                        node_ids=[self.id],
+                        suggested_actions=[
+                            {"action": "use_supported_raster_image"},
+                        ],
+                    )
+                ],
+                idempotency_key=idempotency_key,
+            )
+        image_payload: dict[str, Any] = {
+            "width": width,
+            "height": height,
+            "name": name or prepared.asset.filename,
+            "alt_text": alt_text,
+            "title": title,
+            "paragraph_style": paragraph_style,
+        }
+        if image_id is not None:
+            image_payload["id"] = image_id
+        try:
+            image_insert = ImageInsert.model_validate(image_payload)
+        except ValidationError as error:
+            return PatchResult(
+                success=False,
+                base_revision=self.revision,
+                result_revision=self.revision,
+                dry_run=dry_run,
+                diagnostics=[
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_IMAGE_INSERT",
+                        message="Image insertion metadata is invalid.",
+                        node_ids=[self.id],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_image_insert_schema",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ],
+                idempotency_key=idempotency_key,
+            )
+        operation = {
+            "op": "image.insert_after",
+            "target": target,
+            "image": image_insert.model_dump(
+                mode="json",
+                exclude_none=True,
+            ),
+            "asset": prepared.asset.model_dump(
+                mode="json",
+                exclude_none=True,
+            ),
+        }
+        return self._apply(
+            [operation],
+            dry_run=dry_run,
+            base_revision=base_revision,
+            idempotency_key=idempotency_key,
+            image_payloads={
+                prepared.asset.id: prepared.data,
+            },
+        )
+
     def inspect(self, *, response_format: str = "compact") -> dict[str, Any]:
         if response_format not in {"compact", "expanded", "summary"}:
             raise ValueError("response_format must be compact, expanded, or summary.")
@@ -602,6 +736,7 @@ class Document:
                         capabilities=node.capabilities,
                         supported_operations=(
                             [
+                                "image.insert_after",
                                 "image.replace",
                                 "image.update",
                                 "node.remove",
@@ -846,6 +981,7 @@ class Document:
                 "style.format",
                 "section.format",
                 "field.update",
+                "image.insert_after",
                 "table.format",
                 "table.column.format",
                 "table.cell.format",
@@ -939,11 +1075,26 @@ class Document:
                     "unrelated_occurrences",
                     "original_image_part",
                 ],
+                "native_insert_api": (
+                    "Document.insert_image_after(target, source, width=..., "
+                    "height=..., alt_text=...)"
+                ),
+                "native_insert_operation": "image.insert_after",
+                "insert_placement": "inline",
+                "insert_dimensions": "explicit_width_and_height",
+                "insert_alt_text": "required",
+                "insert_target": "mapped_top_level_body_node",
+                "insert_supports_paragraph_style": True,
                 "cli_extract": (
                     "aioffice extract-image INPUT IMAGE_ID -o OUTPUT"
                 ),
                 "cli_replace": (
                     "aioffice replace-image INPUT IMAGE_ID REPLACEMENT -o OUTPUT"
+                ),
+                "cli_insert": (
+                    "aioffice insert-image-after INPUT TARGET REPLACEMENT "
+                    "--width VALUE --width-unit UNIT --height VALUE "
+                    "--height-unit UNIT --alt-text TEXT -o OUTPUT"
                 ),
                 "supported_native_subset": [
                     "one embedded DrawingML picture",
@@ -2528,7 +2679,13 @@ class Document:
         native_image_operations = {
             str(operation.get("op"))
             for operation in operations
-        }.intersection({"image.update", "image.replace"})
+        }.intersection(
+            {
+                "image.insert_after",
+                "image.update",
+                "image.replace",
+            }
+        )
         if self._native is None and native_image_operations:
             diagnostic = Diagnostic(
                 severity=Severity.ERROR,
@@ -2553,19 +2710,20 @@ class Document:
                 idempotency_key=idempotency_key,
             )
         if any(
-            operation.get("op") == "image.replace"
+            operation.get("op")
+            in {"image.insert_after", "image.replace"}
             for operation in operations
         ) and not image_payloads:
             diagnostic = Diagnostic(
                 severity=Severity.ERROR,
                 code="BINARY_ASSET_REQUIRED",
                 message=(
-                    "image.replace binary data cannot be supplied through a JSON "
-                    "Patch; use Document.replace_image() or the replace-image CLI."
+                    "Image insertion/replacement binary data cannot be supplied "
+                    "through a JSON Patch; use the dedicated Document API or CLI."
                 ),
                 node_ids=[self.id],
                 suggested_actions=[
-                    {"action": "use_replace_image_api"},
+                    {"action": "use_out_of_band_image_api"},
                 ],
             )
             return PatchResult(
@@ -3083,6 +3241,144 @@ class Document:
         payload: dict[str, Any], operation: dict[str, Any], next_revision: int
     ) -> dict[str, Any]:
         operation_name = operation.get("op")
+        if operation_name == "image.insert_after":
+            unexpected = sorted(
+                set(operation) - {"op", "target", "image", "asset"}
+            )
+            index, after_node = Document._find_content_node(
+                payload,
+                operation.get("target"),
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "image.insert_after received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[after_node["id"]],
+                    )
+                )
+            try:
+                image_insert = ImageInsert.model_validate(
+                    operation.get("image")
+                )
+                asset = AssetRef.model_validate(
+                    operation.get("asset")
+                )
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="image.insert_after has invalid metadata.",
+                        node_ids=[after_node["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_image_insert_schema",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            if (
+                asset.id != f"asset_{asset.sha256}"
+                or asset.filename is None
+                or asset.size_bytes is None
+                or asset.size_bytes <= 0
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "image.insert_after requires a content-addressed "
+                            "asset with a filename and positive byte count."
+                        ),
+                        node_ids=[after_node["id"]],
+                    )
+                )
+            known_node_ids = {
+                str(node.get("id"))
+                for node in payload.get("content", [])
+            } | {
+                str(candidate.get("id"))
+                for candidate in payload.get("assets", [])
+            }
+            if image_insert.id in known_node_ids:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"Image ID {image_insert.id!r} already exists."
+                        ),
+                        node_ids=[image_insert.id],
+                        suggested_actions=[
+                            {"action": "assign_unique_id"}
+                        ],
+                    )
+                )
+            image = ImageBlock(
+                id=image_insert.id,
+                asset_id=asset.id,
+                width=image_insert.width,
+                height=image_insert.height,
+                name=image_insert.name,
+                alt_text=image_insert.alt_text,
+                title=image_insert.title,
+                paragraph_style=image_insert.paragraph_style,
+                revision_added=next_revision,
+                revision_updated=next_revision,
+            ).model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+            replacement_asset = asset.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+            existing_assets = [
+                candidate
+                for candidate in payload.get("assets", [])
+                if candidate.get("id") == asset.id
+            ]
+            if len(existing_assets) > 1 or (
+                existing_assets
+                and existing_assets[0] != replacement_asset
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "image.insert_after asset identity conflicts with "
+                            "an existing asset record."
+                        ),
+                        node_ids=[image_insert.id, asset.id],
+                    )
+                )
+            if not existing_assets:
+                payload.setdefault("assets", []).append(
+                    replacement_asset
+                )
+            payload["content"].insert(index + 1, image)
+            return {
+                "operation": "image.insert_after",
+                "after": after_node["id"],
+                "created_nodes": [image_insert.id],
+                "asset_ids": [asset.id],
+                "binary_transport": "out_of_band",
+                "placement": "inline",
+            }
+
         if operation_name == "image.replace":
             unexpected = sorted(
                 set(operation) - {"op", "target", "asset"}
@@ -4912,8 +5208,8 @@ class Document:
                     "text.replace, paragraph.format, text.format, node.append, "
                     "node.insert_after, node.remove, node.update, style.apply, "
                     "style.define, style.format, section.format, field.update, "
-                    "image.replace, image.update, table.format, "
-                    "table.column.format, and table.cell.format."
+                    "image.insert_after, image.replace, image.update, "
+                    "table.format, table.column.format, and table.cell.format."
                 ),
                 suggested_actions=[{"action": "use_supported_operation"}],
             )

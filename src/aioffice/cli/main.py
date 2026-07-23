@@ -23,6 +23,7 @@ from aioffice.spec.models import (
     HeaderFooterBindings,
     HeaderFooterPart,
     ImageBlock,
+    ImageInsert,
     ImageUpdate,
     NamedStyle,
     PageSize,
@@ -122,6 +123,38 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replace the output DOCX if it already exists.",
     )
+
+    insert_image = subparsers.add_parser(
+        "insert-image-after",
+        help="Insert one native inline image after a mapped top-level node.",
+    )
+    insert_image.add_argument("input", type=Path)
+    insert_image.add_argument("target")
+    insert_image.add_argument("replacement", type=Path)
+    insert_image.add_argument("--width", required=True, type=float)
+    insert_image.add_argument(
+        "--width-unit",
+        required=True,
+        choices=("pt", "in", "cm", "mm", "px"),
+    )
+    insert_image.add_argument("--height", required=True, type=float)
+    insert_image.add_argument(
+        "--height-unit",
+        required=True,
+        choices=("pt", "in", "cm", "mm", "px"),
+    )
+    insert_image.add_argument("--alt-text", required=True)
+    insert_image.add_argument("--title")
+    insert_image.add_argument("--name")
+    insert_image.add_argument("--image-id")
+    insert_image.add_argument("--media-type")
+    insert_image.add_argument(
+        "--align",
+        choices=("left", "center", "right", "justify"),
+    )
+    insert_image.add_argument("-o", "--output", type=Path)
+    insert_image.add_argument("--dry-run", action="store_true")
+    insert_image.add_argument("--overwrite", action="store_true")
 
     render = subparsers.add_parser(
         "render",
@@ -238,6 +271,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "header-footer-bindings",
             "header-footer-part",
             "image-block",
+            "image-insert",
             "image-update",
             "named-style",
             "page-size",
@@ -325,6 +359,38 @@ def _build_parser() -> argparse.ArgumentParser:
     workspace_replace_image.add_argument("--media-type")
     workspace_replace_image.add_argument("--dry-run", action="store_true")
     workspace_replace_image.add_argument("--base-revision", type=int)
+
+    workspace_insert_image = workspace_commands.add_parser(
+        "insert-image-after",
+        help="Insert one image and persist a new workspace revision.",
+    )
+    workspace_insert_image.add_argument("artifact_id")
+    workspace_insert_image.add_argument("target")
+    workspace_insert_image.add_argument("replacement", type=Path)
+    workspace_insert_image.add_argument("--root", type=Path, default=Path("."))
+    workspace_insert_image.add_argument("--width", required=True, type=float)
+    workspace_insert_image.add_argument(
+        "--width-unit",
+        required=True,
+        choices=("pt", "in", "cm", "mm", "px"),
+    )
+    workspace_insert_image.add_argument("--height", required=True, type=float)
+    workspace_insert_image.add_argument(
+        "--height-unit",
+        required=True,
+        choices=("pt", "in", "cm", "mm", "px"),
+    )
+    workspace_insert_image.add_argument("--alt-text", required=True)
+    workspace_insert_image.add_argument("--title")
+    workspace_insert_image.add_argument("--name")
+    workspace_insert_image.add_argument("--image-id")
+    workspace_insert_image.add_argument("--media-type")
+    workspace_insert_image.add_argument(
+        "--align",
+        choices=("left", "center", "right", "justify"),
+    )
+    workspace_insert_image.add_argument("--dry-run", action="store_true")
+    workspace_insert_image.add_argument("--base-revision", type=int)
 
     workspace_reconcile = workspace_commands.add_parser(
         "reconcile",
@@ -469,6 +535,34 @@ def _run(args: argparse.Namespace) -> int:
             )
             _json_dump(result.model_dump())
             return 0 if result.success else 1
+        if workspace_command == "insert-image-after":
+            result = workspace.insert_image_after(
+                args.artifact_id,
+                args.target,
+                args.replacement,
+                width={
+                    "value": args.width,
+                    "unit": args.width_unit,
+                },
+                height={
+                    "value": args.height,
+                    "unit": args.height_unit,
+                },
+                alt_text=args.alt_text,
+                media_type=args.media_type,
+                image_id=args.image_id,
+                name=args.name,
+                title=args.title,
+                paragraph_style=(
+                    {"alignment": args.align}
+                    if args.align is not None
+                    else None
+                ),
+                dry_run=args.dry_run,
+                base_revision=args.base_revision,
+            )
+            _json_dump(result.model_dump())
+            return 0 if result.success else 1
         if workspace_command == "reconcile":
             document = workspace.reconcile_document(
                 args.artifact_id,
@@ -557,6 +651,53 @@ def _run(args: argparse.Namespace) -> int:
             if args.output is None:
                 raise ValueError(
                     "Committed image replacement requires --output; "
+                    "the input DOCX is never overwritten."
+                )
+            assert result.document is not None
+            result.document.export(args.output)
+            report["output"] = str(args.output)
+        _json_dump(report)
+        return 0 if result.success else 1
+
+    if args.command == "insert-image-after":
+        if (
+            not args.dry_run
+            and args.output is not None
+            and args.output.exists()
+            and not args.overwrite
+        ):
+            raise FileExistsError(
+                f"Refusing to overwrite existing DOCX {args.output}."
+            )
+        document = open_artifact(args.input)
+        result = document.insert_image_after(
+            args.target,
+            args.replacement,
+            width={
+                "value": args.width,
+                "unit": args.width_unit,
+            },
+            height={
+                "value": args.height,
+                "unit": args.height_unit,
+            },
+            alt_text=args.alt_text,
+            media_type=args.media_type,
+            image_id=args.image_id,
+            name=args.name,
+            title=args.title,
+            paragraph_style=(
+                {"alignment": args.align}
+                if args.align is not None
+                else None
+            ),
+            dry_run=args.dry_run,
+        )
+        report = result.model_dump()
+        if result.success and not args.dry_run:
+            if args.output is None:
+                raise ValueError(
+                    "Committed image insertion requires --output; "
                     "the input DOCX is never overwritten."
                 )
             assert result.document is not None
@@ -680,6 +821,7 @@ def _run(args: argparse.Namespace) -> int:
             "header-footer-bindings": HeaderFooterBindings,
             "header-footer-part": HeaderFooterPart,
             "image-block": ImageBlock,
+            "image-insert": ImageInsert,
             "image-update": ImageUpdate,
             "named-style": NamedStyle,
             "page-size": PageSize,

@@ -15,6 +15,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from aioffice.cli.main import main
 from aioffice.core.errors import NativePackageError
 from aioffice.documents import Document, DocumentBuilder
+from aioffice.native import MANIFEST_RELATIONSHIP_TYPE
 from aioffice.native.xml import parse_xml, serialize_xml
 from aioffice.security import SecurityPolicy
 from aioffice.workspace import Workspace
@@ -62,13 +63,17 @@ def _rewrite_package(
     *,
     replacements: dict[str, bytes],
     additions: dict[str, bytes],
+    deletions: set[str] | None = None,
 ) -> bytes:
+    removed = deletions or set()
     output = io.BytesIO()
     with (
         ZipFile(io.BytesIO(source)) as before,
         ZipFile(output, "w", compression=ZIP_DEFLATED) as after,
     ):
         for info in before.infolist():
+            if info.filename in removed:
+                continue
             after.writestr(
                 copy.copy(info),
                 replacements.get(info.filename, before.read(info.filename)),
@@ -239,6 +244,16 @@ class DocxImageTests(unittest.TestCase):
                 {"id", "sha256", "media_type", "size_bytes"},
             ),
             (
+                "image-insert",
+                {
+                    "id",
+                    "width",
+                    "height",
+                    "alt_text",
+                    "paragraph_style",
+                },
+            ),
+            (
                 "image-update",
                 {"width", "height", "alt_text", "title"},
             ),
@@ -260,7 +275,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.16")
+        self.assertEqual(spec["spec_version"], "0.2-draft.17")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -299,11 +314,20 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(
             inspected["nodes"][0]["supported_operations"],
-            ["image.replace", "image.update", "node.remove"],
+            [
+                "image.insert_after",
+                "image.replace",
+                "image.update",
+                "node.remove",
+            ],
         )
         document_capabilities = document.capabilities()
         self.assertIn("image.update", document_capabilities["operations"])
         self.assertIn("image.replace", document_capabilities["operations"])
+        self.assertIn(
+            "image.insert_after",
+            document_capabilities["operations"],
+        )
         capabilities = document_capabilities["assets"]
         self.assertFalse(capabilities["binary_in_json"])
         self.assertFalse(capabilities["binary_write_in_json"])
@@ -314,6 +338,14 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             capabilities["replacement_strategy"],
             "occurrence_copy_on_write",
+        )
+        self.assertEqual(
+            capabilities["insert_dimensions"],
+            "explicit_width_and_height",
+        )
+        self.assertEqual(
+            capabilities["insert_alt_text"],
+            "required",
         )
         self.assertEqual(
             capabilities["native_update_fields"],
@@ -1046,6 +1078,454 @@ class DocxImageTests(unittest.TestCase):
             )
             self.assertNotIn("data", operation["asset"])
             self.assertNotIn("base64", patch_path.read_text(encoding="utf-8"))
+
+    def test_insert_image_after_creates_stable_native_inline_picture(self) -> None:
+        source = _image_document(preceding_text="Before")
+        document = Document.from_docx(source)
+        original_image = next(
+            node
+            for node in document.to_spec()["content"]
+            if node["type"] == "image"
+        )
+        replacement_sha256 = hashlib.sha256(JPEG).hexdigest()
+        replacement_part = (
+            f"/word/media/aioffice-{replacement_sha256}.jpg"
+        )
+        result = document.insert_image_after(
+            "#before",
+            JPEG,
+            width={"value": 1.5, "unit": "in"},
+            height={"value": 0.75, "unit": "in"},
+            alt_text="Inserted expert workflow chart",
+            media_type="image/jpeg",
+            image_id="inserted_chart",
+            name="Expert workflow chart",
+            title="Workflow",
+            paragraph_style={
+                "alignment": "center",
+                "spacing_before": {"value": 6, "unit": "pt"},
+                "spacing_after": {"value": 8, "unit": "pt"},
+            },
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(
+            result.changes[0],
+            {
+                "operation": "image.insert_after",
+                "after": "before",
+                "created_nodes": ["inserted_chart"],
+                "asset_ids": [f"asset_{replacement_sha256}"],
+                "binary_transport": "out_of_band",
+                "placement": "inline",
+            },
+        )
+        self.assertEqual(
+            result.fidelity.affected_parts if result.fidelity else None,
+            [
+                "/[Content_Types].xml",
+                "/customXml/aioffice-manifest.xml",
+                "/word/_rels/document.xml.rels",
+                "/word/document.xml",
+                replacement_part,
+            ],
+        )
+        assert result.document is not None
+        content = result.document.to_spec()["content"]
+        self.assertEqual(
+            [(node["id"], node["type"]) for node in content],
+            [
+                ("before", "paragraph"),
+                ("inserted_chart", "image"),
+                (original_image["id"], "image"),
+            ],
+        )
+        inserted = content[1]
+        self.assertEqual(
+            inserted["width"],
+            {"value": 1.5, "unit": "in"},
+        )
+        self.assertEqual(
+            inserted["height"],
+            {"value": 0.75, "unit": "in"},
+        )
+        self.assertEqual(
+            inserted["paragraph_style"]["alignment"],
+            "center",
+        )
+        self.assertEqual(
+            result.document.image_bytes("inserted_chart"),
+            JPEG,
+        )
+        self.assertEqual(
+            result.document.image_bytes(original_image["id"]),
+            PNG,
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+        output = result.document.to_bytes("docx")
+
+        with ZipFile(io.BytesIO(output)) as archive:
+            root = parse_xml(archive.read("word/document.xml"))
+            relationships = parse_xml(
+                archive.read("word/_rels/document.xml.rels")
+            )
+            self.assertEqual(
+                archive.read(replacement_part.lstrip("/")),
+                JPEG,
+            )
+        body = root.find(_q(W, "body"))
+        assert body is not None
+        body_paragraphs = body.findall(_q(W, "p"))
+        self.assertEqual(len(body_paragraphs), 3)
+        inserted_paragraph = body_paragraphs[1]
+        self.assertIsNotNone(inserted_paragraph.get(_q(W14, "paraId")))
+        alignment = inserted_paragraph.find(
+            f"./{_q(W, 'pPr')}/{_q(W, 'jc')}"
+        )
+        assert alignment is not None
+        self.assertEqual(alignment.get(_q(W, "val")), "center")
+        outer_extent = inserted_paragraph.find(
+            f".//{_q(WP, 'extent')}"
+        )
+        inner_extent = inserted_paragraph.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}/{_q(A, 'ext')}"
+        )
+        assert outer_extent is not None
+        assert inner_extent is not None
+        self.assertEqual(
+            (outer_extent.get("cx"), outer_extent.get("cy")),
+            ("1371600", "685800"),
+        )
+        self.assertEqual(
+            (inner_extent.get("cx"), inner_extent.get("cy")),
+            ("1371600", "685800"),
+        )
+        inserted_relationship_id = inserted_paragraph.find(
+            f".//{_q(A, 'blip')}"
+        ).get(_q(R, "embed"))
+        inserted_relationship = next(
+            relationship
+            for relationship in relationships.findall(
+                _q(REL, "Relationship")
+            )
+            if relationship.get("Id") == inserted_relationship_id
+        )
+        self.assertEqual(
+            inserted_relationship.get("Target"),
+            replacement_part.removeprefix("/word/"),
+        )
+
+        reopened = Document.from_docx(output)
+        reopened_content = reopened.to_spec()["content"]
+        self.assertEqual(
+            [(node["id"], node["type"]) for node in reopened_content],
+            [
+                ("before", "paragraph"),
+                ("inserted_chart", "image"),
+                (original_image["id"], "image"),
+            ],
+        )
+        reopened_inserted = reopened_content[1]
+        self.assertEqual(
+            reopened_inserted["width"],
+            {"value": 108.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            reopened_inserted["height"],
+            {"value": 54.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            reopened_inserted["alt_text"],
+            "Inserted expert workflow chart",
+        )
+        self.assertEqual(reopened.image_bytes("inserted_chart"), JPEG)
+
+    def test_insert_image_after_rejects_unsafe_requests_atomically(self) -> None:
+        source = _image_document(preceding_text="Before")
+        document = Document.from_docx(source)
+        invalid_results = [
+            document.insert_image_after(
+                "#missing",
+                JPEG,
+                width={"value": 1, "unit": "in"},
+                height={"value": 1, "unit": "in"},
+                alt_text="Missing target",
+            ),
+            document.insert_image_after(
+                "#before",
+                JPEG,
+                width={"value": 0, "unit": "pt"},
+                height={"value": 1, "unit": "in"},
+                alt_text="Invalid width",
+            ),
+            document.insert_image_after(
+                "#before",
+                JPEG,
+                width={"value": 1, "unit": "in"},
+                height={"value": 1, "unit": "in"},
+                alt_text="   ",
+            ),
+            document.insert_image_after(
+                "#before",
+                JPEG,
+                width={"value": 1, "unit": "in"},
+                height={"value": 1, "unit": "in"},
+                alt_text="Duplicate ID",
+                image_id="before",
+            ),
+        ]
+        for result in invalid_results:
+            with self.subTest(result=result):
+                self.assertFalse(result.success)
+                self.assertEqual(result.result_revision, document.revision)
+        self.assertEqual(document.to_bytes("docx"), source)
+
+        raw = document.apply(
+            [
+                {
+                    "op": "image.insert_after",
+                    "target": "#before",
+                    "image": {},
+                    "asset": {},
+                }
+            ]
+        )
+        self.assertFalse(raw.success)
+        self.assertEqual(
+            raw.diagnostics[0].code,
+            "BINARY_ASSET_REQUIRED",
+        )
+        detached = Document.from_spec(document.to_spec())
+        detached_result = detached.insert_image_after(
+            "#before",
+            JPEG,
+            width={"value": 1, "unit": "in"},
+            height={"value": 1, "unit": "in"},
+            alt_text="Detached",
+        )
+        self.assertFalse(detached_result.success)
+        self.assertEqual(
+            detached_result.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+
+    def test_insert_image_after_multi_paragraph_list_uses_last_anchor(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .bullet_list(["One", "Two"], id="steps")
+            .paragraph("After", id="after")
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        result = document.insert_image_after(
+            "#steps",
+            JPEG,
+            width={"value": 1, "unit": "in"},
+            height={"value": 0.5, "unit": "in"},
+            alt_text="List result",
+            image_id="list_chart",
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        self.assertEqual(
+            [
+                (node["id"], node["type"])
+                for node in result.document.to_spec()["content"]
+            ],
+            [
+                ("steps", "bullet_list"),
+                ("list_chart", "image"),
+                ("after", "paragraph"),
+            ],
+        )
+        reopened = Document.from_docx(
+            result.document.to_bytes("docx")
+        )
+        self.assertEqual(
+            [
+                (node["id"], node["type"])
+                for node in reopened.to_spec()["content"]
+            ],
+            [
+                ("steps", "bullet_list"),
+                ("list_chart", "image"),
+                ("after", "paragraph"),
+            ],
+        )
+
+    def test_insert_image_embeds_identity_manifest_for_third_party_docx(
+        self,
+    ) -> None:
+        source = _image_document(preceding_text="Before")
+        with ZipFile(io.BytesIO(source)) as archive:
+            root_relationships = parse_xml(
+                archive.read("_rels/.rels")
+            )
+        for relationship in list(root_relationships):
+            if (
+                relationship.get("Type")
+                == MANIFEST_RELATIONSHIP_TYPE
+            ):
+                root_relationships.remove(relationship)
+        source = _rewrite_package(
+            source,
+            replacements={
+                "_rels/.rels": serialize_xml(root_relationships),
+            },
+            additions={},
+            deletions={"customXml/aioffice-manifest.xml"},
+        )
+        document = Document.from_docx(source)
+        target_id = next(
+            node["id"]
+            for node in document.to_spec()["content"]
+            if node["type"] == "paragraph"
+        )
+        result = document.insert_image_after(
+            f"#{target_id}",
+            JPEG,
+            width={"value": 2, "unit": "in"},
+            height={"value": 1, "unit": "in"},
+            alt_text="Third-party inserted chart",
+            image_id="third_party_chart",
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        self.assertIn(
+            "/_rels/.rels",
+            result.fidelity.affected_parts if result.fidelity else [],
+        )
+        self.assertIn(
+            "/customXml/aioffice-manifest.xml",
+            result.fidelity.affected_parts if result.fidelity else [],
+        )
+        with ZipFile(io.BytesIO(output)) as archive:
+            self.assertIn(
+                "customXml/aioffice-manifest.xml",
+                archive.namelist(),
+            )
+            output_relationships = parse_xml(
+                archive.read("_rels/.rels")
+            )
+        manifest_relationships = [
+            relationship
+            for relationship in output_relationships.findall(
+                _q(REL, "Relationship")
+            )
+            if relationship.get("Type")
+            == MANIFEST_RELATIONSHIP_TYPE
+        ]
+        self.assertEqual(len(manifest_relationships), 1)
+
+        reopened = Document.from_docx(output)
+        inserted = next(
+            node
+            for node in reopened.to_spec()["content"]
+            if node["type"] == "image"
+            and node["id"] == "third_party_chart"
+        )
+        self.assertEqual(
+            inserted["alt_text"],
+            "Third-party inserted chart",
+        )
+        self.assertEqual(
+            reopened.image_bytes("third_party_chart"),
+            JPEG,
+        )
+
+    def test_insert_image_after_cli_and_workspace_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "source.docx"
+            replacement_path = root / "replacement.jpg"
+            output_path = root / "inserted.docx"
+            input_path.write_bytes(
+                _image_document(preceding_text="Before")
+            )
+            replacement_path.write_bytes(JPEG)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "insert-image-after",
+                        str(input_path),
+                        "#before",
+                        str(replacement_path),
+                        "--width",
+                        "1.5",
+                        "--width-unit",
+                        "in",
+                        "--height",
+                        "0.75",
+                        "--height-unit",
+                        "in",
+                        "--alt-text",
+                        "CLI inserted chart",
+                        "--image-id",
+                        "cli_chart",
+                        "--align",
+                        "center",
+                        "-o",
+                        str(output_path),
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            report = json.loads(stdout.getvalue())
+            self.assertTrue(report["success"])
+            cli_document = Document.from_docx(output_path)
+            self.assertEqual(cli_document.image_bytes("cli_chart"), JPEG)
+
+            workspace = Workspace.init(root / "project")
+            tracked = workspace.import_document(input_path)
+            workspace_result = workspace.insert_image_after(
+                tracked.id,
+                "#before",
+                replacement_path,
+                width={"value": 2, "unit": "in"},
+                height={"value": 1, "unit": "in"},
+                alt_text="Workspace inserted chart",
+                image_id="workspace_chart",
+                paragraph_style={"alignment": "right"},
+                base_revision=tracked.revision,
+            )
+            self.assertTrue(
+                workspace_result.success,
+                workspace_result.model_dump(),
+            )
+            committed = workspace.open_document(tracked.id)
+            self.assertEqual(
+                committed.image_bytes("workspace_chart"),
+                JPEG,
+            )
+            self.assertIn(
+                "insert_image_after",
+                workspace.capabilities(tracked.id)["operations"],
+            )
+            patch_path = (
+                root
+                / "project"
+                / ".aioffice"
+                / "artifacts"
+                / tracked.id
+                / "patches"
+                / f"{workspace_result.result_revision:08d}.json"
+            )
+            patch = json.loads(patch_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                patch["operations"][0]["op"],
+                "image.insert_after",
+            )
+            self.assertEqual(
+                patch["changes"][0]["binary_transport"],
+                "out_of_band",
+            )
+            self.assertNotIn(
+                "base64",
+                patch_path.read_text(encoding="utf-8"),
+            )
 
     def test_semantic_image_without_native_package_is_rejected(self) -> None:
         document = Document.from_spec(

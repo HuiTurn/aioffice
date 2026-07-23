@@ -166,6 +166,18 @@
 - Added atomic rejection for detached packages, raw JSON binary replacement, invalid
   signatures, MIME mismatches, oversized inputs, part collisions, and failed
   post-mutation native proofs.
+- Added `Document.insert_image_after()` and `aioffice insert-image-after` for
+  explicit-size, accessible inline images at a mapped top-level body position.
+- Added stable caller-selected image IDs, collision-free `w14:paraId`/drawing IDs,
+  coordinated DrawingML extents, and direct paragraph-style insertion.
+- Added last-element anchoring for semantic nodes backed by multiple native elements,
+  including lists, while preserving following content and section structure.
+- Added automatic embedded identity-manifest attachment for structural edits to
+  third-party DOCX files so inserted IDs survive standalone export and reopen.
+- Added `Workspace.insert_image_after()` and
+  `aioffice workspace insert-image-after` with binary-free revision logs.
+- Added strict insertion schemas, explicit geometry/accessibility capability
+  metadata, CLI overwrite safety, and atomic refusal for invalid or detached inputs.
 - Changed mixed text/drawing paragraphs and complex image cases to explicit opaque
   projections so the semantic layer can no longer hide a picture inside an ordinary
   text node.
@@ -178,7 +190,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.16`.
+- Advanced the AiOffice Document Spec to `0.2-draft.17`.
 
 ## 0.1.0
 

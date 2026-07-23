@@ -56,9 +56,9 @@ as a filesystem or package read request.
 `editable: false` means the image binary and full DrawingML object are not represented
 as generally editable JSON. On an attached native DOCX, compact inspection separately
 advertises
-`supported_operations: ["image.replace", "image.update", "node.remove"]`. This
-keeps the lossless boundary explicit while still exposing the small set of native
-mutations that AiOffice can prove safe.
+`supported_operations: ["image.insert_after", "image.replace", "image.update",
+"node.remove"]`. This keeps the lossless boundary explicit while still exposing the
+small set of native mutations that AiOffice can prove safe.
 
 ## Conservative projection proof
 
@@ -270,6 +270,98 @@ URL, or base64 field inside model-authored JSON would cross the trust boundary a
 make patch replay ambiguous. `Document.replace_image()` and the CLI bind the verified
 bytes to the metadata operation inside one atomic in-memory transaction.
 
+## Addressable inline image insertion
+
+Insertion uses a dedicated binary API because neither a local path nor binary payload
+belongs in model-authored JSON:
+
+```python
+result = document.insert_image_after(
+    "#analysis",
+    "generated/expert-workflow.png",
+    width={"value": 3, "unit": "in"},
+    height={"value": 1.5, "unit": "in"},
+    alt_text="Expert workflow with three approval stages",
+    image_id="expert_workflow",
+    name="Expert workflow",
+    title="Approval workflow",
+    paragraph_style={
+        "alignment": "center",
+        "spacing_before": {"value": 6, "unit": "pt"},
+        "spacing_after": {"value": 8, "unit": "pt"},
+    },
+)
+assert result.success
+result.document.export("inserted.docx")
+```
+
+The contract is deliberately explicit:
+
+- `target` must resolve to one top-level semantic node mapped into
+  `/word/document.xml`;
+- the picture is inserted after the target's last native body element, so a
+  multi-paragraph list remains one valid anchor;
+- `width` and `height` are both required and must fit positive signed 64-bit EMUs;
+- `alt_text` is required and cannot be blank;
+- `image_id` is optional but, when supplied, must be globally unique;
+- `paragraph_style` may set direct paragraph alignment, spacing, indentation,
+  background, and supported borders around the inline picture paragraph;
+- placement is `inline`; floating anchors, wrap modes, crop, rotation and effects are
+  not silently inferred.
+
+The native lowering adds or reuses the content-addressed image part, creates a fresh
+relationship ID, creates a `w:p/w:r/w:drawing/wp:inline` tree, writes identical outer
+and inner extents, generates collision-free `wp:docPr/@id` and `w14:paraId` values,
+applies the requested paragraph style, inserts at the proven body position, and then
+re-runs the conservative projection proof. The operation either returns a fully
+readable `ImageBlock` or leaves the original document unchanged.
+
+If a third-party DOCX has no AiOffice identity manifest, the first successful
+structural insertion also attaches:
+
+- `/customXml/aioffice-manifest.xml`;
+- one root package relationship with the AiOffice manifest relationship type;
+- an `application/xml` content-type override.
+
+That metadata is necessary to restore a caller-selected image ID after standalone
+export and reopen. Existing native IDs are retained; Workspace documents continue to
+keep their external revision identity evidence as well.
+
+The CLI exposes the same required geometry and accessibility inputs:
+
+```bash
+aioffice insert-image-after \
+  existing.docx TARGET replacement.png \
+  --width 3 --width-unit in \
+  --height 1.5 --height-unit in \
+  --alt-text "Expert workflow with three approval stages" \
+  --image-id expert_workflow \
+  --align center \
+  -o inserted.docx
+```
+
+Tracked insertion creates one new workspace revision without storing binary data in
+the patch log:
+
+```python
+result = workspace.insert_image_after(
+    document.id,
+    "#analysis",
+    "replacement.png",
+    width={"value": 3, "unit": "in"},
+    height={"value": 1.5, "unit": "in"},
+    alt_text="Expert workflow",
+    base_revision=document.revision,
+)
+```
+
+The equivalent command is `aioffice workspace insert-image-after` with the same
+width, height and alternative-text flags plus `--root`.
+
+A raw `image.insert_after` JSON operation fails with `BINARY_ASSET_REQUIRED`. This
+keeps asset acquisition, signature validation and package mutation in one trusted
+transaction while leaving the operation metadata explainable to an AI.
+
 ## Deliberate opaque boundary
 
 These cases remain native and explicit `opaque`/read-only projections:
@@ -286,8 +378,8 @@ These cases remain native and explicit `opaque`/read-only projections:
 The boundary is intentionally based on what the semantic layer can prove, not what it
 can approximately display. Unrelated edits preserve every original package part and
 unknown XML. Deleting a top-level projected image deletes its mapped paragraph only;
-orphan cleanup, new image insertion, and replacement outside the proven inline subset
-are not claimed in this release.
+orphan cleanup, insertion outside the proven top-level inline subset, and replacement
+outside the proven inline subset are not claimed in this release.
 
 ## Preview and visual authority
 

@@ -26,6 +26,7 @@ from aioffice.native import (
     build_identity_manifest,
 )
 from aioffice.security import SecurityPolicy
+from aioffice.spec.models import Length, ParagraphStyle
 
 from .models import ArtifactEntry, PatchRecord, WorkspaceIndex
 
@@ -134,6 +135,7 @@ class Workspace:
                 "import",
                 "inspect",
                 "apply",
+                "insert_image_after",
                 "replace_image",
                 "checkout",
                 "reconcile",
@@ -143,6 +145,11 @@ class Workspace:
             "binary_operations": {
                 "image.replace": {
                     "api": "Workspace.replace_image",
+                    "transport": "out_of_band",
+                    "recorded_binary": False,
+                },
+                "image.insert_after": {
+                    "api": "Workspace.insert_image_after",
                     "transport": "out_of_band",
                     "recorded_binary": False,
                 }
@@ -322,6 +329,133 @@ class Workspace:
             "op": "image.replace",
             "target": image_id,
             "asset": deepcopy(replacement_asset),
+        }
+        patch = PatchRecord(
+            base_revision=result.base_revision,
+            result_revision=result.result_revision,
+            operations=[operation],
+            changes=deepcopy(result.changes),
+            diagnostics=[
+                diagnostic.model_dump(mode="json")
+                for diagnostic in result.diagnostics
+            ],
+            fidelity=(
+                result.fidelity.model_dump(mode="json")
+                if result.fidelity is not None
+                else None
+            ),
+            diff=(
+                result.diff.model_dump(mode="json")
+                if result.diff is not None
+                else None
+            ),
+        )
+        self._persist_revision(
+            result.document,
+            result.document.to_bytes("docx"),
+            source_name=entry.source_name,
+            patch=patch,
+            expected_base_revision=result.base_revision,
+        )
+        return result
+
+    def insert_image_after(
+        self,
+        artifact_id: str,
+        target: str,
+        source: bytes | bytearray | memoryview | str | Path | ImageAsset,
+        *,
+        width: Length | Mapping[str, Any],
+        height: Length | Mapping[str, Any],
+        alt_text: str,
+        media_type: str | None = None,
+        image_id: str | None = None,
+        name: str | None = None,
+        title: str | None = None,
+        paragraph_style: ParagraphStyle | Mapping[str, Any] | None = None,
+        dry_run: bool = False,
+        base_revision: int | None = None,
+    ) -> PatchResult:
+        """Insert one image and persist only verified metadata in the log."""
+
+        entry = self._entry(artifact_id)
+        expected_revision = (
+            entry.latest_revision
+            if base_revision is None
+            else base_revision
+        )
+        document = self.open_document(artifact_id)
+        result = document.insert_image_after(
+            target,
+            source,
+            width=width,
+            height=height,
+            alt_text=alt_text,
+            media_type=media_type,
+            image_id=image_id,
+            name=name,
+            title=title,
+            paragraph_style=paragraph_style,
+            dry_run=dry_run,
+            base_revision=expected_revision,
+        )
+        if not result.success or dry_run:
+            return result
+        assert result.document is not None
+        created_ids = result.changes[0].get("created_nodes", [])
+        if (
+            not isinstance(created_ids, list)
+            or len(created_ids) != 1
+            or not isinstance(created_ids[0], str)
+        ):
+            raise WorkspaceError(
+                "Image insertion did not return one created image ID."
+            )
+        created_id = created_ids[0]
+        result_spec = result.document.to_spec()
+        inserted = next(
+            (
+                node
+                for node in result_spec["content"]
+                if node.get("id") == created_id
+                and node.get("type") == "image"
+            ),
+            None,
+        )
+        if inserted is None:
+            raise WorkspaceError(
+                "Image insertion result does not contain its created node."
+            )
+        asset = next(
+            (
+                candidate
+                for candidate in result_spec.get("assets", [])
+                if candidate.get("id") == inserted.get("asset_id")
+            ),
+            None,
+        )
+        if asset is None:
+            raise WorkspaceError(
+                "Image insertion result does not contain its verified asset."
+            )
+        image_metadata = {
+            field_name: deepcopy(inserted[field_name])
+            for field_name in (
+                "id",
+                "width",
+                "height",
+                "name",
+                "alt_text",
+                "title",
+                "paragraph_style",
+            )
+            if field_name in inserted
+        }
+        operation = {
+            "op": "image.insert_after",
+            "target": target,
+            "image": image_metadata,
+            "asset": deepcopy(asset),
         }
         patch = PatchRecord(
             base_revision=result.base_revision,
