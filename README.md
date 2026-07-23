@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev17`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev18`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -24,9 +24,10 @@ parts, structured dynamic fields, explicit table geometry, logical merged cells,
 rich table-cell paragraphs, explicit table/cell border control, paragraph
 background/border surfaces, conservative native image projection, verified asset
 extraction, selective native image metadata and geometry updates, occurrence-scoped
-copy-on-write image replacement, addressable native inline image insertion, semantic
-diffs, isolated LibreOffice/Poppler native rendering, consistent multi-page evidence,
-page occupancy diagnostics, visual-regression contracts, and fidelity reports.
+copy-on-write image replacement, addressable native inline image insertion, direct
+image-paragraph layout formatting, semantic diffs, isolated LibreOffice/Poppler
+native rendering, consistent multi-page evidence, page occupancy diagnostics,
+visual-regression contracts, and fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -126,6 +127,31 @@ exact requested extent. `alt_text` and `title` may be removed with
 records while preserving image bytes and package relationships. It requires the
 attached native DOCX, so a detached JSON snapshot cannot perform this operation.
 
+The projected image ID also addresses its native host paragraph. Reuse
+`paragraph.format` to control layout around an existing picture without touching its
+DrawingML or bytes:
+
+```python
+result = doc.apply([
+    {
+        "op": "paragraph.format",
+        "target": f"#{image['id']}",
+        "set": {
+            "alignment": "center",
+            "spacing_before": {"value": 10, "unit": "pt"},
+            "spacing_after": {"value": 12, "unit": "pt"},
+            "keep_together": True,
+        },
+    }
+])
+assert result.success
+```
+
+The same strict `ParagraphStyle` fields and `set`/`clear` semantics used by text
+paragraphs apply to the image paragraph, including indentation, page-flow controls,
+solid background, and supported physical borders. The operation appears on each
+projected image's `supported_operations` list.
+
 Image binaries also use an explicit out-of-band write path:
 
 ```python
@@ -221,9 +247,9 @@ commit is refused when native identity is ambiguous. The detailed invariants are
 
 Native DOCX lowering in this development version supports `text.replace`,
 `paragraph.format`, `text.format`, `node.remove`, `style.define`, `style.apply`,
-`style.format`, `section.format`, `field.update`, `table.format`, and
-`table.column.format`, and `table.cell.format`. Ask the artifact before planning
-an edit:
+`style.format`, `section.format`, `field.update`, `image.insert_after`,
+`image.replace`, `image.update`, `table.format`, `table.column.format`, and
+`table.cell.format`. Ask the artifact before planning an edit:
 
 ```python
 capabilities = doc.capabilities()
@@ -708,10 +734,10 @@ preview = result.document
 Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `node.append`, `node.insert_after`, `node.remove`, `node.update`, `style.define`,
 `style.apply`, `style.format`, `section.format`, `field.update`, `table.format`, and
-`table.column.format`, and `table.cell.format`. Imported DOCX documents expose the
-native-safe subset reported by `capabilities()`. Selectors use stable content,
-section, header/footer block, field, table, column, row, cell, or rich cell-paragraph
-identities in this release.
+`table.column.format`, and `table.cell.format`. Imported DOCX documents additionally
+expose safe native image operations reported by `capabilities()`. Selectors use stable
+content, section, header/footer block, field, image, table, column, row, cell, or rich
+cell-paragraph identities in this release.
 
 ## CLI
 

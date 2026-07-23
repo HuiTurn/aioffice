@@ -57,8 +57,8 @@ as a filesystem or package read request.
 as generally editable JSON. On an attached native DOCX, compact inspection separately
 advertises
 `supported_operations: ["image.insert_after", "image.replace", "image.update",
-"node.remove"]`. This keeps the lossless boundary explicit while still exposing the
-small set of native mutations that AiOffice can prove safe.
+"paragraph.format", "node.remove"]`. This keeps the lossless boundary explicit while
+still exposing the small set of native mutations that AiOffice can prove safe.
 
 ## Conservative projection proof
 
@@ -176,6 +176,51 @@ The operation fails atomically when the target is not a supported image, the req
 is empty or malformed, a dimension is cleared, metadata is blank or invalid XML text,
 the geometry is unsafe, or the native package is detached. A detached JSON snapshot
 may still be inspected but cannot authorize a native DrawingML mutation.
+
+## Image paragraph layout
+
+A projected image is one picture occurrence hosted by one native paragraph. Its
+stable image ID therefore also provides a safe target for `paragraph.format`:
+
+```python
+result = document.apply([
+    {
+        "op": "paragraph.format",
+        "target": "#image_3A17C04E",
+        "set": {
+            "alignment": "center",
+            "spacing_before": {"value": 10, "unit": "pt"},
+            "spacing_after": {"value": 12, "unit": "pt"},
+            "indent_left": {"value": 18, "unit": "pt"},
+            "indent_right": {"value": 18, "unit": "pt"},
+            "keep_together": True,
+        },
+    }
+])
+assert result.success
+```
+
+This is the same `ParagraphStyle` and selective `set`/`clear` contract used for an
+ordinary paragraph. Supported fields cover alignment, solid sRGB background, four
+physical borders, before/after and line spacing, left/right/first-line/hanging
+indentation, keep-with-next, keep-together, page-break-before, widow control, and
+outline level. Every length keeps an explicit unit.
+
+The native lowering resolves the image's trusted paragraph reference and mutates only
+the requested supported `w:pPr` properties. It does not alter `w:drawing`,
+`wp:inline`, either DrawingML extent, `a:blip`, the image relationship, or the image
+part. Clearing a field removes only its supported direct native value so normal Word
+style inheritance can apply again. Unknown paragraph-property XML is retained.
+
+`text.format` remains invalid for an image because the conservative image paragraph
+has no model-editable text. Complex or opaque drawings do not gain this capability.
+Invalid styles, detached packages, stale identities, or non-paragraph native targets
+fail the complete Patch atomically.
+
+The operation uses ordinary model-authored JSON, so the existing
+`aioffice apply` and `aioffice workspace apply` commands require no special binary
+channel. Capability metadata exposes `native_layout_operation`,
+`native_layout_fields`, and `native_layout_target` for planning.
 
 ## Out-of-band binary replacement
 

@@ -74,8 +74,8 @@ overwrite unless the caller explicitly opts in.
 
 The current DOCX native layer lowers `text.replace`, `paragraph.format`,
 `text.format`, `node.remove`, `style.define`, `style.apply`, `style.format`,
-`section.format`, `field.update`, `table.format`, `table.column.format`, and
-`table.cell.format`.
+`section.format`, `field.update`, `image.insert_after`, `image.replace`,
+`image.update`, `table.format`, `table.column.format`, and `table.cell.format`.
 Text replacement can cross Word run boundaries while retaining run properties and
 unknown XML. Paragraph and text formatting mutate only selected supported
 `w:pPr` / `w:rPr` properties and preserve unrelated or unknown children. Character
@@ -84,6 +84,14 @@ selected `w:t` content. If a partial boundary run contains unsupported inline
 children, the complete Patch is refused rather than duplicating or dropping them.
 List nodes may reference multiple native paragraphs, and removing a list removes
 that complete native range atomically.
+
+Conservatively projected inline images reuse `paragraph.format` through their stable
+image IDs. This changes only selected host-paragraph `w:pPr` properties for
+alignment, spacing, indentation, page flow, solid shading, and supported borders;
+the DrawingML tree, relationship, binary part, extent, and image identity remain
+unchanged. Image insertion and replacement keep binary payloads outside JSON through
+dedicated bounded APIs, while `image.update` selectively patches accessibility
+metadata and coordinated extents.
 
 Supported paragraph surfaces include solid sRGB `w:shd` fills and four physical
 `w:pBdr` edges. Border edges inherit independently through defaults and named styles.

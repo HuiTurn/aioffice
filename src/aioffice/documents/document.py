@@ -739,6 +739,7 @@ class Document:
                                 "image.insert_after",
                                 "image.replace",
                                 "image.update",
+                                "paragraph.format",
                                 "node.remove",
                             ]
                             if self._native is not None
@@ -1085,6 +1086,11 @@ class Document:
                 "insert_alt_text": "required",
                 "insert_target": "mapped_top_level_body_node",
                 "insert_supports_paragraph_style": True,
+                "native_layout_operation": "paragraph.format",
+                "native_layout_fields": sorted(
+                    ParagraphStyle.model_fields
+                ),
+                "native_layout_target": "projected_image_id",
                 "cli_extract": (
                     "aioffice extract-image INPUT IMAGE_ID -o OUTPUT"
                 ),
@@ -2686,6 +2692,19 @@ class Document:
                 "image.replace",
             }
         )
+        image_ids = {
+            node.id
+            for node in self._spec.content
+            if isinstance(node, ImageBlock)
+        }
+        image_layout_requested = any(
+            operation.get("op") == "paragraph.format"
+            and isinstance(operation.get("target"), str)
+            and str(operation["target"]).removeprefix("#") in image_ids
+            for operation in operations
+        )
+        if image_layout_requested:
+            native_image_operations.add("paragraph.format(image)")
         if self._native is None and native_image_operations:
             diagnostic = Diagnostic(
                 severity=Severity.ERROR,
@@ -4885,7 +4904,10 @@ class Document:
 
         if operation_name in {"paragraph.format", "text.format"}:
             _, node = Document._find_node(payload, operation.get("target"))
-            if node["type"] not in {"heading", "paragraph"}:
+            supported_node_types = {"heading", "paragraph"}
+            if operation_name == "paragraph.format":
+                supported_node_types.add("image")
+            if node["type"] not in supported_node_types:
                 raise _PatchFailure(
                     Diagnostic(
                         severity=Severity.ERROR,

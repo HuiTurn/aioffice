@@ -275,7 +275,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.17")
+        self.assertEqual(spec["spec_version"], "0.2-draft.18")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -318,6 +318,7 @@ class DocxImageTests(unittest.TestCase):
                 "image.insert_after",
                 "image.replace",
                 "image.update",
+                "paragraph.format",
                 "node.remove",
             ],
         )
@@ -346,6 +347,14 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             capabilities["insert_alt_text"],
             "required",
+        )
+        self.assertEqual(
+            capabilities["native_layout_operation"],
+            "paragraph.format",
+        )
+        self.assertIn(
+            "alignment",
+            capabilities["native_layout_fields"],
         )
         self.assertEqual(
             capabilities["native_update_fields"],
@@ -616,6 +625,285 @@ class DocxImageTests(unittest.TestCase):
             "Updated accessible diagram",
         )
         self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+
+    def test_paragraph_format_controls_projected_image_layout(self) -> None:
+        source = _image_document(preceding_text="Before")
+        document = Document.from_docx(source)
+        image = next(
+            node
+            for node in document.to_spec()["content"]
+            if node["type"] == "image"
+        )
+        operation = {
+            "op": "paragraph.format",
+            "target": f"#{image['id']}",
+            "set": {
+                "alignment": "center",
+                "background_color": "#EFF4FB",
+                "borders": {
+                    "top": {
+                        "style": "single",
+                        "width": {"value": 1, "unit": "pt"},
+                        "color": "#1F4E79",
+                        "space": {"value": 2, "unit": "pt"},
+                    },
+                    "bottom": {
+                        "style": "single",
+                        "width": {"value": 1, "unit": "pt"},
+                        "color": "#1F4E79",
+                        "space": {"value": 2, "unit": "pt"},
+                    },
+                },
+                "spacing_before": {"value": 12, "unit": "pt"},
+                "spacing_after": {"value": 10, "unit": "pt"},
+                "indent_left": {"value": 18, "unit": "pt"},
+                "indent_right": {"value": 18, "unit": "pt"},
+                "keep_together": True,
+            },
+        }
+        result = document.apply([operation])
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        self.assertEqual(
+            result.fidelity.affected_parts if result.fidelity else None,
+            ["/customXml/aioffice-manifest.xml", "/word/document.xml"],
+        )
+        self.assertEqual(
+            result.changes[0]["operation"],
+            "paragraph.format",
+        )
+        self.assertEqual(
+            {
+                change["path"]
+                for change in result.changes[0]["property_changes"]
+            },
+            {
+                "paragraph_style.alignment",
+                "paragraph_style.background_color",
+                "paragraph_style.borders",
+                "paragraph_style.indent_left",
+                "paragraph_style.indent_right",
+                "paragraph_style.keep_together",
+                "paragraph_style.spacing_after",
+                "paragraph_style.spacing_before",
+            },
+        )
+        assert result.document is not None
+        formatted_image = next(
+            node
+            for node in result.document.to_spec()["content"]
+            if node["id"] == image["id"]
+        )
+        self.assertEqual(
+            formatted_image["paragraph_style"]["alignment"],
+            "center",
+        )
+        self.assertEqual(
+            formatted_image["paragraph_style"]["background_color"],
+            "#EFF4FB",
+        )
+        self.assertEqual(result.document.image_bytes(image["id"]), PNG)
+        self.assertEqual(
+            formatted_image["asset_id"],
+            image["asset_id"],
+        )
+
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            before_root = parse_xml(before.read("word/document.xml"))
+            after_root = parse_xml(after.read("word/document.xml"))
+            for name in before.namelist():
+                if name not in {
+                    "word/document.xml",
+                    "customXml/aioffice-manifest.xml",
+                }:
+                    self.assertEqual(after.read(name), before.read(name), name)
+        before_drawing = before_root.find(f".//{_q(W, 'drawing')}")
+        after_drawing = after_root.find(f".//{_q(W, 'drawing')}")
+        assert before_drawing is not None
+        assert after_drawing is not None
+        self.assertEqual(
+            ET.tostring(after_drawing),
+            ET.tostring(before_drawing),
+        )
+        image_paragraph = next(
+            paragraph
+            for paragraph in after_root.findall(
+                f"./{_q(W, 'body')}/{_q(W, 'p')}"
+            )
+            if paragraph.find(f".//{_q(W, 'drawing')}") is not None
+        )
+        paragraph_properties = image_paragraph.find(_q(W, "pPr"))
+        assert paragraph_properties is not None
+        alignment = paragraph_properties.find(_q(W, "jc"))
+        spacing = paragraph_properties.find(_q(W, "spacing"))
+        indentation = paragraph_properties.find(_q(W, "ind"))
+        shading = paragraph_properties.find(_q(W, "shd"))
+        borders = paragraph_properties.find(_q(W, "pBdr"))
+        assert alignment is not None
+        assert spacing is not None
+        assert indentation is not None
+        assert shading is not None
+        assert borders is not None
+        self.assertEqual(alignment.get(_q(W, "val")), "center")
+        self.assertEqual(
+            (spacing.get(_q(W, "before")), spacing.get(_q(W, "after"))),
+            ("240", "200"),
+        )
+        self.assertEqual(
+            (indentation.get(_q(W, "left")), indentation.get(_q(W, "right"))),
+            ("360", "360"),
+        )
+        self.assertEqual(shading.get(_q(W, "fill")), "EFF4FB")
+        self.assertIsNotNone(paragraph_properties.find(_q(W, "keepLines")))
+        self.assertEqual(
+            [
+                edge.tag
+                for edge in borders
+            ],
+            [_q(W, "top"), _q(W, "bottom")],
+        )
+
+        reopened = Document.from_docx(output)
+        reopened_image = next(
+            node
+            for node in reopened.to_spec()["content"]
+            if node["id"] == image["id"]
+        )
+        self.assertEqual(
+            reopened_image["paragraph_style"],
+            formatted_image["paragraph_style"],
+        )
+        self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+
+        cleared = reopened.apply(
+            [
+                {
+                    "op": "paragraph.format",
+                    "target": image["id"],
+                    "clear": list(operation["set"]),
+                }
+            ]
+        )
+        self.assertTrue(cleared.success, cleared.model_dump())
+        assert cleared.document is not None
+        cleared_image = next(
+            node
+            for node in cleared.document.to_spec()["content"]
+            if node["id"] == image["id"]
+        )
+        self.assertNotIn("paragraph_style", cleared_image)
+        self.assertEqual(cleared.document.image_bytes(image["id"]), PNG)
+
+        for invalid_operation in (
+            {
+                "op": "paragraph.format",
+                "target": image["id"],
+                "set": {"alignment": "diagonal"},
+            },
+            {
+                "op": "text.format",
+                "target": image["id"],
+                "set": {"bold": True},
+            },
+        ):
+            with self.subTest(operation=invalid_operation):
+                invalid = document.apply([invalid_operation])
+                self.assertFalse(invalid.success)
+                self.assertEqual(
+                    invalid.result_revision,
+                    document.revision,
+                )
+        self.assertEqual(document.to_bytes("docx"), source)
+        detached = Document.from_spec(document.to_spec())
+        detached_result = detached.apply([operation])
+        self.assertFalse(detached_result.success)
+        self.assertEqual(
+            detached_result.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+
+    def test_image_paragraph_format_uses_cli_and_workspace_patch_paths(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "source.docx"
+            patch_path = root / "patch.json"
+            output_path = root / "formatted.docx"
+            input_path.write_bytes(_image_document())
+            document = Document.from_docx(input_path)
+            image_id = document.to_spec()["content"][0]["id"]
+            operation = {
+                "op": "paragraph.format",
+                "target": image_id,
+                "set": {
+                    "alignment": "right",
+                    "spacing_before": {"value": 7, "unit": "pt"},
+                    "spacing_after": {"value": 9, "unit": "pt"},
+                },
+            }
+            patch_path.write_text(
+                json.dumps([operation]),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "apply",
+                        str(input_path),
+                        str(patch_path),
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            report = json.loads(stdout.getvalue())
+            self.assertTrue(report["success"])
+            cli_image = Document.from_docx(output_path).to_spec()["content"][0]
+            self.assertEqual(
+                cli_image["paragraph_style"]["alignment"],
+                "right",
+            )
+
+            workspace = Workspace.init(root / "project")
+            tracked = workspace.import_document(input_path)
+            workspace_result = workspace.apply(
+                tracked.id,
+                [operation],
+                base_revision=tracked.revision,
+            )
+            self.assertTrue(
+                workspace_result.success,
+                workspace_result.model_dump(),
+            )
+            workspace_image = workspace.open_document(
+                tracked.id
+            ).to_spec()["content"][0]
+            self.assertEqual(
+                workspace_image["paragraph_style"]["spacing_before"],
+                {"value": 7.0, "unit": "pt"},
+            )
+            workspace_patch = (
+                root
+                / "project"
+                / ".aioffice"
+                / "artifacts"
+                / tracked.id
+                / "patches"
+                / f"{workspace_result.result_revision:08d}.json"
+            )
+            persisted = json.loads(
+                workspace_patch.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                persisted["operations"],
+                [operation],
+            )
 
     def test_single_dimension_resize_preserves_aspect_ratio(self) -> None:
         document = Document.from_docx(_image_document())

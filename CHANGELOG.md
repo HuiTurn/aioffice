@@ -178,6 +178,17 @@
   `aioffice workspace insert-image-after` with binary-free revision logs.
 - Added strict insertion schemas, explicit geometry/accessibility capability
   metadata, CLI overwrite safety, and atomic refusal for invalid or detached inputs.
+- Extended `paragraph.format` to projected native image IDs so an AI can adjust the
+  picture paragraph's alignment, spacing, indentation, page-flow controls, solid
+  background, and supported physical borders through the existing strict style
+  contract.
+- Preserved the complete DrawingML tree, image relationship, binary asset, stable
+  image ID, and unrelated OPC parts while selectively patching only requested
+  `w:pPr` properties.
+- Exposed image layout fields and `paragraph.format` in per-image and document
+  capabilities, including the same paths through JSON Patch, CLI, and Workspace.
+- Added set/clear round-trip coverage, native-minimality proof, invalid-style atomic
+  refusal, real patch persistence, and image-binary stability checks.
 - Changed mixed text/drawing paragraphs and complex image cases to explicit opaque
   projections so the semantic layer can no longer hide a picture inside an ordinary
   text node.
@@ -190,7 +201,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.17`.
+- Advanced the AiOffice Document Spec to `0.2-draft.18`.
 
 ## 0.1.0
 

@@ -36,6 +36,7 @@ from aioffice.formats.docx_images import (
     insert_simple_inline_image_after,
     patch_simple_inline_image,
     replace_simple_inline_image,
+    simple_inline_image,
 )
 from aioffice.formats.docx_section import (
     native_ref_for_section,
@@ -1316,6 +1317,26 @@ def apply_docx_operations(
                 raise NativePackageError(
                     "paragraph.format requires a native reference to one w:p element."
                 )
+            target_id = _target_id(operation.get("target"))
+            target_is_image = any(
+                isinstance(node, ImageBlock)
+                and node.id == target_id
+                for node in spec.content
+            )
+            original_image = (
+                simple_inline_image(
+                    updated,
+                    elements[0],
+                    source_part=source_ref.part_uri,
+                )
+                if target_is_image
+                else None
+            )
+            if target_is_image and original_image is None:
+                raise NativePackageError(
+                    "paragraph.format image target no longer matches its "
+                    "conservative native projection."
+                )
             fields = set(operation.get("set", {})) | set(operation.get("clear", []))
             try:
                 style = ParagraphStyle.model_validate(operation.get("set", {}))
@@ -1324,6 +1345,14 @@ def apply_docx_operations(
                     f"Could not lower paragraph.format values: {error}"
                 ) from error
             patch_paragraph_style(elements[0], style, fields)
+            if target_is_image and simple_inline_image(
+                updated,
+                elements[0],
+                source_part=source_ref.part_uri,
+            ) != original_image:
+                raise NativePackageError(
+                    "paragraph.format changed the projected native picture."
+                )
             changed_xml_parts.add(source_ref.part_uri)
         elif operation_name == "text.format":
             if len(elements) != 1 or elements[0].tag != _q(W, "p"):
