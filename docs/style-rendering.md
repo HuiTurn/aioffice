@@ -116,7 +116,7 @@ references and revision bookkeeping are excluded by default; pass
 Render results declare:
 
 - provider and provider version;
-- output format and content hash;
+- output format, byte size, and content hash;
 - cache key inputs;
 - `fidelity`: `approximate` or `native`;
 - verification status and diagnostics.
@@ -125,15 +125,43 @@ The built-in `semantic-html` provider is an inspectable preview only. It helps a
 review hierarchy, content, and declared styling, but it is not authoritative for
 Word pagination, font substitution, line breaking, or floating-object placement.
 
-`compare_raster_images()` provides deterministic PNG regression metrics for current
-and future native render providers. It refuses dimension changes instead of resizing
-them away, and reports normalized mean error plus changed-pixel ratio. Install the
-optional dependency with:
+The `libreoffice` provider compiles the current semantic or preserved native DOCX
+through a headless LibreOffice process with a new isolated user profile for every
+job. `format="pdf"` returns the complete rendered PDF. `format="png"` first renders
+the same PDF, then uses Poppler to rasterize one explicit page:
+
+```python
+pdf = document.render(format="pdf", provider="libreoffice")
+first_page = document.render(
+    format="png",
+    provider="libreoffice",
+    options={"page_number": 1, "dpi": 144, "timeout_seconds": 60},
+)
+```
+
+LibreOffice, `pdfinfo`, and `pdftoppm` are system executables rather than Python
+package dependencies. `document.capabilities()` reports whether they are discoverable
+and which native formats are available. A missing executable, timeout, invalid PDF or
+PNG, zero-page PDF, or out-of-range page request raises `RenderingError`; AiOffice
+never silently falls back to semantic HTML.
+
+Native result metadata includes source DOCX and rendered PDF hashes, page count,
+selected page and DPI, PNG pixel dimensions, renderer/rasterizer versions, platform,
+and a fontconfig inventory hash when available. A caller managing fonts independently
+can provide `font_environment_hash`.
+
+Successful native rendering reports `fidelity="native"` because layout came from the
+declared office renderer, but `verification_status="unverified"` because no visual
+review has happened yet. Provider identity matters: LibreOffice evidence is not a
+claim of pixel identity with every Microsoft Word version.
+
+`compare_raster_images()` provides deterministic PNG regression metrics. It refuses
+dimension changes instead of resizing them away, and reports normalized mean error
+plus changed-pixel ratio. Install the optional Pillow dependency with:
 
 ```bash
 pip install "aioffice[render]"
 ```
 
-The next rendering milestone is a native Word/LibreOffice provider that returns page
-images plus font-environment metadata. Until that provider exists, AiOffice requires
-native visual verification after layout-affecting DOCX patches.
+See [the native rendering contract](native-rendering.md) for the CLI, cache, security,
+and review boundary.

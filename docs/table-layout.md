@@ -89,4 +89,4 @@ for planning. It is approximate and is not evidence of Word pagination.
 Validation warns when explicit column widths or an exact preferred width exceed the
 active section's printable width. Fixed-layout tables also warn when a column width
 is missing. Final pagination, repeated headers, and exact line wrapping still
-require rendering by a native office engine.
+require the `libreoffice` native provider or another declared office engine.

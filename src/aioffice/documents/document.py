@@ -6,7 +6,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence, cast
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -39,7 +39,14 @@ from aioffice.operations.text import (
     replace_node_text,
     resolve_text_selection,
 )
-from aioffice.rendering import RenderOptions, RenderResult, render_semantic_html
+from aioffice.rendering import (
+    LIBREOFFICE_PROVIDER,
+    RenderOptions,
+    RenderResult,
+    libreoffice_render_capabilities,
+    render_docx_libreoffice,
+    render_semantic_html,
+)
 from aioffice.security import SecurityPolicy
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
@@ -516,19 +523,34 @@ class Document:
         """Render through an explicit provider with declared layout fidelity."""
 
         normalized_format = format.lower().lstrip(".")
-        if normalized_format != "html" or provider != "semantic-html":
-            raise UnsupportedFormatError(
-                "This release provides only provider='semantic-html', format='html'. "
-                "Its result is an approximate preview, not native Word layout evidence."
-            )
         active_options = (
             options
             if isinstance(options, RenderOptions)
             else RenderOptions.model_validate(options or {})
         )
-        return render_semantic_html(self._spec, active_options)
+        if provider == "semantic-html":
+            if normalized_format != "html":
+                raise UnsupportedFormatError(
+                    "provider='semantic-html' supports only format='html'."
+                )
+            return render_semantic_html(self._spec, active_options)
+        if provider == LIBREOFFICE_PROVIDER:
+            if normalized_format not in {"pdf", "png"}:
+                raise UnsupportedFormatError(
+                    "provider='libreoffice' supports format='pdf' or format='png'."
+                )
+            return render_docx_libreoffice(
+                self.to_bytes("docx"),
+                format=cast(Literal["pdf", "png"], normalized_format),
+                options=active_options,
+            )
+        raise UnsupportedFormatError(
+            f"Unknown render provider {provider!r}; use 'semantic-html' or "
+            f"{LIBREOFFICE_PROVIDER!r}."
+        )
 
     def capabilities(self) -> dict[str, Any]:
+        native_render = libreoffice_render_capabilities()
         operations = [
             "text.replace",
             "paragraph.format",
@@ -584,9 +606,12 @@ class Document:
                         "formats": ["html"],
                         "fidelity": "approximate",
                         "verification_status": "preview_only",
-                    }
+                    },
+                    native_render,
                 ],
-                "native_visual_verification_available": False,
+                "native_visual_verification_available": native_render[
+                    "available"
+                ],
             },
             "operations": operations,
             "selectors": [

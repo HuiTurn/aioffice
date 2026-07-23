@@ -74,6 +74,44 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     capabilities.add_argument("input", type=Path)
 
+    render = subparsers.add_parser(
+        "render",
+        help="Render semantic preview or native-compatible page evidence.",
+    )
+    render.add_argument("input", type=Path)
+    render.add_argument(
+        "--provider",
+        choices=("semantic-html", "libreoffice"),
+        help="Defaults to semantic-html for HTML and libreoffice for PDF/PNG.",
+    )
+    render.add_argument(
+        "--format",
+        choices=("html", "pdf", "png"),
+        default="html",
+    )
+    render.add_argument("-o", "--output", required=True, type=Path)
+    render.add_argument(
+        "--page",
+        type=int,
+        help="One-based page number for PNG output; defaults to page 1.",
+    )
+    render.add_argument(
+        "--dpi",
+        type=int,
+        default=144,
+        help="PNG raster resolution from 72 to 600 DPI.",
+    )
+    render.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="Per-command native renderer timeout in seconds.",
+    )
+    render.add_argument(
+        "--font-environment-hash",
+        help="Caller-supplied font environment fingerprint for reproducible evidence.",
+    )
+
     validate = subparsers.add_parser("validate", help="Validate a document.")
     validate.add_argument("input", type=Path)
     validate.add_argument("--json", action="store_true", dest="as_json")
@@ -295,6 +333,29 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "capabilities":
         document = open_artifact(args.input)
         _json_dump(document.capabilities())
+        return 0
+
+    if args.command == "render":
+        if args.page is not None and args.format != "png":
+            raise ValueError("--page is valid only with --format png.")
+        document = open_artifact(args.input)
+        provider = args.provider or (
+            "semantic-html" if args.format == "html" else "libreoffice"
+        )
+        result = document.render(
+            format=args.format,
+            provider=provider,
+            options={
+                "dpi": args.dpi,
+                "page_number": args.page,
+                "timeout_seconds": args.timeout,
+                "font_environment_hash": args.font_environment_hash,
+            },
+        )
+        output = result.write(args.output)
+        summary = result.summary()
+        summary["output"] = str(output)
+        _json_dump(summary)
         return 0
 
     if args.command == "validate":

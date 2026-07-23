@@ -78,6 +78,8 @@ paragraph formatting and whole-inline-content text formatting remain available.
 
 Semantic HTML and Markdown use the cached result when one exists and otherwise show
 a field placeholder. These are approximate previews, not pagination evidence.
-Expert layout verification should render the DOCX through a native-compatible engine
+Expert layout verification should use the `libreoffice` provider to render the DOCX
 and inspect the resulting pages. AiOffice therefore reports field presence and the
-native update policy separately from the preview text.
+native update policy separately from the preview text. LibreOffice evidence remains
+provider-specific; fields marked dirty may still require the target office
+application to refresh cached values.

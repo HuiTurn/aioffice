@@ -135,7 +135,35 @@ class CliTests(unittest.TestCase):
                 "alignment",
                 capabilities["formatting"]["paragraph_properties"],
             )
+            render_providers = {
+                provider["name"]: provider
+                for provider in capabilities["render"]["providers"]
+            }
+            self.assertIn("semantic-html", render_providers)
+            self.assertIn("libreoffice", render_providers)
             self.assertTrue(capabilities["roundtrip"]["noop_exact"])
+
+            rendered_html = root / "rendered.html"
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(
+                    main(
+                        [
+                            "render",
+                            str(source),
+                            "--format",
+                            "html",
+                            "--output",
+                            str(rendered_html),
+                        ]
+                    ),
+                    0,
+                )
+            render_summary = json.loads(stdout.getvalue())
+            self.assertEqual(render_summary["provider"], "semantic-html")
+            self.assertEqual(render_summary["output"], str(rendered_html))
+            self.assertNotIn("content", render_summary)
+            self.assertTrue(rendered_html.read_bytes().startswith(b"<!doctype html>"))
 
             patch = root / "patch.json"
             patch.write_text(

@@ -16,13 +16,14 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev9`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev10`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
 parts, structured dynamic fields, explicit table geometry, logical merged cells,
-rich table-cell paragraphs, semantic diffs, render contracts, and fidelity reports.
-Workbook, presentation, PDF, native visual rendering, and MCP remain planned.
+rich table-cell paragraphs, semantic diffs, isolated LibreOffice/Poppler native
+rendering, page evidence, visual-regression contracts, and fidelity reports.
+Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
 
@@ -448,10 +449,37 @@ read-only text projection while their native XML remains intact. See
 [the table layout contract](docs/table-layout.md) and
 [the table cell contract](docs/table-cells.md).
 
-`doc.render()` currently returns a semantic HTML preview whose contract explicitly
-reports `fidelity="approximate"` and `verification_status="preview_only"`. It must
-not be treated as proof of Word pagination. See
-[style, diff, and rendering contracts](docs/style-rendering.md).
+`doc.render()` defaults to a semantic HTML preview whose contract explicitly reports
+`fidelity="approximate"` and `verification_status="preview_only"`. A local
+LibreOffice and Poppler installation enables native-compatible PDF and page PNG
+evidence:
+
+```python
+pdf = doc.render(format="pdf", provider="libreoffice")
+pdf.write("report-render.pdf")
+assert pdf.metadata["page_count"] >= 1
+
+page = doc.render(
+    format="png",
+    provider="libreoffice",
+    options={"page_number": 1, "dpi": 144},
+)
+page.write("report-page-1.png")
+```
+
+Each job uses an isolated LibreOffice user profile and reports engine versions,
+source/output hashes, page count, font-environment hash, page dimensions, and
+diagnostics. Native evidence still reports `verification_status="unverified"`:
+successful rendering proves that inspectable pages exist, not that an aesthetic
+review has passed. See [the native rendering contract](docs/native-rendering.md)
+and [style, diff, and rendering contracts](docs/style-rendering.md).
+
+The equivalent CLI workflow is:
+
+```bash
+aioffice render report.docx --format pdf -o report-render.pdf
+aioffice render report.docx --format png --page 1 --dpi 144 -o report-page-1.png
+```
 
 You can also create a document directly from the strict spec:
 

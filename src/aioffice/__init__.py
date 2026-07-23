@@ -47,10 +47,12 @@ from .spec import (
 )
 from .styles import ResolvedNamedStyle, resolve_named_style
 from .rendering import (
+    LIBREOFFICE_PROVIDER,
     RenderOptions,
     RenderResult,
     VisualComparison,
     compare_raster_images,
+    libreoffice_render_capabilities,
 )
 from .workspace import Workspace
 
@@ -74,6 +76,7 @@ __all__ = [
     "FidelityReport",
     "HeaderFooterBindings",
     "HeaderFooterPart",
+    "LIBREOFFICE_PROVIDER",
     "NativePackageError",
     "NamedStyle",
     "PageSize",
@@ -106,6 +109,7 @@ __all__ = [
     "WorkspaceError",
     "__version__",
     "compare_raster_images",
+    "libreoffice_render_capabilities",
     "new_id",
     "open",
     "open_artifact",

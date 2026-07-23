@@ -63,5 +63,5 @@ to reusable package parts and have inheritance semantics. See
 Semantic HTML uses page dimensions, margins, section breaks, and CSS multi-column
 hints to make page intent inspectable. It remains an approximate preview:
 font metrics, pagination, fields, floating objects, headers/footers, and Word's
-layout engine can change the native result. Only a future native render provider and
-visual comparison may be treated as pagination evidence.
+layout engine can change the native result. Use the `libreoffice` provider for
+provider-specific PDF/PNG pagination evidence and page-level visual comparison.

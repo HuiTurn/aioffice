@@ -94,5 +94,5 @@ row, duplicate identities, and uncovered logical grid positions before generatio
 Semantic HTML uses `colspan`, `rowspan`, stable cell/paragraph IDs, cell padding,
 vertical alignment, no-wrap, and fill color. Markdown necessarily flattens merged
 cells and rich paragraphs to display text. Neither preview proves native pagination,
-line wrapping, font substitution, or fit-text behavior; those require a native
-office renderer.
+line wrapping, font substitution, or fit-text behavior; use the `libreoffice`
+provider to create inspectable native-compatible PDF/PNG evidence.

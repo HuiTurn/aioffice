@@ -18,6 +18,9 @@ class RenderOptions(BaseModel):
     include_document_metadata: bool = True
     locale: str | None = None
     font_environment_hash: str | None = None
+    dpi: int = Field(default=144, ge=72, le=600)
+    page_number: int | None = Field(default=None, ge=1)
+    timeout_seconds: float = Field(default=60.0, gt=0, le=300)
 
 
 class RenderResult(BaseModel):
@@ -30,6 +33,7 @@ class RenderResult(BaseModel):
     fidelity: Literal["approximate", "native"]
     verification_status: Literal["preview_only", "unverified", "verified"]
     content: bytes = Field(repr=False, exclude=True)
+    content_size: int = Field(ge=0)
     content_sha256: str
     cache_key: str
     diagnostics: list[Diagnostic] = Field(default_factory=list)
@@ -67,6 +71,7 @@ class RenderResult(BaseModel):
             fidelity=fidelity,
             verification_status=verification_status,
             content=content,
+            content_size=len(content),
             content_sha256=hashlib.sha256(content).hexdigest(),
             cache_key=hashlib.sha256(cache_material).hexdigest(),
             diagnostics=diagnostics or [],

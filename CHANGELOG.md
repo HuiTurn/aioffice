@@ -32,7 +32,7 @@
   through inspect/capabilities.
 - Added stable semantic document diffs and per-property format Patch results.
 - Added render contracts that distinguish approximate previews from native evidence.
-- Added optional PNG visual-regression metrics for future native render providers.
+- Added optional PNG visual-regression metrics for native render providers.
 - Added strict, ordered page and section models with standard/custom paper sizes,
   orientation, margins, gutter, header/footer distances, equal or unequal columns,
   section start types, vertical alignment, and first-page behavior.
@@ -87,11 +87,22 @@
   body-table cells.
 - Added conservative read-only fallback for cells containing drawings, nested tables,
   dynamic fields, malformed content, or an unprovable logical grid.
+- Added a native-compatible LibreOffice render provider for DOCX-to-PDF evidence.
+- Added Poppler page rasterization with explicit one-based page selection and
+  bounded 72–600 DPI PNG output.
+- Added isolated per-render LibreOffice user profiles, external-command timeouts,
+  output validation, page-count discovery, and explicit missing-tool failures.
+- Added render evidence metadata for source/PDF/content hashes, engine versions,
+  page count, page number, pixel dimensions, platform, and font-environment hashes.
+- Added `aioffice render` with structured JSON summaries and dynamic render-provider
+  capability discovery.
+- Kept successful native evidence `unverified` until visual or regression review,
+  so renderer success cannot be mistaken for aesthetic approval.
 - Serialized OPC content-type and relationship control parts with default package
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.9`.
+- Advanced the AiOffice Document Spec to `0.2-draft.10`.
 
 ## 0.1.0
 
