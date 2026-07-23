@@ -141,7 +141,22 @@ class Workspace:
                 "reconcile",
                 "export",
             ],
-            "patch_operations": ["text.replace", "node.remove"],
+            "patch_operations": [
+                "text.replace",
+                "paragraph.format",
+                "text.format",
+                "node.move_after",
+                "node.remove",
+                "style.apply",
+                "style.define",
+                "style.format",
+                "section.format",
+                "field.update",
+                "image.update",
+                "table.format",
+                "table.column.format",
+                "table.cell.format",
+            ],
             "binary_operations": {
                 "image.replace": {
                     "api": "Workspace.replace_image",

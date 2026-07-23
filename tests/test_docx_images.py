@@ -275,7 +275,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.18")
+        self.assertEqual(spec["spec_version"], "0.2-draft.19")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -1722,6 +1722,134 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened.image_bytes("third_party_chart"),
             JPEG,
+        )
+
+    def test_move_image_relative_content_attaches_third_party_identity(
+        self,
+    ) -> None:
+        source = _image_document(preceding_text="Before")
+        with ZipFile(io.BytesIO(source)) as archive:
+            root_relationships = parse_xml(
+                archive.read("_rels/.rels")
+            )
+            content_types = parse_xml(
+                archive.read("[Content_Types].xml")
+            )
+        for relationship in list(root_relationships):
+            if (
+                relationship.get("Type")
+                == MANIFEST_RELATIONSHIP_TYPE
+            ):
+                root_relationships.remove(relationship)
+        for override in list(content_types):
+            if (
+                override.tag == _q(CT, "Override")
+                and override.get("PartName")
+                == "/customXml/aioffice-manifest.xml"
+            ):
+                content_types.remove(override)
+        source = _rewrite_package(
+            source,
+            replacements={
+                "_rels/.rels": serialize_xml(root_relationships),
+                "[Content_Types].xml": serialize_xml(content_types),
+            },
+            additions={},
+            deletions={"customXml/aioffice-manifest.xml"},
+        )
+        document = Document.from_docx(source)
+        before_content = document.to_spec()["content"]
+        paragraph = next(
+            node
+            for node in before_content
+            if node["type"] == "paragraph"
+        )
+        image = next(
+            node
+            for node in before_content
+            if node["type"] == "image"
+        )
+        original_image = document.image_bytes(image["id"])
+        before_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        before_drawing = before_root.find(f".//{_q(W, 'drawing')}")
+        assert before_drawing is not None
+
+        result = document.apply(
+            [
+                {
+                    "op": "node.move_after",
+                    "target": paragraph["id"],
+                    "after": image["id"],
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        self.assertEqual(
+            result.fidelity.affected_parts if result.fidelity else None,
+            [
+                "/[Content_Types].xml",
+                "/_rels/.rels",
+                "/customXml/aioffice-manifest.xml",
+                "/word/document.xml",
+            ],
+        )
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        self.assertEqual(
+            [
+                node["id"]
+                for node in result.document.to_spec()["content"]
+            ],
+            [image["id"], paragraph["id"]],
+        )
+        self.assertEqual(
+            result.document.image_bytes(image["id"]),
+            original_image,
+        )
+        with ZipFile(io.BytesIO(output)) as archive:
+            self.assertIn(
+                "customXml/aioffice-manifest.xml",
+                archive.namelist(),
+            )
+            after_root = parse_xml(
+                archive.read("word/document.xml")
+            )
+            after_relationships = parse_xml(
+                archive.read("_rels/.rels")
+            )
+        after_drawing = after_root.find(f".//{_q(W, 'drawing')}")
+        assert after_drawing is not None
+        self.assertEqual(
+            ET.tostring(after_drawing),
+            ET.tostring(before_drawing),
+        )
+        self.assertEqual(
+            len(
+                [
+                    relationship
+                    for relationship in after_relationships.findall(
+                        _q(REL, "Relationship")
+                    )
+                    if relationship.get("Type")
+                    == MANIFEST_RELATIONSHIP_TYPE
+                ]
+            ),
+            1,
+        )
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            [
+                node["id"]
+                for node in reopened.to_spec()["content"]
+            ],
+            [image["id"], paragraph["id"]],
+        )
+        self.assertEqual(
+            reopened.image_bytes(image["id"]),
+            original_image,
         )
 
     def test_insert_image_after_cli_and_workspace_paths(self) -> None:

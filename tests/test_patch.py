@@ -82,6 +82,132 @@ class PatchTests(unittest.TestCase):
         self.assertNotEqual(result.changes[0]["created_nodes"], ["<generated>"])
         self.assertNotEqual(result.changes[1]["created_nodes"], ["<generated>"])
 
+    def test_move_after_uses_stable_ids_and_preserves_sections(self) -> None:
+        document = (
+            DocumentBuilder(
+                sections=[
+                    {"id": "front", "start_at": None},
+                    {
+                        "id": "body_section",
+                        "start_at": "c",
+                        "layout": {"start_type": "next_page"},
+                    },
+                ]
+            )
+            .paragraph("A", id="a")
+            .paragraph("B", id="b")
+            .paragraph("C", id="c")
+            .paragraph("D", id="d")
+            .paragraph("E", id="e")
+            .paragraph("F", id="f")
+            .build()
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "node.move_after",
+                    "target": "#d",
+                    "after": "#f",
+                },
+                {
+                    "op": "node.move_after",
+                    "target": "#f",
+                    "after": "#c",
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        self.assertEqual(
+            [
+                node["id"]
+                for node in result.document.to_spec()["content"]
+            ],
+            ["a", "b", "c", "f", "e", "d"],
+        )
+        self.assertEqual(
+            result.changes,
+            [
+                {
+                    "operation": "node.move_after",
+                    "moved_nodes": ["d"],
+                    "from_after": "c",
+                    "after": "f",
+                    "section_index": 1,
+                },
+                {
+                    "operation": "node.move_after",
+                    "moved_nodes": ["f"],
+                    "from_after": "e",
+                    "after": "c",
+                    "section_index": 1,
+                },
+            ],
+        )
+        self.assertEqual(
+            [node["id"] for node in document.to_spec()["content"]],
+            ["a", "b", "c", "d", "e", "f"],
+        )
+        self.assertEqual(
+            [
+                section.get("start_at")
+                for section in result.document.to_spec()["sections"]
+            ],
+            [None, "c"],
+        )
+
+        invalid_operations = [
+            {
+                "op": "node.move_after",
+                "target": "#a",
+                "after": "#c",
+            },
+            {
+                "op": "node.move_after",
+                "target": "#c",
+                "after": "#d",
+            },
+            {
+                "op": "node.move_after",
+                "target": "#b",
+                "after": "#a",
+            },
+            {
+                "op": "node.move_after",
+                "target": "#d",
+                "after": "#d",
+            },
+            {
+                "op": "node.move_after",
+                "target": "#d",
+                "after": "#f",
+                "index": 2,
+            },
+        ]
+        expected_codes = [
+            "CROSS_SECTION_MOVE_UNSUPPORTED",
+            "UNSUPPORTED_FEATURE",
+            "NO_CHANGES",
+            "INVALID_SPEC",
+            "INVALID_SPEC",
+        ]
+        for operation, expected_code in zip(
+            invalid_operations,
+            expected_codes,
+            strict=True,
+        ):
+            with self.subTest(operation=operation):
+                invalid = document.apply([operation])
+                self.assertFalse(invalid.success)
+                self.assertEqual(
+                    invalid.diagnostics[0].code,
+                    expected_code,
+                )
+        self.assertEqual(
+            [node["id"] for node in document.to_spec()["content"]],
+            ["a", "b", "c", "d", "e", "f"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

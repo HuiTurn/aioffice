@@ -10,10 +10,14 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from aioffice.documents import Document, DocumentBuilder
 from aioffice.formats.docx import compile_docx
-from aioffice.native import FidelityLevel
+from aioffice.native import (
+    FidelityLevel,
+    MANIFEST_RELATIONSHIP_TYPE,
+)
 from aioffice.native.xml import parse_xml, serialize_xml
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 
 def _q(namespace: str, local: str) -> str:
@@ -33,13 +37,17 @@ def _rewrite_package(
     source: bytes,
     replacements: dict[str, bytes],
     additions: dict[str, bytes] | None = None,
+    deletions: set[str] | None = None,
 ) -> bytes:
+    removed = deletions or set()
     output = io.BytesIO()
     with (
         ZipFile(io.BytesIO(source)) as input_archive,
         ZipFile(output, "w", compression=ZIP_DEFLATED) as output_archive,
     ):
         for info in input_archive.infolist():
+            if info.filename in removed:
+                continue
             payload = replacements.get(info.filename, input_archive.read(info.filename))
             output_archive.writestr(copy.copy(info), payload)
         for name, payload in (additions or {}).items():
@@ -193,6 +201,364 @@ class NativeDocxTests(unittest.TestCase):
                 if node["type"] in {"heading", "paragraph"}
             ]
             self.assertIn("Alpha Delta Gamma", texts)
+
+    def test_native_move_after_tracks_objects_across_sequential_moves(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("A", id="a")
+            .paragraph("B", id="b")
+            .paragraph("C", id="c")
+            .paragraph("D", id="d")
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        before_spec = document.to_spec()
+        detached = Document.from_spec(before_spec)
+        self.assertNotIn(
+            "node.move_after",
+            detached.capabilities()["operations"],
+        )
+        self.assertFalse(
+            detached.capabilities()["structural_editing"]["available"]
+        )
+        detached_move = detached.apply(
+            [
+                {
+                    "op": "node.move_after",
+                    "target": "#a",
+                    "after": "#c",
+                }
+            ]
+        )
+        self.assertFalse(detached_move.success)
+        self.assertEqual(
+            detached_move.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+        self.assertIn(
+            "attached native DOCX package",
+            detached_move.diagnostics[0].message,
+        )
+        before_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        before_body = before_root.find(_q(W, "body"))
+        assert before_body is not None
+        before_payloads = {
+            node["id"]: ET.tostring(
+                list(before_body)[
+                    node["source_ref"]["element_index"]
+                ]
+            )
+            for node in before_spec["content"]
+        }
+
+        result = document.apply(
+            [
+                {
+                    "op": "node.move_after",
+                    "target": "#a",
+                    "after": "#c",
+                },
+                {
+                    "op": "node.move_after",
+                    "target": "#d",
+                    "after": "#b",
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        self.assertEqual(
+            result.fidelity.affected_parts if result.fidelity else None,
+            ["/customXml/aioffice-manifest.xml", "/word/document.xml"],
+        )
+        assert result.document is not None
+        self.assertEqual(
+            [
+                node["id"]
+                for node in result.document.to_spec()["content"]
+            ],
+            ["b", "d", "c", "a"],
+        )
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            for name in before.namelist():
+                if name not in {
+                    "word/document.xml",
+                    "customXml/aioffice-manifest.xml",
+                }:
+                    self.assertEqual(after.read(name), before.read(name), name)
+            after_root = parse_xml(after.read("word/document.xml"))
+        after_body = after_root.find(_q(W, "body"))
+        assert after_body is not None
+        after_spec = result.document.to_spec()
+        for node in after_spec["content"]:
+            self.assertEqual(
+                ET.tostring(
+                    list(after_body)[
+                        node["source_ref"]["element_index"]
+                    ]
+                ),
+                before_payloads[node["id"]],
+                node["id"],
+            )
+
+        reopened = Document.from_docx(output)
+        reopened_spec = reopened.to_spec()
+        self.assertEqual(
+            [node["id"] for node in reopened_spec["content"]],
+            ["b", "d", "c", "a"],
+        )
+        self.assertEqual(
+            [
+                node["source_ref"]["element_index"]
+                for node in reopened_spec["content"]
+            ],
+            [0, 1, 2, 3],
+        )
+
+    def test_native_move_after_keeps_multi_paragraph_list_contiguous(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Before", id="before")
+            .bullet_list(["One", "Two"], id="steps")
+            .paragraph("Middle", id="middle")
+            .paragraph("After", id="after")
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        steps = next(
+            node
+            for node in document.to_spec()["content"]
+            if node["id"] == "steps"
+        )
+        before_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        before_body = before_root.find(_q(W, "body"))
+        assert before_body is not None
+        list_payloads = [
+            ET.tostring(list(before_body)[index])
+            for index in steps["source_ref"]["element_indices"]
+        ]
+
+        result = document.apply(
+            [
+                {
+                    "op": "node.move_after",
+                    "target": "#steps",
+                    "after": "#after",
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        self.assertEqual(
+            [
+                node["id"]
+                for node in result.document.to_spec()["content"]
+            ],
+            ["before", "middle", "after", "steps"],
+        )
+        moved_steps = next(
+            node
+            for node in result.document.to_spec()["content"]
+            if node["id"] == "steps"
+        )
+        self.assertEqual(
+            moved_steps["source_ref"]["element_indices"],
+            [3, 4],
+        )
+        output = result.document.to_bytes("docx")
+        output_root = parse_xml(
+            ZipFile(io.BytesIO(output)).read("word/document.xml")
+        )
+        output_body = output_root.find(_q(W, "body"))
+        assert output_body is not None
+        self.assertEqual(
+            [
+                ET.tostring(list(output_body)[index])
+                for index in moved_steps["source_ref"]["element_indices"]
+            ],
+            list_payloads,
+        )
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            [
+                node["id"]
+                for node in reopened.to_spec()["content"]
+            ],
+            ["before", "middle", "after", "steps"],
+        )
+        reopened_steps = reopened.to_spec()["content"][-1]
+        self.assertEqual(
+            reopened_steps["source_ref"]["element_indices"],
+            [3, 4],
+        )
+
+    def test_native_move_after_protects_section_carriers(self) -> None:
+        source = (
+            DocumentBuilder(
+                sections=[
+                    {"id": "front", "start_at": None},
+                    {
+                        "id": "body_section",
+                        "start_at": "body",
+                        "layout": {"start_type": "next_page"},
+                    },
+                ]
+            )
+            .paragraph("Cover", id="cover")
+            .paragraph("Front end", id="front_end")
+            .paragraph("Body", id="body")
+            .paragraph("Analysis", id="analysis")
+            .paragraph("Conclusion", id="conclusion")
+            .build()
+            .to_bytes("docx")
+        )
+        document_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        body = document_root.find(_q(W, "body"))
+        assert body is not None
+        body_paragraphs = body.findall(_q(W, "p"))
+        carrier = next(
+            paragraph
+            for paragraph in body_paragraphs
+            if paragraph.find(f".//{_q(W, 'sectPr')}") is not None
+        )
+        front_end_paragraph = next(
+            paragraph
+            for paragraph in body_paragraphs
+            if "".join(
+                node.text or ""
+                for node in paragraph.iter(_q(W, "t"))
+            )
+            == "Front end"
+        )
+        carrier_properties = carrier.find(_q(W, "pPr"))
+        assert carrier_properties is not None
+        section_properties = carrier_properties.find(_q(W, "sectPr"))
+        assert section_properties is not None
+        carrier_properties.remove(section_properties)
+        front_properties = front_end_paragraph.find(_q(W, "pPr"))
+        if front_properties is None:
+            front_properties = ET.Element(_q(W, "pPr"))
+            front_end_paragraph.insert(0, front_properties)
+        front_properties.append(section_properties)
+        body.remove(carrier)
+
+        root_relationships = parse_xml(
+            ZipFile(io.BytesIO(source)).read("_rels/.rels")
+        )
+        for relationship in list(root_relationships):
+            if (
+                relationship.get("Type")
+                == MANIFEST_RELATIONSHIP_TYPE
+            ):
+                root_relationships.remove(relationship)
+        source = _rewrite_package(
+            source,
+            {
+                "word/document.xml": serialize_xml(document_root),
+                "_rels/.rels": serialize_xml(root_relationships),
+            },
+            deletions={"customXml/aioffice-manifest.xml"},
+        )
+        document = Document.from_docx(source)
+        ids = {
+            _semantic_text(node): str(node["id"])
+            for node in document.to_spec()["content"]
+        }
+        carrier_move = document.apply(
+            [
+                {
+                    "op": "node.move_after",
+                    "target": ids["Cover"],
+                    "after": ids["Front end"],
+                }
+            ]
+        )
+        self.assertFalse(carrier_move.success)
+        self.assertEqual(
+            carrier_move.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "section boundary",
+            carrier_move.diagnostics[0].message,
+        )
+        cross_section = document.apply(
+            [
+                {
+                    "op": "node.move_after",
+                    "target": ids["Cover"],
+                    "after": ids["Analysis"],
+                }
+            ]
+        )
+        self.assertFalse(cross_section.success)
+        self.assertEqual(
+            cross_section.diagnostics[0].code,
+            "CROSS_SECTION_MOVE_UNSUPPORTED",
+        )
+        anchor_move = document.apply(
+            [
+                {
+                    "op": "node.move_after",
+                    "target": ids["Body"],
+                    "after": ids["Analysis"],
+                }
+            ]
+        )
+        self.assertFalse(anchor_move.success)
+        self.assertEqual(
+            anchor_move.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+
+        successful = document.apply(
+            [
+                {
+                    "op": "node.move_after",
+                    "target": ids["Conclusion"],
+                    "after": ids["Body"],
+                }
+            ]
+        )
+        self.assertTrue(successful.success, successful.model_dump())
+        assert successful.document is not None
+        self.assertEqual(
+            [
+                node["id"]
+                for node in successful.document.to_spec()["content"]
+            ],
+            [
+                ids["Cover"],
+                ids["Front end"],
+                ids["Body"],
+                ids["Conclusion"],
+                ids["Analysis"],
+            ],
+        )
+        self.assertEqual(
+            [
+                section.get("start_at")
+                for section in successful.document.to_spec()["sections"]
+            ],
+            [None, ids["Body"]],
+        )
 
     def test_native_format_patch_changes_only_known_properties(self) -> None:
         source = self._source_document()

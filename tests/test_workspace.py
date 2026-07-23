@@ -343,6 +343,63 @@ class WorkspaceTests(unittest.TestCase):
             with self.assertRaises(WorkspaceError):
                 Workspace.open(directory)
 
+    def test_workspace_persists_native_node_move_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.docx"
+            (
+                DocumentBuilder()
+                .paragraph("A", id="a")
+                .paragraph("B", id="b")
+                .paragraph("C", id="c")
+                .build()
+                .export(source)
+            )
+            workspace = Workspace.init(root / "project")
+            document = workspace.import_document(source)
+            operation = {
+                "op": "node.move_after",
+                "target": "#a",
+                "after": "#c",
+            }
+            result = workspace.apply(
+                document.id,
+                [operation],
+                base_revision=document.revision,
+            )
+            self.assertTrue(result.success, result.model_dump())
+            reopened = workspace.open_document(document.id)
+            self.assertEqual(
+                [
+                    node["id"]
+                    for node in reopened.to_spec()["content"]
+                ],
+                ["b", "c", "a"],
+            )
+            self.assertIn(
+                "node.move_after",
+                workspace.capabilities(document.id)[
+                    "patch_operations"
+                ],
+            )
+            patch_path = (
+                root
+                / "project"
+                / ".aioffice"
+                / "artifacts"
+                / document.id
+                / "patches"
+                / f"{result.result_revision:08d}.json"
+            )
+            patch = json.loads(
+                patch_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(patch["operations"], [operation])
+            self.assertEqual(
+                patch["changes"][0]["moved_nodes"],
+                ["a"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -173,6 +173,20 @@ def _ensure_identity_manifest_parts(package: NativePackage) -> None:
                 "AiOffice manifest content type is not application/xml."
             )
     else:
+        manifest_part = next(
+            (
+                part
+                for part in package.parts
+                if part.uri == MANIFEST_PART_URI
+            ),
+            None,
+        )
+        if (
+            package.has_part(MANIFEST_PART_URI)
+            and manifest_part is not None
+            and manifest_part.content_type == "application/xml"
+        ):
+            return
         ET.SubElement(
             content_types,
             _q(CT, "Override"),
@@ -657,6 +671,7 @@ def apply_docx_operations(
         "image.insert_after",
         "image.replace",
         "image.update",
+        "node.move_after",
         "table.format",
         "table.column.format",
         "table.cell.format",
@@ -665,7 +680,8 @@ def apply_docx_operations(
     if unsupported:
         raise NativePackageError(
             "Imported DOCX V0.2 currently supports native lowering for "
-            "text.replace, paragraph.format, text.format, node.remove, "
+            "text.replace, paragraph.format, text.format, node.move_after, "
+            "node.remove, "
             "style.apply, style.define, style.format, section.format, and "
             "field.update, image.insert_after, image.replace, image.update, "
             "table.format, "
@@ -826,6 +842,7 @@ def apply_docx_operations(
                 source_ref,
             )
     inserted_images: dict[str, ET.Element] = {}
+    moved_nodes: set[str] = set()
 
     for operation in operations:
         operation_name = operation.get("op")
@@ -1265,8 +1282,95 @@ def apply_docx_operations(
             changed_xml_parts.add(source_ref.part_uri)
             continue
 
-        source_ref = _find_source_ref(spec, operation.get("target"))
-        container, elements = elements_for_ref(source_ref)
+        target_id = _target_id(operation.get("target"))
+        mapped_source = source_elements.get(target_id)
+        if mapped_source is None:
+            source_ref = _find_source_ref(
+                spec,
+                operation.get("target"),
+            )
+            container, elements = elements_for_ref(source_ref)
+        else:
+            elements, source_ref = mapped_source
+            container = part_containers[source_ref.part_uri]
+        if operation_name == "node.move_after":
+            after_id = _target_id(operation.get("after"))
+            anchor_source = source_elements.get(after_id)
+            if anchor_source is None:
+                raise NativePackageError(
+                    "node.move_after anchor has no mapped native elements."
+                )
+            anchor_elements, anchor_ref = anchor_source
+            if (
+                source_ref.part_uri != "/word/document.xml"
+                or anchor_ref.part_uri != source_ref.part_uri
+                or container is not body
+                or part_containers[anchor_ref.part_uri] is not body
+            ):
+                raise NativePackageError(
+                    "node.move_after requires target and anchor to be "
+                    "top-level document body nodes."
+                )
+            current_elements = list(body)
+            if (
+                not elements
+                or not anchor_elements
+                or any(
+                    element not in current_elements
+                    for element in [*elements, *anchor_elements]
+                )
+            ):
+                raise NativePackageError(
+                    "node.move_after target or anchor is no longer in "
+                    "the document body."
+                )
+            if set(map(id, elements)).intersection(
+                map(id, anchor_elements)
+            ):
+                raise NativePackageError(
+                    "node.move_after target and anchor native ranges overlap."
+                )
+
+            def contiguous_indices(
+                group: list[ET.Element],
+            ) -> list[int]:
+                indices = [
+                    current_elements.index(element)
+                    for element in group
+                ]
+                if indices != list(
+                    range(indices[0], indices[0] + len(indices))
+                ):
+                    raise NativePackageError(
+                        "node.move_after requires each mapped native range "
+                        "to remain contiguous."
+                    )
+                return indices
+
+            contiguous_indices(elements)
+            contiguous_indices(anchor_elements)
+            if any(
+                element.tag == _q(W, "sectPr")
+                or element.find(f".//{_q(W, 'sectPr')}") is not None
+                for element in [*elements, *anchor_elements]
+            ):
+                raise NativePackageError(
+                    "node.move_after refuses target or anchor elements "
+                    "that carry a native section boundary."
+                )
+            for element in elements:
+                body.remove(element)
+            remaining = list(body)
+            anchor_indices = [
+                remaining.index(element)
+                for element in anchor_elements
+            ]
+            insert_index = max(anchor_indices) + 1
+            for offset, element in enumerate(elements):
+                body.insert(insert_index + offset, element)
+            moved_nodes.add(target_id)
+            changed_xml_parts.add("/word/document.xml")
+            continue
         if operation_name == "style.apply":
             if len(elements) != 1 or elements[0].tag != _q(W, "p"):
                 raise NativePackageError(
@@ -1317,7 +1421,6 @@ def apply_docx_operations(
                 raise NativePackageError(
                     "paragraph.format requires a native reference to one w:p element."
                 )
-            target_id = _target_id(operation.get("target"))
             target_is_image = any(
                 isinstance(node, ImageBlock)
                 and node.id == target_id
@@ -1648,9 +1751,15 @@ def apply_docx_operations(
     if styles_changed:
         assert styles_root is not None
         updated.set_part("/word/styles.xml", serialize_xml(styles_root))
-    if inserted_images:
+    structural_identity_required = bool(
+        inserted_images or moved_nodes
+    )
+    if structural_identity_required:
         _ensure_identity_manifest_parts(updated)
-    if updated.has_part(MANIFEST_PART_URI) or inserted_images:
+    if (
+        updated.has_part(MANIFEST_PART_URI)
+        or structural_identity_required
+    ):
         manifest_spec = result_spec.model_copy(deep=True)
         for node in manifest_spec.content:
             if node.id in identity_updates:

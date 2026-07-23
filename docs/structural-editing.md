@@ -1,0 +1,118 @@
+# Stable-ID structural editing
+
+AiOffice structural edits address semantic nodes, not array positions. The dev19
+contract introduces one deliberately narrow operation:
+
+```json
+{
+  "op": "node.move_after",
+  "target": "#risk_table",
+  "after": "#executive_summary"
+}
+```
+
+`target` and `after` must resolve to different top-level content IDs. On success, the
+target becomes the immediate semantic successor of the anchor and receives the new
+document revision. The source `Document` remains immutable; dry run, diff, optimistic
+revision checks, idempotency, CLI application, and Workspace persistence use the
+ordinary Patch transaction.
+
+## Why movement is distinct from insertion
+
+`node.insert_after` creates a new semantic node. Reconstructing an existing imported
+DOCX block from its JSON projection would lose unsupported native detail.
+`node.move_after` instead relocates the existing native XML objects:
+
+1. resolve the target and anchor through their trusted stable identities;
+2. resolve every native element belonging to each semantic node;
+3. prove that both ranges are present, top-level, disjoint, and contiguous;
+4. remove the complete target range from `w:body`;
+5. insert those same element objects after the complete anchor range;
+6. recompute all affected `NativeRef` indices and fingerprints;
+7. serialize the changed document part and refreshed identity manifest atomically.
+
+A list backed by two or more `w:p` elements therefore moves as one unit. A table's
+`w:tbl`, an image's complete host `w:p`, and unknown children inside a moved element
+are retained rather than regenerated. Relationship IDs and related package parts do
+not change merely because their referring element moved.
+
+Sequential moves in one Patch use the originally resolved XML element objects.
+AiOffice does not look up a later operation using an element index that an earlier
+move has already invalidated.
+
+## Section safety boundary
+
+Word section semantics depend on the position of `w:sectPr`. A move that casually
+crosses one of those boundaries can silently change page size, margins, columns,
+headers, footers, numbering, or vertical alignment. Dev19 therefore requires:
+
+- target and anchor belong to the same semantic section;
+- the target is not the `start_at` node of a later section;
+- neither native range contains a `w:sectPr`;
+- both ranges belong directly to `/word/document.xml`'s `w:body`.
+
+An empty section-carrier paragraph that lies after an anchor remains in place, so a
+safe move before that carrier can still succeed. A text-bearing paragraph that
+itself carries `w:sectPr` is refused. Cross-section movement will require an explicit
+future operation that updates section ownership and proves header/footer semantics
+together; dev19 does not approximate it.
+
+## Identity and third-party packages
+
+Structural edits change native indices even when the XML payloads are otherwise
+identical. AiOffice refreshes identity records for all mapped content, fields,
+sections, tables, cells, and header/footer blocks.
+
+If a third-party DOCX has no embedded AiOffice identity manifest, the first
+successful move attaches one root relationship, the manifest part, and a valid
+content type before export. Stable IDs then survive standalone reopen rather than
+depending on the new ordinal positions. Workspace identity evidence continues to be
+written alongside each revision.
+
+## Diagnostics
+
+The operation fails atomically with actionable diagnostics for:
+
+- missing, ambiguous, identical, or already-adjacent target/anchor IDs;
+- unknown operation fields;
+- cross-section requests;
+- movement of a section start anchor;
+- detached or non-top-level native ranges;
+- overlapping, missing, or non-contiguous native ranges;
+- target or anchor elements carrying a native section boundary;
+- any result that fails semantic validation or native identity refresh.
+
+The machine-readable `structural_editing` capability reports the operation name,
+selector type, placement rule, native scope, multi-element behavior, section policy,
+identity behavior, source immutability, and dry-run support.
+
+## CLI and Workspace
+
+Write the operation as a JSON array or Patch envelope:
+
+```bash
+aioffice apply report.docx move.json --output reordered.docx
+aioffice workspace apply ARTIFACT_ID move.json --root project
+```
+
+Workspace patch records store only the stable IDs and structured change evidence:
+
+```json
+{
+  "operation": "node.move_after",
+  "moved_nodes": ["risk_table"],
+  "from_after": "appendix_heading",
+  "after": "executive_summary",
+  "section_index": 0
+}
+```
+
+`from_after` is the previous stable predecessor, or `null` when the target was first.
+It is audit evidence, not a selector to be cached for later edits.
+
+For a document whose JSON extension declares native authority, keep the native DOCX
+package attached while applying this operation. AiOffice refuses a move against a
+detached native projection because JSON alone cannot prove the complete XML range.
+Its capability response reports structural editing as unavailable and omits the
+operation from the executable operation list. Documents created as semantic AiOffice
+specs do not have this restriction.

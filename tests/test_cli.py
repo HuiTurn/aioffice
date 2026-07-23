@@ -9,7 +9,7 @@ from pathlib import Path
 
 from aioffice.cli import main
 from aioffice.cli.main import _parse_page_numbers
-from aioffice.documents import DocumentBuilder
+from aioffice.documents import Document, DocumentBuilder
 
 
 class CliTests(unittest.TestCase):
@@ -207,6 +207,7 @@ class CliTests(unittest.TestCase):
                     "text.replace",
                     "paragraph.format",
                     "text.format",
+                    "node.move_after",
                     "node.remove",
                     "style.apply",
                     "style.define",
@@ -369,6 +370,61 @@ class CliTests(unittest.TestCase):
             self.assertEqual(
                 workspace_capabilities["artifact"]["artifact_id"],
                 artifact_id,
+            )
+
+    def test_apply_moves_native_nodes_by_stable_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.docx"
+            output = root / "moved.docx"
+            patch = root / "move.json"
+            (
+                DocumentBuilder()
+                .paragraph("A", id="a")
+                .paragraph("B", id="b")
+                .paragraph("C", id="c")
+                .build()
+                .export(source)
+            )
+            patch.write_text(
+                json.dumps(
+                    [
+                        {
+                            "op": "node.move_after",
+                            "target": "#a",
+                            "after": "#c",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(
+                    main(
+                        [
+                            "apply",
+                            str(source),
+                            str(patch),
+                            "--output",
+                            str(output),
+                        ]
+                    ),
+                    0,
+                )
+            report = json.loads(stdout.getvalue())
+            self.assertTrue(report["success"])
+            self.assertEqual(
+                report["changes"][0]["operation"],
+                "node.move_after",
+            )
+            reopened = Document.from_docx(output)
+            self.assertEqual(
+                [
+                    node["id"]
+                    for node in reopened.to_spec()["content"]
+                ],
+                ["b", "c", "a"],
             )
 
 

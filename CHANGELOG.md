@@ -189,6 +189,21 @@
   capabilities, including the same paths through JSON Patch, CLI, and Workspace.
 - Added set/clear round-trip coverage, native-minimality proof, invalid-style atomic
   refusal, real patch persistence, and image-binary stability checks.
+- Added stable-ID `node.move_after` for semantic documents and imported DOCX files.
+- Added exact top-level native range relocation: a multi-paragraph list moves as one
+  contiguous group while tables, images, DrawingML, unknown XML, relationships, and
+  binary parts remain unreconstructed.
+- Added sequential structural Patch correctness by resolving original XML element
+  objects instead of stale element indices, followed by complete native-reference
+  and embedded-manifest reindexing.
+- Added strict same-section movement, section-start-anchor protection, native
+  `w:sectPr` carrier refusal, overlap/contiguity proofs, no-op diagnostics, and atomic
+  rejection for unsupported structural requests.
+- Added automatic identity-manifest attachment for the first successful third-party
+  move, preserving caller-visible IDs across standalone export and reopen.
+- Exposed machine-readable structural-editing capabilities and added CLI, Workspace,
+  list-range, image, third-party, multi-operation, section-boundary, package
+  minimality, and reopen tests.
 - Changed mixed text/drawing paragraphs and complex image cases to explicit opaque
   projections so the semantic layer can no longer hide a picture inside an ordinary
   text node.
@@ -201,7 +216,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.18`.
+- Advanced the AiOffice Document Spec to `0.2-draft.19`.
 
 ## 0.1.0
 

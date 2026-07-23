@@ -954,12 +954,21 @@ class Document:
 
     def capabilities(self) -> dict[str, Any]:
         native_render = libreoffice_render_capabilities()
+        native_extension = self._spec.extensions.get(
+            "dev.aioffice.native",
+            {},
+        )
+        detached_native_projection = (
+            self._native is None
+            and native_extension.get("authority") == "native"
+        )
         operations = [
             "text.replace",
             "paragraph.format",
             "text.format",
             "node.append",
             "node.insert_after",
+            "node.move_after",
             "node.remove",
             "node.update",
             "style.apply",
@@ -976,6 +985,7 @@ class Document:
                 "text.replace",
                 "paragraph.format",
                 "text.format",
+                "node.move_after",
                 "node.remove",
                 "style.apply",
                 "style.define",
@@ -993,7 +1003,8 @@ class Document:
             ):
                 operations.append("image.replace")
                 operations.append("image.update")
-        native_extension = self._spec.extensions.get("dev.aioffice.native", {})
+        elif detached_native_projection:
+            operations.remove("node.move_after")
         ambiguous_node_ids = sorted(
             {
                 node_id
@@ -1314,6 +1325,23 @@ class Document:
                         if isinstance(node, Table)
                     ],
                 },
+            },
+            "structural_editing": {
+                "available": not detached_native_projection,
+                "move_operation": "node.move_after",
+                "selectors": "stable_top_level_content_ids",
+                "position": "after_complete_anchor_range",
+                "native_scope": "word_document_body_top_level",
+                "multi_element_nodes": "move_as_one_contiguous_group",
+                "section_policy": "same_section_only",
+                "section_start_anchor_movable": False,
+                "native_section_carrier_movable": False,
+                "third_party_identity_manifest": (
+                    "attach_on_first_successful_structural_edit"
+                ),
+                "native_authority_requires_attached_package": True,
+                "source_mutation": False,
+                "supports_dry_run": True,
             },
             "identity": {
                 "source": native_extension.get(
@@ -2713,6 +2741,40 @@ class Document:
                     f"{', '.join(sorted(native_image_operations))} requires an "
                     "attached native DOCX package; "
                     "a detached JSON projection cannot safely mutate DrawingML."
+                ),
+                node_ids=[self.id],
+                suggested_actions=[
+                    {"action": "open_native_docx"},
+                    {"action": "inspect_capabilities"},
+                ],
+            )
+            return PatchResult(
+                success=False,
+                base_revision=self.revision,
+                result_revision=self.revision,
+                dry_run=dry_run,
+                diagnostics=[diagnostic],
+                idempotency_key=idempotency_key,
+            )
+        detached_native_move = (
+            self._native is None
+            and self._spec.extensions.get("dev.aioffice.native", {}).get(
+                "authority"
+            )
+            == "native"
+            and any(
+                operation.get("op") == "node.move_after"
+                for operation in operations
+            )
+        )
+        if detached_native_move:
+            diagnostic = Diagnostic(
+                severity=Severity.ERROR,
+                code="UNSUPPORTED_FEATURE",
+                message=(
+                    "node.move_after requires the attached native DOCX package "
+                    "for a native-authority projection; detached JSON cannot "
+                    "prove or relocate the complete XML element range."
                 ),
                 node_ids=[self.id],
                 suggested_actions=[
@@ -5180,6 +5242,152 @@ class Document:
                 "created_nodes": [candidate["id"]],
             }
 
+        if operation_name == "node.move_after":
+            unexpected = sorted(
+                set(operation) - {"op", "target", "after"}
+            )
+            target_index, target_node = Document._find_content_node(
+                payload,
+                operation.get("target"),
+            )
+            after_index, after_node = Document._find_content_node(
+                payload,
+                operation.get("after"),
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "node.move_after received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[target_node["id"]],
+                    )
+                )
+            if target_node["id"] == after_node["id"]:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "node.move_after target and after must be "
+                            "different nodes."
+                        ),
+                        node_ids=[target_node["id"]],
+                    )
+                )
+            if target_index == after_index + 1:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="NO_CHANGES",
+                        message=(
+                            f"Node {target_node['id']!r} is already immediately "
+                            f"after {after_node['id']!r}."
+                        ),
+                        node_ids=[
+                            target_node["id"],
+                            after_node["id"],
+                        ],
+                        suggested_actions=[
+                            {"action": "choose_different_anchor"}
+                        ],
+                    )
+                )
+
+            content_positions = {
+                str(node["id"]): index
+                for index, node in enumerate(payload["content"])
+            }
+            section_starts: list[tuple[int, int]] = [(0, 0)]
+            section_anchor_ids: set[str] = set()
+            for section_index, section in enumerate(
+                payload.get("sections", [])[1:],
+                start=1,
+            ):
+                start_at = section.get("start_at")
+                if not isinstance(start_at, str):
+                    continue
+                start_position = content_positions.get(start_at)
+                if start_position is None:
+                    continue
+                section_starts.append(
+                    (start_position, section_index)
+                )
+                section_anchor_ids.add(start_at)
+
+            def section_for(position: int) -> int:
+                return max(
+                    (
+                        section_index
+                        for start, section_index in section_starts
+                        if start <= position
+                    ),
+                    default=0,
+                )
+
+            if target_node["id"] in section_anchor_ids:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            "node.move_after cannot move a node that anchors "
+                            "the start of a document section."
+                        ),
+                        node_ids=[target_node["id"]],
+                        suggested_actions=[
+                            {"action": "move_section_content_not_anchor"}
+                        ],
+                    )
+                )
+            target_section = section_for(target_index)
+            after_section = section_for(after_index)
+            if target_section != after_section:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="CROSS_SECTION_MOVE_UNSUPPORTED",
+                        message=(
+                            "node.move_after currently preserves section "
+                            "semantics by requiring target and anchor to be "
+                            "in the same section."
+                        ),
+                        node_ids=[
+                            target_node["id"],
+                            after_node["id"],
+                        ],
+                        suggested_actions=[
+                            {
+                                "action": "choose_anchor_in_same_section",
+                                "section_index": target_section,
+                            }
+                        ],
+                    )
+                )
+
+            previous_after = (
+                payload["content"][target_index - 1]["id"]
+                if target_index
+                else None
+            )
+            moved = payload["content"].pop(target_index)
+            new_after_index, _ = Document._find_content_node(
+                payload,
+                after_node["id"],
+            )
+            moved["revision_updated"] = next_revision
+            payload["content"].insert(new_after_index + 1, moved)
+            return {
+                "operation": "node.move_after",
+                "moved_nodes": [target_node["id"]],
+                "from_after": previous_after,
+                "after": after_node["id"],
+                "section_index": target_section,
+            }
+
         if operation_name == "node.remove":
             index, node = Document._find_content_node(
                 payload,
@@ -5228,7 +5436,8 @@ class Document:
                 message=(
                     f"Unsupported operation {operation_name!r}; AiOffice supports "
                     "text.replace, paragraph.format, text.format, node.append, "
-                    "node.insert_after, node.remove, node.update, style.apply, "
+                    "node.insert_after, node.move_after, node.remove, "
+                    "node.update, style.apply, "
                     "style.define, style.format, section.format, field.update, "
                     "image.insert_after, image.replace, image.update, "
                     "table.format, table.column.format, and table.cell.format."
