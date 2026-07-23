@@ -8,8 +8,11 @@ from xml.etree import ElementTree as ET
 
 from aioffice.native.identity import fingerprint_elements
 from aioffice.spec.models import (
+    BorderLine,
     Length,
     NativeRef,
+    TableBorders,
+    TableCellBorders,
     TableCellFormat,
     TableLayout,
     TableRow,
@@ -74,6 +77,41 @@ _CELL_MARGIN_ORDER = [
     "right",
     "end",
 ]
+_BORDER_ORDER = [
+    "top",
+    "left",
+    "start",
+    "bottom",
+    "right",
+    "end",
+    "insideH",
+    "insideV",
+]
+_TABLE_BORDER_FIELDS = (
+    ("top", "top", ()),
+    ("right", "right", ("end",)),
+    ("bottom", "bottom", ()),
+    ("left", "left", ("start",)),
+    ("inside_horizontal", "insideH", ()),
+    ("inside_vertical", "insideV", ()),
+)
+_CELL_BORDER_FIELDS = _TABLE_BORDER_FIELDS[:4]
+_BORDER_ATTRIBUTES = (
+    "val",
+    "sz",
+    "space",
+    "color",
+    "themeColor",
+    "themeTint",
+    "themeShade",
+)
+_VISIBLE_BORDER_STYLES = {
+    "single",
+    "double",
+    "dotted",
+    "dashed",
+    "thick",
+}
 
 
 @dataclass(slots=True)
@@ -363,6 +401,203 @@ def _patch_direct_cell_margin(
     _remove_if_empty(properties, margins)
 
 
+def _read_border(
+    borders: ET.Element | None,
+    canonical_name: str,
+    aliases: tuple[str, ...],
+) -> BorderLine | None:
+    if borders is None:
+        return None
+    element = next(
+        (
+            candidate
+            for name in (canonical_name, *aliases)
+            if (candidate := borders.find(_q(name))) is not None
+        ),
+        None,
+    )
+    if element is None:
+        return None
+    raw_style = element.get(_q("val"))
+    if raw_style in {"none", "nil"}:
+        return BorderLine(style="none")
+    if raw_style not in _VISIBLE_BORDER_STYLES:
+        return None
+    raw_size = element.get(_q("sz"))
+    try:
+        size = int(raw_size) if raw_size is not None else 0
+    except ValueError:
+        return None
+    if size < 2 or size > 96:
+        return None
+    raw_color = element.get(_q("color"), "auto")
+    color = (
+        f"#{raw_color.upper()}"
+        if len(raw_color) == 6
+        and all(
+            character in "0123456789ABCDEFabcdef"
+            for character in raw_color
+        )
+        else "auto"
+        if raw_color == "auto"
+        else None
+    )
+    if color is None:
+        return None
+    raw_space = element.get(_q("space"))
+    try:
+        space_value = int(raw_space) if raw_space is not None else None
+    except ValueError:
+        return None
+    if space_value is not None and not 0 <= space_value <= 31:
+        return None
+    return BorderLine(
+        style=cast(
+            Literal[
+                "single",
+                "double",
+                "dotted",
+                "dashed",
+                "thick",
+            ],
+            raw_style,
+        ),
+        width=Length(value=size / 8, unit="pt"),
+        color=color,
+        space=(
+            Length(value=space_value, unit="pt")
+            if space_value is not None
+            else None
+        ),
+    )
+
+
+def _read_table_borders(
+    properties: ET.Element,
+) -> TableBorders | None:
+    borders = properties.find(_q("tblBorders"))
+    payload = {
+        field_name: value
+        for field_name, canonical_name, aliases in _TABLE_BORDER_FIELDS
+        if (
+            value := _read_border(
+                borders,
+                canonical_name,
+                aliases,
+            )
+        )
+        is not None
+    }
+    return TableBorders.model_validate(payload) if payload else None
+
+
+def _read_cell_borders(
+    properties: ET.Element,
+) -> TableCellBorders | None:
+    borders = properties.find(_q("tcBorders"))
+    payload = {
+        field_name: value
+        for field_name, canonical_name, aliases in _CELL_BORDER_FIELDS
+        if (
+            value := _read_border(
+                borders,
+                canonical_name,
+                aliases,
+            )
+        )
+        is not None
+    }
+    return TableCellBorders.model_validate(payload) if payload else None
+
+
+def _clear_border_attributes(
+    borders: ET.Element,
+    local_name: str,
+) -> None:
+    element = borders.find(_q(local_name))
+    if element is None:
+        return
+    for attribute in _BORDER_ATTRIBUTES:
+        element.attrib.pop(_q(attribute), None)
+    _remove_if_empty(borders, element)
+
+
+def _patch_border(
+    borders: ET.Element,
+    canonical_name: str,
+    aliases: tuple[str, ...],
+    value: BorderLine | None,
+) -> None:
+    for alias in aliases:
+        _clear_border_attributes(borders, alias)
+    existing = borders.find(_q(canonical_name))
+    if value is None:
+        _clear_border_attributes(borders, canonical_name)
+        return
+    element = (
+        existing
+        if existing is not None
+        else _insert_ordered(
+            borders,
+            ET.Element(_q(canonical_name)),
+            _BORDER_ORDER,
+        )
+    )
+    for attribute in _BORDER_ATTRIBUTES:
+        element.attrib.pop(_q(attribute), None)
+    element.set(_q("val"), value.style)
+    if value.style != "none":
+        assert value.width is not None
+        element.set(
+            _q("sz"),
+            str(round(value.width.to_points() * 8)),
+        )
+        element.set(
+            _q("color"),
+            (
+                value.color.removeprefix("#")
+                if value.color != "auto"
+                else "auto"
+            ),
+        )
+        if value.space is not None:
+            element.set(
+                _q("space"),
+                str(round(value.space.to_points())),
+            )
+
+
+def _patch_border_set(
+    properties: ET.Element,
+    *,
+    container_name: str,
+    value: TableBorders | TableCellBorders | None,
+    fields: tuple[tuple[str, str, tuple[str, ...]], ...],
+    property_order: list[str],
+) -> None:
+    borders = properties.find(_q(container_name))
+    has_values = value is not None and any(
+        getattr(value, field_name) is not None
+        for field_name, _, _ in fields
+    )
+    if borders is None and has_values:
+        borders = _ensure_property(
+            properties,
+            container_name,
+            property_order,
+        )
+    if borders is None:
+        return
+    for field_name, canonical_name, aliases in fields:
+        _patch_border(
+            borders,
+            canonical_name,
+            aliases,
+            getattr(value, field_name) if value is not None else None,
+        )
+    _remove_if_empty(properties, borders)
+
+
 def read_table_cell_format(cell: ET.Element) -> TableCellFormat:
     """Project cell-local properties that can be selectively patched."""
 
@@ -401,6 +636,7 @@ def read_table_cell_format(cell: ET.Element) -> TableCellFormat:
         no_wrap=_on_off(properties.find(_q("noWrap"))),
         fit_text=_on_off(properties.find(_q("tcFitText"))),
         background_color=background_color,
+        borders=_read_cell_borders(properties),
         margin_top=_read_margin(margins, "top"),
         margin_right=_read_margin(margins, "right", "end"),
         margin_bottom=_read_margin(margins, "bottom"),
@@ -483,6 +719,14 @@ def patch_table_cell_format(
                 _q("fill"),
                 cell_format.background_color.removeprefix("#"),
             )
+    if "borders" in fields:
+        _patch_border_set(
+            properties,
+            container_name="tcBorders",
+            value=cell_format.borders,
+            fields=_CELL_BORDER_FIELDS,
+            property_order=_CELL_PROPERTY_ORDER,
+        )
     for field_name, side in (
         ("margin_top", "top"),
         ("margin_right", "right"),
@@ -584,6 +828,7 @@ def read_table_layout(table: ET.Element) -> TableLayout:
         cell_margin_right=_read_margin(margins, "right", "end"),
         cell_margin_bottom=_read_margin(margins, "bottom"),
         cell_margin_left=_read_margin(margins, "left", "start"),
+        borders=_read_table_borders(properties),
         repeat_header=_on_off(
             row_properties.find(_q("tblHeader"))
             if row_properties is not None
@@ -682,6 +927,14 @@ def patch_table_layout(
                     side,
                     getattr(layout, field_name),
                 )
+        if "borders" in fields:
+            _patch_border_set(
+                properties,
+                container_name="tblBorders",
+                value=layout.borders,
+                fields=_TABLE_BORDER_FIELDS,
+                property_order=_TABLE_PROPERTY_ORDER,
+            )
         _remove_if_empty(table, properties)
 
     if "repeat_header" in fields:

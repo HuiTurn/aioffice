@@ -726,6 +726,41 @@ class Document:
                     "native_cell_patch_scope": (
                         "one mapped anchor w:tc properties element"
                     ),
+                    "border_contract": {
+                        "styles": [
+                            "none",
+                            "single",
+                            "double",
+                            "dotted",
+                            "dashed",
+                            "thick",
+                        ],
+                        "width_range_points": [0.25, 12],
+                        "space_range_points": [0, 31],
+                        "table_edges": [
+                            "top",
+                            "right",
+                            "bottom",
+                            "left",
+                            "inside_horizontal",
+                            "inside_vertical",
+                        ],
+                        "cell_edges": [
+                            "top",
+                            "right",
+                            "bottom",
+                            "left",
+                        ],
+                        "direct_cell_precedence": True,
+                        "clear_semantics": (
+                            "Remove known direct border XML so table styles "
+                            "or inherited formatting can apply."
+                        ),
+                        "none_semantics": (
+                            "Write an explicit no-border edge that suppresses "
+                            "the corresponding inherited or table edge."
+                        ),
+                    },
                     "tables": [
                         {
                             "id": node.id,

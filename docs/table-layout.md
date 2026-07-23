@@ -14,8 +14,9 @@ A table contains:
 - preferred table width (`auto`, percent, or exact);
 - alignment, layout algorithm, indent, and cell spacing;
 - independent top/right/bottom/left cell margins;
+- explicit perimeter and internal horizontal/vertical borders;
 - repeated-header behavior;
-- per-row page-break permission, height, and height rule.
+- per-row page-break permission, height, and height rule;
 - logical row/column spans and cell-local presentation.
 
 All physical lengths use explicit `pt`, `in`, `cm`, `mm`, or `px` units.
@@ -35,6 +36,7 @@ properties:
 | indent | `w:tblInd` |
 | cell spacing | `w:tblCellSpacing` |
 | cell margins | `w:tblCellMar` |
+| perimeter and internal borders | `w:tblBorders` |
 | repeat header | `w:tblHeader` on the first row |
 | prevent row splitting | `w:cantSplit` |
 | row height/rule | `w:trHeight` |
@@ -44,13 +46,41 @@ These structures follow Microsoft's
 [WordprocessingML table model](https://learn.microsoft.com/en-us/office/open-xml/word/working-with-wordprocessingml-tables),
 including the distinction between
 [table width](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.tablewidth?view=openxml-3.0.1),
+[table properties](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.tableproperties?view=openxml-3.0.1),
+[table borders](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.tableborders?view=openxml-2.20.0),
 [grid spans](https://learn.microsoft.com/lb-lu/dotnet/api/documentformat.openxml.wordprocessing.gridspan?view=openxml-2.8.0),
 and [vertical merges](https://learn.microsoft.com/es-es/dotnet/api/documentformat.openxml.wordprocessing.verticalmerge?view=openxml-3.0.1).
 
+## Border contract
+
+`TableBorders` addresses `top`, `right`, `bottom`, `left`,
+`inside_horizontal`, and `inside_vertical`. Each edge is either absent or a strict
+`BorderLine`:
+
+- `style`: `none`, `single`, `double`, `dotted`, `dashed`, or `thick`;
+- `width`: required for visible styles and bounded from 0.25pt through 12pt;
+- `color`: `#RRGGBB` or `auto`;
+- `space`: optional and bounded from 0pt through 31pt.
+
+An absent semantic edge means AiOffice did not project a supported direct edge; it
+does not claim that Word will display no border because a table style can still
+contribute one. Setting `{"style": "none"}` writes `w:val="none"` and explicitly
+suppresses that edge. Clearing the whole `borders` property removes all known direct
+table-edge attributes, allowing style inheritance to resume. A supplied `borders`
+object replaces the supported direct edge set, so omitted sides are cleared.
+
+For compatibility, generated DOCX uses physical `left`/`right` edge names. Projection
+also understands the logical `start`/`end` aliases. Unsupported native border styles,
+theme-only colors, and unknown extension data stay authoritative in OOXML and are not
+invented in the semantic projection.
+
 ## Selective native Patch
 
-`table.format` sets or clears selected table-wide properties. It preserves unrelated
-attributes, children, cell content, styles, and package parts.
+`table.format` sets or clears selected table-wide properties, including the complete
+supported direct border set. It preserves unrelated attributes, children, cell
+content, styles, and package parts. Updating a known border edge removes conflicting
+known theme attributes but preserves unknown attributes and child elements on that
+edge.
 
 `table.column.format` addresses a column by stable ID or semantic key and changes
 only its width. Before lowering, AiOffice proves that:
@@ -82,9 +112,11 @@ view, but do not expose a writable column geometry contract.
 
 ## Preview and validation
 
-Semantic HTML renders widths, spans, alignment, layout algorithm, table/cell
-spacing and margins, fill, rich paragraph content, row height, and page-break hints
-for planning. It is approximate and is not evidence of Word pagination.
+Semantic HTML renders widths, spans, alignment, layout algorithm, table/cell spacing
+and margins, perimeter/internal/direct cell borders, fill, rich paragraph content,
+row height, and page-break hints for planning. Internal borders stop at the logical
+grid edge and direct cell borders take precedence in the preview. It is approximate
+and is not evidence of Word pagination.
 
 Validation warns when explicit column widths or an exact preferred width exceed the
 active section's printable width. Fixed-layout tables also warn when a column width

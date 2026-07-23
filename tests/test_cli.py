@@ -89,6 +89,47 @@ class CliTests(unittest.TestCase):
             "background_color",
             table_cell_format_schema["properties"],
         )
+        self.assertIn(
+            "borders",
+            table_cell_format_schema["properties"],
+        )
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(main(["schema", "--kind", "border-line"]), 0)
+        border_line_schema = json.loads(stdout.getvalue())
+        self.assertFalse(border_line_schema["additionalProperties"])
+        self.assertIn("style", border_line_schema["properties"])
+        self.assertIn("width", border_line_schema["properties"])
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(main(["schema", "--kind", "table-borders"]), 0)
+        table_borders_schema = json.loads(stdout.getvalue())
+        self.assertFalse(table_borders_schema["additionalProperties"])
+        self.assertIn(
+            "inside_horizontal",
+            table_borders_schema["properties"],
+        )
+        self.assertIn(
+            "inside_vertical",
+            table_borders_schema["properties"],
+        )
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(
+                main(["schema", "--kind", "table-cell-borders"]),
+                0,
+            )
+        table_cell_borders_schema = json.loads(stdout.getvalue())
+        self.assertFalse(
+            table_cell_borders_schema["additionalProperties"]
+        )
+        self.assertEqual(
+            set(table_cell_borders_schema["properties"]),
+            {"top", "right", "bottom", "left"},
+        )
 
         stdout = StringIO()
         with redirect_stdout(stdout):
@@ -150,6 +191,16 @@ class CliTests(unittest.TestCase):
             self.assertIn(
                 "alignment",
                 capabilities["formatting"]["paragraph_properties"],
+            )
+            border_contract = capabilities["formatting"][
+                "table_contract"
+            ]["border_contract"]
+            self.assertEqual(
+                border_contract["width_range_points"],
+                [0.25, 12],
+            )
+            self.assertTrue(
+                border_contract["direct_cell_precedence"]
             )
             render_providers = {
                 provider["name"]: provider

@@ -14,6 +14,7 @@ from aioffice.documents import DocumentBuilder, open_artifact
 from aioffice.operations import TextMatch, TextRange
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
+    BorderLine,
     DocumentDefaults,
     DocumentField,
     DocumentSection,
@@ -24,8 +25,10 @@ from aioffice.spec.models import (
     PageSize,
     SectionLayout,
     TableCell,
+    TableCellBorders,
     TableCellFormat,
     TableColumn,
+    TableBorders,
     TableLayout,
     TableWidth,
 )
@@ -180,6 +183,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--kind",
         choices=(
             "document",
+            "border-line",
             "document-defaults",
             "document-section",
             "document-settings",
@@ -190,9 +194,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "page-size",
             "section-layout",
             "table-cell",
+            "table-cell-borders",
             "table-cell-format",
             "table-column",
             "table-layout",
+            "table-borders",
             "table-width",
             "text-range",
             "text-match",
@@ -544,6 +550,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "schema":
         schema_models = {
             "document": AiOfficeDocumentSpec,
+            "border-line": BorderLine,
             "document-defaults": DocumentDefaults,
             "document-section": DocumentSection,
             "document-settings": DocumentSettings,
@@ -554,9 +561,11 @@ def _run(args: argparse.Namespace) -> int:
             "page-size": PageSize,
             "section-layout": SectionLayout,
             "table-cell": TableCell,
+            "table-cell-borders": TableCellBorders,
             "table-cell-format": TableCellFormat,
             "table-column": TableColumn,
             "table-layout": TableLayout,
+            "table-borders": TableBorders,
             "table-width": TableWidth,
             "text-range": TextRange,
             "text-match": TextMatch,

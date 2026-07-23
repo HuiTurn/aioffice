@@ -6,6 +6,7 @@ from html import escape
 
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
+    BorderLine,
     BulletList,
     DocumentField,
     DocumentSection,
@@ -119,6 +120,25 @@ def _text_css(style: TextStyle | None) -> str:
     return ";".join(values)
 
 
+def _border_css(border: BorderLine) -> str:
+    if border.style == "none":
+        return "none"
+    assert border.width is not None
+    css_style = {
+        "single": "solid",
+        "double": "double",
+        "dotted": "dotted",
+        "dashed": "dashed",
+        "thick": "solid",
+    }[border.style]
+    color = (
+        "currentColor"
+        if border.color == "auto"
+        else border.color
+    )
+    return f"{border.width.to_css()} {css_style} {color}"
+
+
 def _table_css(table: Table) -> str:
     layout = table.layout
     values: list[str] = []
@@ -143,6 +163,19 @@ def _table_css(table: Table) -> str:
         values.append(
             f"border-spacing:{layout.cell_spacing.to_css()}"
         )
+    elif layout.borders is not None or any(
+        cell.format.borders is not None
+        for row in table.rows
+        for cell in row.cells
+    ):
+        values.append("border-collapse:collapse")
+    if layout.borders is not None:
+        for side in ("top", "right", "bottom", "left"):
+            border = getattr(layout.borders, side)
+            if border is not None:
+                values.append(
+                    f"border-{side}:{_border_css(border)}"
+                )
     if layout.alignment == "center":
         values.extend(["margin-left:auto", "margin-right:auto"])
     elif layout.alignment == "right":
@@ -157,9 +190,16 @@ def _table_css(table: Table) -> str:
 def _table_cell_css(
     table: Table,
     cell: TableCell | None = None,
+    *,
+    inside_right: bool = True,
+    inside_bottom: bool = True,
 ) -> str:
     layout = table.layout
     values: list[str] = []
+    if layout.borders is not None or (
+        cell is not None and cell.format.borders is not None
+    ):
+        values.append("border:none")
     for property_name, field_name in (
         ("padding-top", "cell_margin_top"),
         ("padding-right", "cell_margin_right"),
@@ -192,6 +232,43 @@ def _table_cell_css(
             values.append(
                 f"background-color:{cell.format.background_color}"
             )
+        if cell.format.borders is not None:
+            for side in ("top", "right", "bottom", "left"):
+                border = getattr(cell.format.borders, side)
+                if border is not None:
+                    values.append(
+                        f"border-{side}:{_border_css(border)}"
+                    )
+    if (
+        inside_right
+        and
+        layout.borders is not None
+        and layout.borders.inside_vertical is not None
+        and (
+            cell is None
+            or cell.format.borders is None
+            or cell.format.borders.right is None
+        )
+    ):
+        values.append(
+            "border-right:"
+            f"{_border_css(layout.borders.inside_vertical)}"
+        )
+    if (
+        inside_bottom
+        and
+        layout.borders is not None
+        and layout.borders.inside_horizontal is not None
+        and (
+            cell is None
+            or cell.format.borders is None
+            or cell.format.borders.bottom is None
+        )
+    ):
+        values.append(
+            "border-bottom:"
+            f"{_border_css(layout.borders.inside_horizontal)}"
+        )
     return ";".join(values)
 
 
@@ -606,18 +683,19 @@ def export_html(
                 )
             lines.append("</colgroup>")
             lines.append("<thead><tr>")
-            cell_css = _table_cell_css(block)
-            lines.extend(
-                (
+            for index, column in enumerate(block.columns):
+                header_cell_css = _table_cell_css(
+                    block,
+                    inside_right=index < len(block.columns) - 1,
+                )
+                lines.append(
                     f'<th data-column-id="{escape(column.id, quote=True)}"'
-                    f"{_style_attribute(cell_css)}>"
+                    f"{_style_attribute(header_cell_css)}>"
                     f"{escape(column.title)}</th>"
                 )
-                for column in block.columns
-            )
             lines.append("</tr></thead>")
             lines.append("<tbody>")
-            for row in block.rows:
+            for row_index, row in enumerate(block.rows):
                 row_css: list[str] = []
                 if row.allow_break_across_pages is False:
                     row_css.append("break-inside:avoid")
@@ -699,12 +777,25 @@ def export_html(
                                 f"{paragraph_value}</p>"
                             )
                         value = "".join(rendered_paragraphs)
+                    data_cell_css = _table_cell_css(
+                        block,
+                        cell,
+                        inside_right=(
+                            column_positions[column.key]
+                            + cell.column_span
+                            < column_count
+                        ),
+                        inside_bottom=(
+                            row_index + cell.row_span
+                            < len(block.rows)
+                        ),
+                    )
                     lines.append(
                         f'<td data-cell-id="'
                         f'{escape(cell.id, quote=True)}" '
                         f'data-column-id="{escape(column.id, quote=True)}"'
                         f"{span_attributes}"
-                        f"{_style_attribute(_table_cell_css(block, cell))}>"
+                        f"{_style_attribute(data_cell_css)}>"
                         f"{value}</td>"
                     )
                 lines.append("</tr>")

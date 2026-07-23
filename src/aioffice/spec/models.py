@@ -17,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.11"
+SPEC_VERSION = "0.2-draft.12"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -686,6 +686,70 @@ class TableWidth(StrictModel):
         return self
 
 
+class BorderLine(StrictModel):
+    """One explicit border edge with OOXML-compatible physical constraints."""
+
+    style: Literal[
+        "none",
+        "single",
+        "double",
+        "dotted",
+        "dashed",
+        "thick",
+    ]
+    width: Length | None = None
+    color: HexColor | Literal["auto"] = "auto"
+    space: Length | None = None
+
+    @field_validator("color")
+    @classmethod
+    def normalize_color(cls, value: str) -> str:
+        return value.upper() if value.startswith("#") else value
+
+    @model_validator(mode="after")
+    def validate_border(self) -> "BorderLine":
+        if self.style == "none":
+            if self.width is not None or self.space is not None:
+                raise ValueError(
+                    "A none border cannot include width or space."
+                )
+            return self
+        if self.width is None:
+            raise ValueError("A visible border requires an explicit width.")
+        width_points = self.width.to_points()
+        if width_points < 0.25 or width_points > 12:
+            raise ValueError(
+                "Border width must be between 0.25pt and 12pt."
+            )
+        if self.space is not None:
+            space_points = self.space.to_points()
+            if space_points < 0 or space_points > 31:
+                raise ValueError(
+                    "Border space must be between 0pt and 31pt."
+                )
+        return self
+
+
+class TableBorders(StrictModel):
+    """Table perimeter and internal grid edges."""
+
+    top: BorderLine | None = None
+    right: BorderLine | None = None
+    bottom: BorderLine | None = None
+    left: BorderLine | None = None
+    inside_horizontal: BorderLine | None = None
+    inside_vertical: BorderLine | None = None
+
+
+class TableCellBorders(StrictModel):
+    """Four direct cell edges that override conflicting table borders."""
+
+    top: BorderLine | None = None
+    right: BorderLine | None = None
+    bottom: BorderLine | None = None
+    left: BorderLine | None = None
+
+
 class TableLayout(StrictModel):
     """Supported table-wide geometry independent of cell data semantics."""
 
@@ -699,6 +763,7 @@ class TableLayout(StrictModel):
     cell_margin_right: Length | None = None
     cell_margin_bottom: Length | None = None
     cell_margin_left: Length | None = None
+    borders: TableBorders | None = None
     repeat_header: bool | None = None
 
     @model_validator(mode="after")
@@ -743,6 +808,7 @@ class TableCellFormat(StrictModel):
     no_wrap: bool | None = None
     fit_text: bool | None = None
     background_color: HexColor | None = None
+    borders: TableCellBorders | None = None
     margin_top: Length | None = None
     margin_right: Length | None = None
     margin_bottom: Length | None = None
@@ -931,6 +997,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.9",
         "0.2-draft.10",
         "0.2-draft.11",
+        "0.2-draft.12",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

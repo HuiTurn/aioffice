@@ -24,6 +24,7 @@ from .native import FidelityLevel, FidelityPolicy, FidelityReport
 from .operations import TextMatch, TextRange
 from .security import SecurityPolicy
 from .spec import (
+    BorderLine,
     ColumnLayout,
     DocumentDefaults,
     DocumentField,
@@ -37,7 +38,9 @@ from .spec import (
     SectionColumn,
     SectionLayout,
     Table,
+    TableBorders,
     TableCell,
+    TableCellBorders,
     TableCellFormat,
     TableColumn,
     TableLayout,
@@ -65,6 +68,7 @@ open = open_artifact
 
 __all__ = [
     "AiOfficeError",
+    "BorderLine",
     "Diagnostic",
     "DiffEntry",
     "DocumentDiff",
@@ -98,7 +102,9 @@ __all__ = [
     "SecurityPolicy",
     "SpecValidationError",
     "Table",
+    "TableBorders",
     "TableCell",
+    "TableCellBorders",
     "TableCellFormat",
     "TableColumn",
     "TableLayout",

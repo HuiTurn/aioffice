@@ -16,14 +16,14 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev11`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev12`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
 parts, structured dynamic fields, explicit table geometry, logical merged cells,
-rich table-cell paragraphs, semantic diffs, isolated LibreOffice/Poppler native
-rendering, consistent multi-page evidence, page occupancy diagnostics,
-visual-regression contracts, and fidelity reports.
+rich table-cell paragraphs, explicit table/cell border control, semantic diffs,
+isolated LibreOffice/Poppler native rendering, consistent multi-page evidence, page
+occupancy diagnostics, visual-regression contracts, and fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -380,6 +380,34 @@ table_doc = DocumentBuilder().table(
         "repeat_header": True,
         "cell_margin_left": {"value": 6, "unit": "pt"},
         "cell_margin_right": {"value": 6, "unit": "pt"},
+        "borders": {
+            "top": {
+                "style": "single",
+                "width": {"value": 1.5, "unit": "pt"},
+                "color": "#1F4E78",
+            },
+            "right": {
+                "style": "single",
+                "width": {"value": 1.5, "unit": "pt"},
+                "color": "#1F4E78",
+            },
+            "bottom": {
+                "style": "single",
+                "width": {"value": 1.5, "unit": "pt"},
+                "color": "#1F4E78",
+            },
+            "left": {
+                "style": "single",
+                "width": {"value": 1.5, "unit": "pt"},
+                "color": "#1F4E78",
+            },
+            "inside_horizontal": {
+                "style": "single",
+                "width": {"value": 0.5, "unit": "pt"},
+                "color": "#D9E2F3",
+            },
+            "inside_vertical": {"style": "none"},
+        },
     },
 ).build()
 
@@ -437,7 +465,16 @@ result = rich_table.apply([{
     "op": "table.cell.format",
     "target": "#summary_table",
     "cell": "#summary_cell",
-    "set": {"background_color": "#FFF2CC"},
+    "set": {
+        "background_color": "#FFF2CC",
+        "borders": {
+            "bottom": {
+                "style": "double",
+                "width": {"value": 2, "unit": "pt"},
+                "color": "#C00000",
+            },
+        },
+    },
 }])
 ```
 
@@ -449,6 +486,11 @@ drawings, nested tables, dynamic fields, or malformed content fall back to a
 read-only text projection while their native XML remains intact. See
 [the table layout contract](docs/table-layout.md) and
 [the table cell contract](docs/table-cells.md).
+
+Border edges use explicit styles, widths, colors, and optional spacing. Clearing the
+`borders` property removes known direct border XML so table styles can apply again;
+`{"style": "none"}` writes an explicit no-border edge. A direct cell edge wins over
+the conflicting table perimeter or internal-grid edge.
 
 `doc.render()` defaults to a semantic HTML preview whose contract explicitly reports
 `fidelity="approximate"` and `verification_status="preview_only"`. A local
@@ -568,6 +610,9 @@ aioffice schema --kind table-layout --output table-layout.schema.json
 aioffice schema --kind table-column --output table-column.schema.json
 aioffice schema --kind table-cell --output table-cell.schema.json
 aioffice schema --kind table-cell-format --output table-cell-format.schema.json
+aioffice schema --kind border-line --output border-line.schema.json
+aioffice schema --kind table-borders --output table-borders.schema.json
+aioffice schema --kind table-cell-borders --output table-cell-borders.schema.json
 aioffice schema --kind header-footer-bindings --output header-footer-bindings.schema.json
 aioffice schema --kind header-footer-part --output header-footer-part.schema.json
 aioffice schema --kind text-range --output text-range.schema.json

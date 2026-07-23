@@ -74,6 +74,8 @@ then contains a `PageVisualAnalysis` with:
 - `PAGE_CONTENT_NEAR_EDGE` when visible content approaches a page edge.
 
 These measurements identify review targets; they are not subjective design scores.
+They can narrow review to suspicious pages, but border weight, grid rhythm, color,
+and visual hierarchy still require inspection of the returned page images.
 
 ## CLI
 

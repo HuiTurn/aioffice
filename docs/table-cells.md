@@ -68,12 +68,23 @@ text is useful for planning but is not an editable reconstruction of the cell.
 | no wrap | `w:noWrap` |
 | fit text | `w:tcFitText` |
 | background color | `w:shd/@w:fill` |
+| top/right/bottom/left border | `w:tcBorders` |
 | top/right/bottom/left margin | `w:tcMar` |
 
 `table.cell.format` addresses a cell by stable ID. It sets or clears only selected
 known properties in that cell's `w:tcPr`; unknown attributes, unknown children,
 merged-grid markers, widths, paragraphs, drawings, and all unrelated package parts
 remain in place.
+
+Direct cell edges use the same `BorderLine` style, width, color, and spacing
+constraints as table borders. Under WordprocessingML's border conflict rules, a
+direct cell edge overrides the conflicting table perimeter or internal-grid edge;
+see Microsoft's
+[TableCellBorders contract](https://learn.microsoft.com/es-es/dotnet/api/documentformat.openxml.wordprocessing.tablecellborders?view=openxml-3.0.1).
+Setting an edge to `{"style": "none"}` explicitly disables it. Clearing `borders`
+removes the supported direct edge attributes and allows the table or named style to
+apply again. Supplying a new `borders` object replaces the supported direct edge set,
+so omitted sides are cleared rather than silently retained.
 
 This operation is different from `table.column.format`: cell formatting remains safe
 for a mapped merged anchor, while a merged grid cannot safely expose a one-to-one
@@ -92,7 +103,8 @@ row, duplicate identities, and uncovered logical grid positions before generatio
 ## Preview limitations
 
 Semantic HTML uses `colspan`, `rowspan`, stable cell/paragraph IDs, cell padding,
-vertical alignment, no-wrap, and fill color. Markdown necessarily flattens merged
-cells and rich paragraphs to display text. Neither preview proves native pagination,
-line wrapping, font substitution, or fit-text behavior; use the `libreoffice`
-provider to create inspectable native-compatible PDF/PNG evidence.
+vertical alignment, no-wrap, fill color, and edge-aware border overrides. Markdown
+necessarily flattens merged cells and rich paragraphs to display text. Neither
+preview proves native pagination, line wrapping, font substitution, border conflict
+resolution, or fit-text behavior; use the `libreoffice` provider to create
+inspectable native-compatible PDF/PNG evidence.

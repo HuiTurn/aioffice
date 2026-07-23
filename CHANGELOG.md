@@ -109,11 +109,22 @@
   creation, and explicit overwrite behavior.
 - Added `aioffice render-pages` with bounded comma/range selection, optional analysis,
   structured outputs, and overwrite refusal by default.
+- Added strict table and cell border models with explicit edge style, width, color,
+  and optional spacing constraints.
+- Added DOCX generation and projection for table perimeter/internal borders and
+  direct four-side cell borders.
+- Added selective `table.format` and `table.cell.format` border lowering that
+  preserves unknown edge XML and distinguishes clearing direct formatting from an
+  explicit `none` edge.
+- Added border conflict semantics and edge-aware semantic HTML preview without
+  leaking fallback grid lines onto explicitly styled tables.
+- Exposed standalone border JSON Schemas and machine-readable border capabilities
+  for AI planning.
 - Serialized OPC content-type and relationship control parts with default package
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.11`.
+- Advanced the AiOffice Document Spec to `0.2-draft.12`.
 
 ## 0.1.0
 
