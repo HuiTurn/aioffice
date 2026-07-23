@@ -19,11 +19,18 @@ from .core import (
     WorkspaceError,
     new_id,
 )
-from .documents import Document, DocumentBuilder, PatchResult, open_artifact
+from .documents import (
+    Document,
+    DocumentBuilder,
+    ImageAsset,
+    PatchResult,
+    open_artifact,
+)
 from .native import FidelityLevel, FidelityPolicy, FidelityReport
 from .operations import TextMatch, TextRange
 from .security import SecurityPolicy
 from .spec import (
+    AssetRef,
     BorderLine,
     ColumnLayout,
     DocumentDefaults,
@@ -32,6 +39,7 @@ from .spec import (
     DocumentSettings,
     HeaderFooterBindings,
     HeaderFooterPart,
+    ImageBlock,
     NamedStyle,
     PageSize,
     ParagraphBorders,
@@ -69,6 +77,7 @@ open = open_artifact
 
 __all__ = [
     "AiOfficeError",
+    "AssetRef",
     "BorderLine",
     "Diagnostic",
     "DiffEntry",
@@ -85,6 +94,8 @@ __all__ = [
     "FidelityReport",
     "HeaderFooterBindings",
     "HeaderFooterPart",
+    "ImageAsset",
+    "ImageBlock",
     "LIBREOFFICE_PROVIDER",
     "NativePackageError",
     "NamedStyle",

@@ -10,6 +10,8 @@ from aioffice.spec.models import (
     BulletList,
     DocumentField,
     Heading,
+    ImageBlock,
+    OpaqueBlock,
     OrderedList,
     PageBreak,
     Paragraph,
@@ -24,6 +26,15 @@ _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?\s*$
 
 def _escape_cell(value: Any) -> str:
     return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\n", "<br>")
+
+
+def _escape_link_text(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("\n", " ")
+    )
 
 
 def _rich_text_markdown(text: str | None, content: list[Any]) -> str:
@@ -80,6 +91,25 @@ def export_markdown(spec: AiOfficeDocumentSpec) -> str:
                     for column in block.columns
                 ]
                 lines.append("| " + " | ".join(values) + " |")
+        elif isinstance(block, ImageBlock):
+            alt_text = (
+                block.alt_text
+                or block.title
+                or block.name
+                or "Native document image"
+            )
+            lines.append(
+                f"![{_escape_link_text(alt_text)}]"
+                f"(aioffice-asset:{block.asset_id})"
+            )
+        elif isinstance(block, OpaqueBlock):
+            summary = block.summary.replace("--", "—").replace(
+                "\n",
+                " ",
+            )
+            lines.append(
+                f"<!-- aioffice opaque native content: {summary} -->"
+            )
         elif isinstance(block, PageBreak):
             lines.append("<!-- pagebreak -->")
         lines.append("")

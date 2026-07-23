@@ -16,15 +16,16 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev13`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev14`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
 parts, structured dynamic fields, explicit table geometry, logical merged cells,
 rich table-cell paragraphs, explicit table/cell border control, paragraph
-background/border surfaces, semantic diffs, isolated LibreOffice/Poppler native
-rendering, consistent multi-page evidence, page occupancy diagnostics,
-visual-regression contracts, and fidelity reports.
+background/border surfaces, conservative native image projection and verified asset
+extraction, semantic diffs, isolated LibreOffice/Poppler native rendering, consistent
+multi-page evidence, page occupancy diagnostics, visual-regression contracts, and
+fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -82,6 +83,36 @@ result.document.export("updated.docx")
 Exporting an imported DOCX without changes returns the exact original package bytes.
 When a supported edit is applied, AiOffice rewrites only the affected native part and
 preserves untouched part payloads.
+
+Image bytes deliberately stay out of the JSON Spec. A simple body paragraph
+containing exactly one embedded inline DrawingML picture is projected as an
+AI-addressable `image` block with physical extent, alternative text, media type,
+filename, byte count, and SHA-256 asset identity:
+
+```python
+image = next(
+    node for node in doc.inspect()["nodes"]
+    if node["type"] == "image"
+)
+
+verified = doc.read_image(image["id"])
+assert verified.sha256 == image["asset"]["sha256"]
+verified.write("extracted/" + verified.filename)
+```
+
+The equivalent CLI is:
+
+```bash
+aioffice extract-image existing.docx IMAGE_ID -o extracted.png
+```
+
+The read path re-resolves the trusted native paragraph and OPC relationship, then
+verifies the asset record, media type, size, and content hash before returning bytes.
+Mixed text/picture paragraphs, floating anchors, linked images, multiple pictures,
+crops, transforms, effects, tables, headers/footers, VML, OLE, and embedded objects
+remain explicit opaque native content. They are preserved losslessly and rendered
+through the native provider rather than flattened into a misleading image model. See
+[the native image and asset contract](docs/native-images.md).
 
 AiOffice-generated DOCX files embed a versioned identity manifest. Artifact IDs,
 semantic node IDs, native anchors, and revisions therefore survive export and reopen.

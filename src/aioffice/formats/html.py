@@ -12,6 +12,7 @@ from aioffice.spec.models import (
     DocumentSection,
     Heading,
     HeaderFooterPart,
+    ImageBlock,
     Length,
     OrderedList,
     OpaqueBlock,
@@ -548,6 +549,21 @@ def export_html(
         ),
         ".opaque-header-footer{font-style:italic;color:#7a828a}",
         (
+            ".opaque-native-block{border:1px dashed #a8b1ba;background:#f7f8f9;"
+            "color:#697580;padding:10px 12px;font-style:italic}"
+        ),
+        (
+            ".native-image{box-sizing:border-box;max-width:100%;margin-left:0;"
+            "margin-right:0}.native-image-placeholder{box-sizing:border-box;"
+            "display:flex;align-items:center;justify-content:center;"
+            "min-height:72px;max-width:100%;border:1px dashed #9aa6b2;"
+            "background:#f3f6f8;color:#59636e;text-align:center;padding:12px}"
+        ),
+        (
+            ".native-image figcaption{font-size:.85em;color:#697580;"
+            "margin-top:4px}"
+        ),
+        (
             ".document-field{display:inline-block;min-width:.7em;"
             "border-bottom:1px dotted #74808c}"
         ),
@@ -840,6 +856,64 @@ def export_html(
                     )
                 lines.append("</tr>")
             lines.append("</tbody></table>")
+        elif isinstance(block, ImageBlock):
+            asset = next(
+                (
+                    candidate
+                    for candidate in spec.assets
+                    if candidate.id == block.asset_id
+                ),
+                None,
+            )
+            resolved_paragraph, _ = resolve_node_styles(
+                spec,
+                style_ref=block.style_ref,
+                paragraph_style=block.paragraph_style,
+                text_style=None,
+            )
+            label = (
+                block.alt_text
+                or block.title
+                or block.name
+                or "Native document image"
+            )
+            media_type = asset.media_type if asset is not None else ""
+            figure_css = ";".join(
+                value
+                for value in (
+                    _paragraph_css(resolved_paragraph),
+                    f"width:{block.width.to_css()}",
+                )
+                if value
+            )
+            placeholder_css = (
+                f"width:{block.width.to_css()};"
+                f"height:{block.height.to_css()}"
+            )
+            lines.append(
+                f'<figure id="{block_id}" class="native-image" '
+                f'data-aioffice-asset-id="'
+                f'{escape(block.asset_id, quote=True)}" '
+                f'data-aioffice-media-type="'
+                f'{escape(media_type, quote=True)}"'
+                f"{_style_attribute(figure_css)}>"
+            )
+            lines.append(
+                '<div class="native-image-placeholder" role="img" '
+                f'aria-label="{escape(label, quote=True)}" '
+                f"{_style_attribute(placeholder_css)}>"
+                "Native image — use native rendering or extract the asset"
+                "</div>"
+            )
+            lines.append(
+                f"<figcaption>{escape(label)}</figcaption></figure>"
+            )
+        elif isinstance(block, OpaqueBlock):
+            lines.append(
+                f'<div id="{block_id}" class="opaque-native-block" '
+                'data-aioffice-native-opaque="true">'
+                f"{escape(block.summary)}</div>"
+            )
         elif isinstance(block, PageBreak):
             lines.append(f'<hr id="{block_id}" class="page-break">')
 

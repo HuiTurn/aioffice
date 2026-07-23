@@ -3,6 +3,7 @@
 from .models import (
     AiOfficeDocumentSpec,
     ArtifactDescriptor,
+    AssetRef,
     Block,
     BorderLine,
     BulletList,
@@ -15,6 +16,7 @@ from .models import (
     Heading,
     HeaderFooterBindings,
     HeaderFooterPart,
+    ImageBlock,
     InlineContent,
     Length,
     LineSpacing,
@@ -48,6 +50,7 @@ from .models import (
 __all__ = [
     "AiOfficeDocumentSpec",
     "ArtifactDescriptor",
+    "AssetRef",
     "Block",
     "BorderLine",
     "BulletList",
@@ -60,6 +63,7 @@ __all__ = [
     "Heading",
     "HeaderFooterBindings",
     "HeaderFooterPart",
+    "ImageBlock",
     "InlineContent",
     "Length",
     "LineSpacing",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from aioffice.core.errors import (
     UnsupportedFormatError,
 )
 from aioffice.formats.docx import compile_docx, export_docx
+from aioffice.formats.docx_images import simple_inline_image_from_ref
 from aioffice.formats.docx_import import import_docx
 from aioffice.formats.docx_native import apply_docx_operations
 from aioffice.formats.html import export_html
@@ -52,15 +54,18 @@ from aioffice.rendering import (
 from aioffice.security import SecurityPolicy
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
+    AssetRef,
     Block,
     DOCUMENT_SCHEMA_URL,
     BulletList,
     DocumentField,
     Heading,
+    ImageBlock,
     LEGACY_DOCUMENT_SCHEMA_URL,
     LEGACY_SPEC_VERSION,
     Length,
     NamedStyle,
+    NativeRef,
     OpaqueBlock,
     OrderedList,
     Paragraph,
@@ -75,6 +80,8 @@ from aioffice.spec.models import (
 )
 from aioffice.styles import style_catalog, theme_named_styles
 from aioffice.themes import get_theme
+
+from .assets import ImageAsset
 
 
 def _document_fields(spec: AiOfficeDocumentSpec) -> list[DocumentField]:
@@ -282,6 +289,96 @@ class Document:
     def to_json(self, *, indent: int = 2) -> str:
         return json.dumps(self.to_spec(), ensure_ascii=False, indent=indent) + "\n"
 
+    def read_image(self, image_id: str) -> ImageAsset:
+        """Return verified bytes for one projected native image occurrence."""
+
+        normalized_id = image_id[1:] if image_id.startswith("#") else image_id
+        image = next(
+            (
+                node
+                for node in self._spec.content
+                if isinstance(node, ImageBlock)
+                and node.id == normalized_id
+            ),
+            None,
+        )
+        if image is None:
+            raise NativePackageError(
+                f"No projected image matched #{normalized_id}."
+            )
+        if self._native is None:
+            raise NativePackageError(
+                "Image bytes are available only while the native DOCX package "
+                "is attached."
+            )
+        if not isinstance(image.source_ref, NativeRef):
+            raise NativePackageError(
+                f"Image {image.id!r} has no trusted native source reference."
+            )
+        native_image = simple_inline_image_from_ref(
+            self._native,
+            image.source_ref,
+        )
+        asset_matches = [
+            asset
+            for asset in self._spec.assets
+            if asset.id == image.asset_id
+        ]
+        if len(asset_matches) != 1:
+            raise NativePackageError(
+                f"Image {image.id!r} does not resolve to one asset record."
+            )
+        asset = asset_matches[0]
+        if (
+            image.asset_id != native_image.asset_id
+            or asset.sha256 != native_image.sha256
+            or asset.media_type != native_image.media_type
+            or (
+                asset.size_bytes is not None
+                and asset.size_bytes != native_image.size_bytes
+            )
+        ):
+            raise NativePackageError(
+                f"Image {image.id!r} metadata no longer matches the native "
+                "package."
+            )
+        payload = self._native.get_part(native_image.part_uri)
+        digest = hashlib.sha256(payload).hexdigest()
+        if (
+            digest != native_image.sha256
+            or len(payload) != native_image.size_bytes
+        ):
+            raise NativePackageError(
+                f"Image {image.id!r} failed binary integrity verification."
+            )
+        return ImageAsset(
+            image_id=image.id,
+            asset_id=asset.id,
+            media_type=native_image.media_type,
+            filename=native_image.filename,
+            sha256=digest,
+            data=payload,
+        )
+
+    def image_bytes(self, image_id: str) -> bytes:
+        """Return only the verified bytes for a projected image."""
+
+        return self.read_image(image_id).data
+
+    def extract_image(
+        self,
+        image_id: str,
+        target: str | Path,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        """Write one verified native image without embedding it in JSON."""
+
+        return self.read_image(image_id).write(
+            target,
+            overwrite=overwrite,
+        )
+
     def inspect(self, *, response_format: str = "compact") -> dict[str, Any]:
         if response_format not in {"compact", "expanded", "summary"}:
             raise ValueError("response_format must be compact, expanded, or summary.")
@@ -302,6 +399,11 @@ class Document:
             "section_count": len(self._spec.sections),
             "header_footer_count": len(self._spec.header_footers),
             "field_count": len(_document_fields(self._spec)),
+            "image_count": sum(
+                isinstance(node, ImageBlock)
+                for node in self._spec.content
+            ),
+            "asset_count": len(self._spec.assets),
         }
         if response_format == "compact":
             style_usage: dict[str, int] = {}
@@ -385,6 +487,34 @@ class Document:
                             }
                             for row in node.rows[:3]
                         ],
+                    )
+                elif isinstance(node, ImageBlock):
+                    asset = next(
+                        (
+                            candidate
+                            for candidate in self._spec.assets
+                            if candidate.id == node.asset_id
+                        ),
+                        None,
+                    )
+                    compact.update(
+                        asset_id=node.asset_id,
+                        placement=node.placement,
+                        width=node.width.model_dump(mode="json"),
+                        height=node.height.model_dump(mode="json"),
+                        name=node.name,
+                        alt_text=node.alt_text,
+                        title=node.title,
+                        capabilities=node.capabilities,
+                        editable=node.editable,
+                        asset=(
+                            asset.model_dump(
+                                mode="json",
+                                exclude_none=True,
+                            )
+                            if asset is not None
+                            else None
+                        ),
                     )
                 elif isinstance(node, OpaqueBlock):
                     compact.update(
@@ -498,6 +628,10 @@ class Document:
             result["header_footers"] = [
                 part.model_dump(mode="json", exclude_none=True)
                 for part in self._spec.header_footers
+            ]
+            result["assets"] = [
+                asset.model_dump(mode="json", exclude_none=True)
+                for asset in self._spec.assets
             ]
         return result
 
@@ -644,8 +778,44 @@ class Document:
                 ],
             },
             "operations": operations,
+            "assets": {
+                "binary_in_json": False,
+                "image_projection": "native_metadata_only",
+                "projected_image_count": sum(
+                    isinstance(node, ImageBlock)
+                    for node in self._spec.content
+                ),
+                "asset_count": len(self._spec.assets),
+                "read_api": "Document.read_image(image_id)",
+                "bytes_api": "Document.image_bytes(image_id)",
+                "extract_api": (
+                    "Document.extract_image(image_id, target, overwrite=False)"
+                ),
+                "cli_extract": (
+                    "aioffice extract-image INPUT IMAGE_ID -o OUTPUT"
+                ),
+                "supported_native_subset": [
+                    "one embedded DrawingML picture",
+                    "inline placement",
+                    "explicit positive extent",
+                    "rectangular stretch fill",
+                    "no crop, rotation, flip, visible outline, or visual effect",
+                    "body paragraph with no other visible content",
+                ],
+                "opaque_native_cases": [
+                    "floating or anchored drawing",
+                    "text and drawing in one paragraph",
+                    "multiple pictures",
+                    "linked or external image",
+                    "cropped, transformed, outlined, or effected picture",
+                    "picture in table, header, or footer",
+                    "VML, OLE, or embedded object",
+                ],
+                "native_render_is_visual_authority": True,
+            },
             "selectors": [
                 "#node_id",
+                "#image_id",
                 "#section_id",
                 "#header_footer_block_id",
                 "#field_id",
@@ -885,6 +1055,34 @@ class Document:
                     suggested_actions=[{"action": "add_content"}],
                 )
             )
+
+        assets_by_id: dict[str, AssetRef] = {}
+        for asset_index, asset in enumerate(self._spec.assets):
+            asset_path = f"assets.{asset_index}"
+            if asset.id in seen:
+                diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"Duplicate node ID {asset.id!r}.",
+                        node_ids=[asset.id],
+                        path=f"{asset_path}.id",
+                    )
+                )
+            else:
+                seen[asset.id] = asset_path
+            if asset.id in assets_by_id:
+                diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"Duplicate asset ID {asset.id!r}.",
+                        node_ids=[asset.id],
+                        path=f"{asset_path}.id",
+                    )
+                )
+            else:
+                assets_by_id[asset.id] = asset
 
         if get_theme(self._spec.theme.ref) is None:
             diagnostics.append(
@@ -1278,6 +1476,89 @@ class Document:
                         message=(
                             f"Node {node.id!r} references a revision newer than "
                             f"artifact revision {self.revision}."
+                        ),
+                        node_ids=[node.id],
+                        path=f"content.{index}",
+                    )
+                )
+
+            if isinstance(node, ImageBlock):
+                asset = assets_by_id.get(node.asset_id)
+                if asset is None:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="ASSET_NOT_FOUND",
+                            message=(
+                                f"Image {node.id!r} references missing asset "
+                                f"{node.asset_id!r}."
+                            ),
+                            node_ids=[node.id, node.asset_id],
+                            path=f"content.{index}.asset_id",
+                            suggested_actions=[
+                                {"action": "inspect_assets"}
+                            ],
+                        )
+                    )
+                if not native_projection:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="UNSUPPORTED_FEATURE",
+                            message=(
+                                "Image blocks in this release can only be "
+                                "projected from an attached native DOCX."
+                            ),
+                            node_ids=[node.id],
+                            path=f"content.{index}",
+                        )
+                    )
+                if node.alt_text is None or not node.alt_text.strip():
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.WARNING,
+                            code="IMAGE_ALT_TEXT_MISSING",
+                            message=(
+                                f"Image {node.id!r} has no native alternative "
+                                "text."
+                            ),
+                            node_ids=[node.id],
+                            path=f"content.{index}.alt_text",
+                            recoverable=True,
+                            suggested_actions=[
+                                {
+                                    "action": "add_native_image_alt_text",
+                                    "image_id": node.id,
+                                }
+                            ],
+                        )
+                    )
+                if (
+                    node.style_ref is not None
+                    and node.style_ref not in named_styles
+                ):
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=style_issue_severity,
+                            code="STYLE_NOT_FOUND",
+                            message=(
+                                f"Image {node.id!r} references missing "
+                                f"paragraph style {node.style_ref!r}."
+                            ),
+                            node_ids=[node.id],
+                            path=f"content.{index}.style_ref",
+                            recoverable=True,
+                        )
+                    )
+
+            if isinstance(node, OpaqueBlock) and not native_projection:
+                diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            "Opaque body content can only be preserved from "
+                            "a native document."
                         ),
                         node_ids=[node.id],
                         path=f"content.{index}",

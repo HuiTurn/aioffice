@@ -14,6 +14,7 @@ from aioffice.documents import DocumentBuilder, open_artifact
 from aioffice.operations import TextMatch, TextRange
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
+    AssetRef,
     BorderLine,
     DocumentDefaults,
     DocumentField,
@@ -21,6 +22,7 @@ from aioffice.spec.models import (
     DocumentSettings,
     HeaderFooterBindings,
     HeaderFooterPart,
+    ImageBlock,
     NamedStyle,
     PageSize,
     ParagraphBorders,
@@ -78,6 +80,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "capabilities", help="Report operations and fidelity available for a document."
     )
     capabilities.add_argument("input", type=Path)
+
+    extract_image = subparsers.add_parser(
+        "extract-image",
+        help="Extract one verified native image by its projected image ID.",
+    )
+    extract_image.add_argument("input", type=Path)
+    extract_image.add_argument("image_id")
+    extract_image.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+    )
+    extract_image.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace the output file if it already exists.",
+    )
 
     render = subparsers.add_parser(
         "render",
@@ -185,6 +205,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--kind",
         choices=(
             "document",
+            "asset-ref",
             "border-line",
             "document-defaults",
             "document-section",
@@ -192,6 +213,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "document-field",
             "header-footer-bindings",
             "header-footer-part",
+            "image-block",
             "named-style",
             "page-size",
             "paragraph-borders",
@@ -448,6 +470,23 @@ def _run(args: argparse.Namespace) -> int:
         _json_dump(document.capabilities())
         return 0
 
+    if args.command == "extract-image":
+        document = open_artifact(args.input)
+        image = document.read_image(args.image_id)
+        output = image.write(args.output, overwrite=args.overwrite)
+        _json_dump(
+            {
+                "image_id": image.image_id,
+                "asset_id": image.asset_id,
+                "media_type": image.media_type,
+                "filename": image.filename,
+                "sha256": image.sha256,
+                "size_bytes": image.size_bytes,
+                "output": str(output),
+            }
+        )
+        return 0
+
     if args.command == "render":
         if args.page is not None and args.format != "png":
             raise ValueError("--page is valid only with --format png.")
@@ -554,6 +593,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "schema":
         schema_models = {
             "document": AiOfficeDocumentSpec,
+            "asset-ref": AssetRef,
             "border-line": BorderLine,
             "document-defaults": DocumentDefaults,
             "document-section": DocumentSection,
@@ -561,6 +601,7 @@ def _run(args: argparse.Namespace) -> int:
             "document-field": DocumentField,
             "header-footer-bindings": HeaderFooterBindings,
             "header-footer-part": HeaderFooterPart,
+            "image-block": ImageBlock,
             "named-style": NamedStyle,
             "page-size": PageSize,
             "paragraph-borders": ParagraphBorders,

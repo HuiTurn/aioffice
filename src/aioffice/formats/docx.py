@@ -60,6 +60,7 @@ from aioffice.spec.models import (
     DocumentField,
     Heading,
     HeaderFooterPart,
+    ImageBlock,
     InlineContent,
     OpaqueBlock,
     OrderedList,
@@ -673,6 +674,15 @@ def _document_xml(
                 native_kind="w:tbl",
             )
             _register_table_refs(refs, element, index, block)
+        elif isinstance(block, ImageBlock):
+            raise ValueError(
+                "Semantic DOCX generation cannot compile a native-only "
+                "image block; preserve or attach its source DOCX package."
+            )
+        elif isinstance(block, OpaqueBlock):
+            raise ValueError(
+                "Semantic DOCX generation cannot compile opaque body content."
+            )
         elif isinstance(block, PageBreak):
             paragraph = ET.SubElement(
                 body,

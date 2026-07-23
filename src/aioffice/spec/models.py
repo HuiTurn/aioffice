@@ -17,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.13"
+SPEC_VERSION = "0.2-draft.14"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -488,8 +488,40 @@ class ThemeRef(StrictModel):
 class AssetRef(StrictModel):
     id: NodeId = Field(default_factory=lambda: new_id("asset"))
     sha256: Annotated[str, StringConstraints(pattern=r"^[a-fA-F0-9]{64}$")]
-    media_type: str
+    media_type: Annotated[
+        str,
+        StringConstraints(
+            min_length=3,
+            max_length=255,
+            pattern=(
+                r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/"
+                r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$"
+            ),
+        ),
+    ]
     filename: str | None = None
+    size_bytes: int | None = Field(default=None, ge=0, strict=True)
+
+    @field_validator("sha256")
+    @classmethod
+    def normalize_sha256(cls, value: str) -> str:
+        return value.lower()
+
+    @field_validator("filename")
+    @classmethod
+    def validate_filename(cls, value: str | None) -> str | None:
+        if (
+            value is not None
+            and (
+                not value
+                or value in {".", ".."}
+                or "/" in value
+                or "\\" in value
+                or "\x00" in value
+            )
+        ):
+            raise ValueError("Asset filename must be one safe basename.")
+        return value
 
 
 class NativeRef(StrictModel):
@@ -964,6 +996,48 @@ class PageBreak(NodeBase):
     type: Literal["page_break"] = "page_break"
 
 
+class ImageBlock(NodeBase):
+    """One AI-addressable image occurrence backed by a native binary asset."""
+
+    id: NodeId = Field(default_factory=lambda: new_id("image"))
+    type: Literal["image"] = "image"
+    asset_id: NodeId
+    placement: Literal["inline"] = "inline"
+    width: Length
+    height: Length
+    name: str | None = None
+    alt_text: str | None = None
+    title: str | None = None
+    style_ref: StyleId | None = None
+    paragraph_style: ParagraphStyle | None = None
+    capabilities: list[
+        Literal["inspect", "extract", "delete", "render"]
+    ] = Field(
+        default_factory=lambda: [
+            "inspect",
+            "extract",
+            "delete",
+            "render",
+        ]
+    )
+    editable: Literal[False] = False
+
+    @model_validator(mode="after")
+    def validate_size(self) -> "ImageBlock":
+        if self.width.to_points() <= 0 or self.height.to_points() <= 0:
+            raise ValueError("Image width and height must be greater than zero.")
+        if self.capabilities != [
+            "inspect",
+            "extract",
+            "delete",
+            "render",
+        ]:
+            raise ValueError(
+                "A native image must declare its exact supported capabilities."
+            )
+        return self
+
+
 class OpaqueBlock(NodeBase):
     id: NodeId = Field(default_factory=lambda: new_id("opaque"))
     type: Literal["opaque"] = "opaque"
@@ -975,7 +1049,14 @@ class OpaqueBlock(NodeBase):
 
 
 Block = Annotated[
-    Heading | Paragraph | BulletList | OrderedList | Table | PageBreak | OpaqueBlock,
+    Heading
+    | Paragraph
+    | BulletList
+    | OrderedList
+    | Table
+    | PageBreak
+    | ImageBlock
+    | OpaqueBlock,
     Field(discriminator="type"),
 ]
 
@@ -1018,6 +1099,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.11",
         "0.2-draft.12",
         "0.2-draft.13",
+        "0.2-draft.14",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

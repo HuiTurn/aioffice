@@ -134,11 +134,27 @@
   losslessly preserved instead of exposing misleading semantic values.
 - Added resolved paragraph/text styling to header/footer HTML previews and exposed
   paragraph surface schemas and capability metadata.
+- Added conservative `image` block projection for one embedded, inline DrawingML
+  picture in an otherwise empty body paragraph, including explicit physical extent,
+  native alternative text, title/name, and stable paragraph identity.
+- Added content-addressed `AssetRef` records with media type, filename, byte count,
+  and full SHA-256 while deliberately keeping image bytes out of the JSON Spec.
+- Added verified `Document.read_image()`, `image_bytes()`, and `extract_image()` APIs
+  plus `aioffice extract-image`; every read re-resolves the trusted native paragraph
+  and OPC relationship and rechecks the binary hash and size.
+- Changed mixed text/drawing paragraphs and complex image cases to explicit opaque
+  projections so the semantic layer can no longer hide a picture inside an ordinary
+  text node.
+- Added accessible, dimensioned semantic HTML image placeholders, stable Markdown
+  asset references, image/asset JSON Schemas, and machine-readable capability
+  boundaries while keeping native rendering as visual authority.
+- Added explicit semantic compiler refusal for native-only image and opaque body
+  blocks instead of silently omitting them.
 - Serialized OPC content-type and relationship control parts with default package
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.13`.
+- Advanced the AiOffice Document Spec to `0.2-draft.14`.
 
 ## 0.1.0
 

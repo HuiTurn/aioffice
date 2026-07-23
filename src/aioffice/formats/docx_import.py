@@ -36,6 +36,7 @@ from aioffice.formats.docx_fields import (
     field_payload,
     parse_paragraph_fields,
 )
+from aioffice.formats.docx_images import simple_inline_image
 from aioffice.formats.docx_section import (
     native_ref_for_section,
     read_section_layout,
@@ -371,10 +372,100 @@ def _paragraph_projection(
     hyperlink_targets: dict[str, str],
     named_styles: dict[str, NamedStyle],
     *,
+    package: NativePackage | None = None,
+    assets: dict[str, dict[str, Any]] | None = None,
     part_uri: str = "/word/document.xml",
     root_path: str = "/w:document/w:body",
     allow_heading: bool = True,
 ) -> dict[str, Any]:
+    native_image = (
+        simple_inline_image(
+            package,
+            element,
+            source_part=part_uri,
+        )
+        if package is not None
+        and element.find(f".//{_q(W, 'drawing')}") is not None
+        and element.find(f".//{_q(W, 'object')}") is None
+        else None
+    )
+    if native_image is not None:
+        para_id = element.attrib.get(_q(W14, "paraId"), f"{index:06d}")
+        style = element.find(f"./{_q(W, 'pPr')}/{_q(W, 'pStyle')}")
+        style_id = (
+            style.attrib.get(_q(W, "val"), "")
+            if style is not None
+            else ""
+        )
+        asset_payload: dict[str, Any] = {
+            "id": native_image.asset_id,
+            "sha256": native_image.sha256,
+            "media_type": native_image.media_type,
+            "filename": native_image.filename,
+            "size_bytes": native_image.size_bytes,
+        }
+        if assets is not None:
+            existing_asset = assets.get(native_image.asset_id)
+            if existing_asset is not None:
+                if any(
+                    existing_asset.get(field_name)
+                    != asset_payload.get(field_name)
+                    for field_name in (
+                        "id",
+                        "sha256",
+                        "media_type",
+                        "size_bytes",
+                    )
+                ):
+                    raise NativePackageError(
+                        "DOCX image asset identity collision detected."
+                    )
+            else:
+                assets[native_image.asset_id] = asset_payload
+        image_payload: dict[str, Any] = {
+            "id": _unique_id("image", para_id, index, seen_ids),
+            "type": "image",
+            "asset_id": native_image.asset_id,
+            "placement": "inline",
+            "width": native_image.width.model_dump(mode="json"),
+            "height": native_image.height.model_dump(mode="json"),
+            "name": native_image.name,
+            "alt_text": native_image.alt_text,
+            "title": native_image.title,
+            "source_ref": _source_ref(
+                [element],
+                [index],
+                "w:p",
+                native_id=element.attrib.get(_q(W14, "paraId")),
+                part_uri=part_uri,
+                root_path=root_path,
+            ),
+            "capabilities": [
+                "inspect",
+                "extract",
+                "delete",
+                "render",
+            ],
+            "editable": False,
+            "metadata": {
+                "projection": "native_inline_image_metadata",
+                "native_features": ["drawing"],
+                "native_relationship_id": native_image.relationship_id,
+                "native_part_uri": native_image.part_uri,
+                "native_drawing_id": native_image.native_drawing_id,
+                "native_style_id": style_id or None,
+            },
+        }
+        if style_id:
+            image_payload["style_ref"] = style_id
+        paragraph_style = read_paragraph_style(element)
+        if paragraph_style is not None:
+            image_payload["paragraph_style"] = paragraph_style.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+        return image_payload
+
     try:
         text_projection, text_style = _field_aware_text_projection(
             element,
@@ -456,23 +547,34 @@ def _paragraph_projection(
         )
     if text_style is not None:
         common["text_style"] = text_style
+    unsupported_native_features = [
+        feature
+        for feature in native_features
+        if feature != "field"
+    ]
+    if unsupported_native_features:
+        return {
+            **common,
+            "id": _unique_id("opaque", para_id, index, seen_ids),
+            "type": "opaque",
+            "summary": (
+                "DOCX paragraph containing unsupported drawing or embedded "
+                "content, with text."
+                if text
+                else (
+                    "DOCX paragraph containing unsupported drawing or "
+                    "embedded content."
+                )
+            ),
+            "capabilities": ["inspect", "move", "delete", "render"],
+            "editable": False,
+        }
     if heading_level is not None and allow_heading:
         return {
             **common,
             "type": "heading",
             "level": heading_level,
             **text_projection,
-        }
-    if not text and any(
-        feature != "field" for feature in native_features
-    ):
-        return {
-            **common,
-            "id": _unique_id("opaque", para_id, index, seen_ids),
-            "type": "opaque",
-            "summary": "DOCX paragraph containing unsupported drawing or embedded content.",
-            "capabilities": ["inspect", "move", "delete", "render"],
-            "editable": False,
         }
     return {**common, "type": "paragraph", **text_projection}
 
@@ -1052,6 +1154,7 @@ def import_docx(
         raise NativePackageError("DOCX main document part has no w:body.")
 
     content: list[dict[str, Any]] = []
+    assets_by_id: dict[str, dict[str, Any]] = {}
     seen_ids: set[str] = set()
     body_elements = list(body)
     header_footer_diagnostics: list[Diagnostic] = []
@@ -1243,7 +1346,15 @@ def import_docx(
             if _is_section_carrier(element):
                 index += 1
                 continue
-            numbering = _paragraph_numbering(element)
+            has_drawing_or_object = (
+                element.find(f".//{_q(W, 'drawing')}") is not None
+                or element.find(f".//{_q(W, 'object')}") is not None
+            )
+            numbering = (
+                None
+                if has_drawing_or_object
+                else _paragraph_numbering(element)
+            )
             if numbering is not None and numbering in numbering_formats:
                 group_elements = [element]
                 group_indices = [index]
@@ -1253,7 +1364,12 @@ def import_docx(
                     and _paragraph_section(group_elements[-1]) is None
                 ):
                     candidate = body_elements[next_index]
-                    if candidate.tag != _q(W, "p") or _paragraph_numbering(candidate) != numbering:
+                    if (
+                        candidate.tag != _q(W, "p")
+                        or candidate.find(f".//{_q(W, 'drawing')}") is not None
+                        or candidate.find(f".//{_q(W, 'object')}") is not None
+                        or _paragraph_numbering(candidate) != numbering
+                    ):
                         break
                     group_elements.append(candidate)
                     group_indices.append(next_index)
@@ -1271,7 +1387,7 @@ def import_docx(
                     body_index_to_node[group_index] = projected
                 index = next_index
                 continue
-            if _is_page_break(element):
+            if not has_drawing_or_object and _is_page_break(element):
                 projected = _page_break_projection(element, index, seen_ids)
             else:
                 projected = _paragraph_projection(
@@ -1280,6 +1396,8 @@ def import_docx(
                     seen_ids,
                     hyperlink_targets,
                     named_styles,
+                    package=package,
+                    assets=assets_by_id,
                 )
             content.append(projected)
             body_index_to_node[index] = projected
@@ -1420,6 +1538,10 @@ def import_docx(
             "sections": sections or [{"id": "section_default"}],
             "header_footers": header_footers,
             "content": content,
+            "assets": [
+                assets_by_id[asset_id]
+                for asset_id in sorted(assets_by_id)
+            ],
             "extensions": {
                 "dev.aioffice.native": {
                     "format": "docx",
