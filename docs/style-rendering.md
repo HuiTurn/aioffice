@@ -15,6 +15,15 @@ object with a numeric `value` and one of `pt`, `in`, `cm`, `mm`, or `px`:
   "text": "The program is on schedule.",
   "paragraph_style": {
     "alignment": "justify",
+    "background_color": "#EAF2F8",
+    "borders": {
+      "left": {
+        "style": "single",
+        "width": {"value": 3, "unit": "pt"},
+        "color": "#1F4E78",
+        "space": {"value": 8, "unit": "pt"}
+      }
+    },
     "spacing_before": {"value": 6, "unit": "pt"},
     "spacing_after": {"value": 8, "unit": "pt"},
     "line_spacing": {"rule": "multiple", "value": 1.2},
@@ -33,6 +42,12 @@ Unitless lengths, unknown properties, invalid colors, negative paragraph spacing
 and conflicting first-line/hanging indents fail validation. `set` changes selected
 properties; `clear` removes direct formatting so the native named style or document
 default can take effect again.
+
+Solid paragraph backgrounds and four-side borders use direct `w:shd` and `w:pBdr`
+properties. Border sides merge independently through the style hierarchy. An
+explicit `none` edge suppresses an inherited edge; clearing `borders` resumes
+inheritance. Pattern/theme shading and `between`/`bar` paragraph borders are kept
+only in native OOXML. See [the paragraph surface contract](paragraph-surfaces.md).
 
 ## Named styles and inheritance
 
@@ -85,7 +100,8 @@ On a generated document, the same models compile to `w:pPr` and `w:rPr`. On an
 imported DOCX, AiOffice projects supported direct properties into the semantic
 model. A format patch updates only the requested native properties:
 
-- paragraph alignment, spacing, line spacing, indentation, pagination controls;
+- paragraph alignment, solid background, four-side borders, spacing, line spacing,
+  indentation, and pagination controls;
 - paragraph outline level used by heading/navigation semantics;
 - font families, size, foreground/background color;
 - bold, italic, underline, strike, small/all caps;

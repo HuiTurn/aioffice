@@ -47,6 +47,20 @@ def _paragraph_css(style: ParagraphStyle | None) -> str:
     if style is None:
         return ""
     values: list[str] = []
+    if style.background_color is not None:
+        values.append(
+            f"background-color:{style.background_color}"
+        )
+    if style.borders is not None:
+        for side in ("top", "right", "bottom", "left"):
+            border = getattr(style.borders, side)
+            if border is None:
+                continue
+            values.append(f"border-{side}:{_border_css(border)}")
+            if border.space is not None:
+                values.append(
+                    f"padding-{side}:{border.space.to_css()}"
+                )
     if style.alignment is not None:
         values.append(f"text-align:{style.alignment}")
     if style.spacing_before is not None:
@@ -363,6 +377,7 @@ def _effective_header_footers(
 
 
 def _header_footer_html(
+    spec: AiOfficeDocumentSpec,
     part: HeaderFooterPart | None,
     *,
     kind: str,
@@ -378,15 +393,37 @@ def _header_footer_html(
     for block in part.content:
         block_id = escape(block.id, quote=True)
         if isinstance(block, Paragraph):
+            resolved_paragraph, resolved_text = resolve_node_styles(
+                spec,
+                style_ref=block.style_ref,
+                paragraph_style=block.paragraph_style,
+                text_style=block.text_style,
+            )
             value = (
-                escape(block.text)
+                (
+                    f"<span"
+                    f"{_style_attribute(_text_css(resolved_text))}>"
+                    f"{escape(block.text)}</span>"
+                    if resolved_text is not None
+                    else escape(block.text)
+                )
                 if block.text is not None
                 else "".join(
-                    _span_html(inline, block.text_style)
+                    _span_html(inline, resolved_text)
                     for inline in block.content
                 )
             )
-            lines.append(f'<p id="{block_id}">{value}</p>')
+            style_data = (
+                f' data-aioffice-style="'
+                f'{escape(block.style_ref, quote=True)}"'
+                if block.style_ref is not None
+                else ""
+            )
+            lines.append(
+                f'<p id="{block_id}"{style_data}'
+                f"{_style_attribute(_paragraph_css(resolved_paragraph))}>"
+                f"{value}</p>"
+            )
         elif isinstance(block, OpaqueBlock):
             lines.append(
                 f'<div id="{block_id}" class="opaque-header-footer">'
@@ -557,6 +594,7 @@ def export_html(
     )
     lines.extend(
         _header_footer_html(
+            spec,
             active_parts.get(f"header_{header_variant}"),
             kind="header",
             variant=header_variant,
@@ -573,6 +611,7 @@ def export_html(
             )
             lines.extend(
                 _header_footer_html(
+                    spec,
                     active_parts.get(f"footer_{footer_variant}"),
                     kind="footer",
                     variant=footer_variant,
@@ -590,6 +629,7 @@ def export_html(
             )
             lines.extend(
                 _header_footer_html(
+                    spec,
                     active_parts.get(f"header_{header_variant}"),
                     kind="header",
                     variant=header_variant,
@@ -811,6 +851,7 @@ def export_html(
     )
     lines.extend(
         _header_footer_html(
+            spec,
             active_parts.get(f"footer_{footer_variant}"),
             kind="footer",
             variant=footer_variant,

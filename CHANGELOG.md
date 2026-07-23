@@ -120,11 +120,25 @@
   leaking fallback grid lines onto explicitly styled tables.
 - Exposed standalone border JSON Schemas and machine-readable border capabilities
   for AI planning.
+- Added paragraph-wide solid sRGB backgrounds and strict top/right/bottom/left
+  border surfaces to `ParagraphStyle`.
+- Added shared loss-aware WordprocessingML border codecs used by table, cell, and
+  paragraph lowering.
+- Added DOCX generation and conservative projection for `w:pPr/w:shd` and
+  `w:pPr/w:pBdr` across body, heading, rich table-cell, header/footer, document
+  defaults, and named-style paragraphs.
+- Added selective `paragraph.format` and `style.format` surface Patch support with
+  per-edge style inheritance, explicit `none`, direct-format clearing, unknown XML
+  preservation, and part-scoped fidelity reports.
+- Kept pattern/theme shading and paragraph `between`/`bar` borders native-only and
+  losslessly preserved instead of exposing misleading semantic values.
+- Added resolved paragraph/text styling to header/footer HTML previews and exposed
+  paragraph surface schemas and capability metadata.
 - Serialized OPC content-type and relationship control parts with default package
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.12`.
+- Advanced the AiOffice Document Spec to `0.2-draft.13`.
 
 ## 0.1.0
 

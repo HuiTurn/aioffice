@@ -407,6 +407,17 @@ class NamedStyleTests(unittest.TestCase):
             DocumentBuilder(
                 defaults={
                     "paragraph_style": {
+                        "background_color": "#F2F2F2",
+                        "borders": {
+                            "bottom": {
+                                "style": "single",
+                                "width": {
+                                    "value": 0.5,
+                                    "unit": "pt",
+                                },
+                                "color": "#A6A6A6",
+                            }
+                        },
                         "line_spacing": {"rule": "multiple", "value": 1.4},
                         "widow_control": False,
                     },
@@ -422,6 +433,16 @@ class NamedStyleTests(unittest.TestCase):
         )
         reopened = Document.from_docx(document.to_bytes("docx"))
         defaults = reopened.to_spec()["defaults"]
+        self.assertEqual(
+            defaults["paragraph_style"]["background_color"],
+            "#F2F2F2",
+        )
+        self.assertEqual(
+            defaults["paragraph_style"]["borders"]["bottom"][
+                "style"
+            ],
+            "single",
+        )
         self.assertEqual(defaults["paragraph_style"]["line_spacing"]["value"], 1.4)
         self.assertFalse(defaults["paragraph_style"]["widow_control"])
         self.assertEqual(defaults["text_style"]["font_family"], "Arial")

@@ -16,14 +16,15 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev12`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev13`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
 parts, structured dynamic fields, explicit table geometry, logical merged cells,
-rich table-cell paragraphs, explicit table/cell border control, semantic diffs,
-isolated LibreOffice/Poppler native rendering, consistent multi-page evidence, page
-occupancy diagnostics, visual-regression contracts, and fidelity reports.
+rich table-cell paragraphs, explicit table/cell border control, paragraph
+background/border surfaces, semantic diffs, isolated LibreOffice/Poppler native
+rendering, consistent multi-page evidence, page occupancy diagnostics,
+visual-regression contracts, and fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -175,6 +176,15 @@ doc = (
         "semantic_role": "custom",
         "based_on": "Normal",
         "paragraph_style": {
+            "background_color": "#EAF2F8",
+            "borders": {
+                "left": {
+                    "style": "single",
+                    "width": {"value": 3, "unit": "pt"},
+                    "color": "#1F4E78",
+                    "space": {"value": 8, "unit": "pt"},
+                },
+            },
             "spacing_after": {"value": 14, "unit": "pt"},
             "keep_together": True,
         },
@@ -207,6 +217,15 @@ Imported `w:style` definitions, `w:docDefaults`, inheritance links, quick-style
 metadata, and paragraph `w:pStyle` references are projected into the Spec. Native
 style patches update only supported properties in `word/styles.xml`; unknown style
 XML and every untouched package part remain byte-for-byte preserved.
+
+`paragraph_style.background_color` creates a solid paragraph-wide surface.
+`paragraph_style.borders` controls top/right/bottom/left edges with the same strict
+border line model used by tables. Border edges inherit independently through the
+named-style chain: a direct bottom edge can override a style while its other edges
+continue to inherit. Clearing removes direct XML; `style: "none"` explicitly
+suppresses an inherited edge. Pattern/theme shading and Word's `between`/`bar`
+borders remain native-only and losslessly preserved. See
+[the paragraph surface contract](docs/paragraph-surfaces.md).
 
 Sections are ordered, AI-addressable page regions. The first section starts at the
 document root; each later section is anchored at its first content node. Page size,
@@ -599,6 +618,8 @@ aioffice build examples/report.json --output report.docx
 aioffice export examples/report.json --to report.html
 aioffice schema --output document.schema.json
 aioffice schema --kind named-style --output named-style.schema.json
+aioffice schema --kind paragraph-style --output paragraph-style.schema.json
+aioffice schema --kind paragraph-borders --output paragraph-borders.schema.json
 aioffice schema --kind document-defaults --output document-defaults.schema.json
 aioffice schema --kind page-size --output page-size.schema.json
 aioffice schema --kind section-layout --output section-layout.schema.json

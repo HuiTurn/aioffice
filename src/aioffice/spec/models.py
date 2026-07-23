@@ -17,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.12"
+SPEC_VERSION = "0.2-draft.13"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -119,10 +119,65 @@ SemanticStyleRole = Literal[
 ]
 
 
+class BorderLine(StrictModel):
+    """One explicit border edge with OOXML-compatible physical constraints."""
+
+    style: Literal[
+        "none",
+        "single",
+        "double",
+        "dotted",
+        "dashed",
+        "thick",
+    ]
+    width: Length | None = None
+    color: HexColor | Literal["auto"] = "auto"
+    space: Length | None = None
+
+    @field_validator("color")
+    @classmethod
+    def normalize_color(cls, value: str) -> str:
+        return value.upper() if value.startswith("#") else value
+
+    @model_validator(mode="after")
+    def validate_border(self) -> "BorderLine":
+        if self.style == "none":
+            if self.width is not None or self.space is not None:
+                raise ValueError(
+                    "A none border cannot include width or space."
+                )
+            return self
+        if self.width is None:
+            raise ValueError("A visible border requires an explicit width.")
+        width_points = self.width.to_points()
+        if width_points < 0.25 or width_points > 12:
+            raise ValueError(
+                "Border width must be between 0.25pt and 12pt."
+            )
+        if self.space is not None:
+            space_points = self.space.to_points()
+            if space_points < 0 or space_points > 31:
+                raise ValueError(
+                    "Border space must be between 0pt and 31pt."
+                )
+        return self
+
+
+class ParagraphBorders(StrictModel):
+    """Four direct paragraph edges within the supported OOXML subset."""
+
+    top: BorderLine | None = None
+    right: BorderLine | None = None
+    bottom: BorderLine | None = None
+    left: BorderLine | None = None
+
+
 class ParagraphStyle(StrictModel):
     """Direct paragraph formatting, independent of named native styles."""
 
     alignment: Literal["left", "center", "right", "justify", "distribute"] | None = None
+    background_color: HexColor | None = None
+    borders: ParagraphBorders | None = None
     spacing_before: Length | None = None
     spacing_after: Length | None = None
     line_spacing: LineSpacing | None = None
@@ -135,6 +190,14 @@ class ParagraphStyle(StrictModel):
     page_break_before: bool | None = None
     widow_control: bool | None = None
     outline_level: int | None = Field(default=None, ge=1, le=9, strict=True)
+
+    @field_validator("background_color")
+    @classmethod
+    def normalize_background_color(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        return value.upper() if value is not None else None
 
     @model_validator(mode="after")
     def validate_indentation(self) -> "ParagraphStyle":
@@ -686,50 +749,6 @@ class TableWidth(StrictModel):
         return self
 
 
-class BorderLine(StrictModel):
-    """One explicit border edge with OOXML-compatible physical constraints."""
-
-    style: Literal[
-        "none",
-        "single",
-        "double",
-        "dotted",
-        "dashed",
-        "thick",
-    ]
-    width: Length | None = None
-    color: HexColor | Literal["auto"] = "auto"
-    space: Length | None = None
-
-    @field_validator("color")
-    @classmethod
-    def normalize_color(cls, value: str) -> str:
-        return value.upper() if value.startswith("#") else value
-
-    @model_validator(mode="after")
-    def validate_border(self) -> "BorderLine":
-        if self.style == "none":
-            if self.width is not None or self.space is not None:
-                raise ValueError(
-                    "A none border cannot include width or space."
-                )
-            return self
-        if self.width is None:
-            raise ValueError("A visible border requires an explicit width.")
-        width_points = self.width.to_points()
-        if width_points < 0.25 or width_points > 12:
-            raise ValueError(
-                "Border width must be between 0.25pt and 12pt."
-            )
-        if self.space is not None:
-            space_points = self.space.to_points()
-            if space_points < 0 or space_points > 31:
-                raise ValueError(
-                    "Border space must be between 0pt and 31pt."
-                )
-        return self
-
-
 class TableBorders(StrictModel):
     """Table perimeter and internal grid edges."""
 
@@ -998,6 +1017,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.10",
         "0.2-draft.11",
         "0.2-draft.12",
+        "0.2-draft.13",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

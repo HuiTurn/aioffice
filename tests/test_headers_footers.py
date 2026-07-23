@@ -45,7 +45,24 @@ def _document_with_regions() -> Document:
                         "id": "header_text",
                         "type": "paragraph",
                         "text": "Confidential report",
-                        "paragraph_style": {"alignment": "right"},
+                        "paragraph_style": {
+                            "alignment": "right",
+                            "background_color": "#EAF2F8",
+                            "borders": {
+                                "bottom": {
+                                    "style": "single",
+                                    "width": {
+                                        "value": 1,
+                                        "unit": "pt",
+                                    },
+                                    "color": "#1F4E78",
+                                    "space": {
+                                        "value": 2,
+                                        "unit": "pt",
+                                    },
+                                }
+                            },
+                        },
                     }
                 ],
             },
@@ -173,6 +190,11 @@ class HeaderFooterTests(unittest.TestCase):
         html = reopened.to_bytes("html").decode()
         self.assertEqual(html.count("Confidential report"), 2)
         self.assertEqual(html.count("AiOffice"), 3)  # title + two inherited footers
+        self.assertIn("background-color:#EAF2F8", html)
+        self.assertIn(
+            "border-bottom:1pt solid #1F4E78",
+            html,
+        )
 
     def test_native_header_text_and_format_patch_touch_only_header_part(self) -> None:
         source = _document_with_regions().to_bytes("docx")

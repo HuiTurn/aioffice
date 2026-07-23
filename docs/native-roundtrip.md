@@ -85,6 +85,12 @@ children, the complete Patch is refused rather than duplicating or dropping them
 List nodes may reference multiple native paragraphs, and removing a list removes
 that complete native range atomically.
 
+Supported paragraph surfaces include solid sRGB `w:shd` fills and four physical
+`w:pBdr` edges. Border edges inherit independently through defaults and named styles.
+Pattern/theme shading and `between`/`bar` paragraph borders remain native-only and
+untouched by unrelated edits. See
+[the paragraph surface contract](paragraph-surfaces.md).
+
 Paragraph `w:pStyle` references, supported paragraph style definitions,
 `basedOn`/`next` links, `w:docDefaults`, and heading outline semantics are projected
 into strict Spec models. Imported documents use the empty `native-docx` theme so

@@ -11,6 +11,7 @@ from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     DocumentDefaults,
     NamedStyle,
+    ParagraphBorders,
     ParagraphStyle,
     TextStyle,
 )
@@ -39,7 +40,44 @@ def merge_paragraph_styles(
     base: ParagraphStyle | None,
     override: ParagraphStyle | None,
 ) -> ParagraphStyle | None:
-    return _merge_model(ParagraphStyle, base, override)
+    values = {
+        **(
+            base.model_dump(mode="json", exclude_none=True)
+            if base is not None
+            else {}
+        ),
+        **(
+            override.model_dump(mode="json", exclude_none=True)
+            if override is not None
+            else {}
+        ),
+    }
+    base_borders = base.borders if base is not None else None
+    override_borders = (
+        override.borders if override is not None else None
+    )
+    border_values = {
+        **(
+            base_borders.model_dump(mode="json", exclude_none=True)
+            if base_borders is not None
+            else {}
+        ),
+        **(
+            override_borders.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+            if override_borders is not None
+            else {}
+        ),
+    }
+    if border_values:
+        values["borders"] = ParagraphBorders.model_validate(
+            border_values
+        ).model_dump(mode="json", exclude_none=True)
+    else:
+        values.pop("borders", None)
+    return ParagraphStyle.model_validate(values) if values else None
 
 
 def merge_text_styles(

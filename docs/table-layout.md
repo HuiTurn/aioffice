@@ -71,8 +71,8 @@ object replaces the supported direct edge set, so omitted sides are cleared.
 
 For compatibility, generated DOCX uses physical `left`/`right` edge names. Projection
 also understands the logical `start`/`end` aliases. Unsupported native border styles,
-theme-only colors, and unknown extension data stay authoritative in OOXML and are not
-invented in the semantic projection.
+theme-based colors, and unknown extension data stay authoritative in OOXML and are
+not invented in the semantic projection.
 
 ## Selective native Patch
 

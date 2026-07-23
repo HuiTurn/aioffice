@@ -133,6 +133,40 @@ class CliTests(unittest.TestCase):
 
         stdout = StringIO()
         with redirect_stdout(stdout):
+            self.assertEqual(
+                main(["schema", "--kind", "paragraph-style"]),
+                0,
+            )
+        paragraph_style_schema = json.loads(stdout.getvalue())
+        self.assertFalse(
+            paragraph_style_schema["additionalProperties"]
+        )
+        self.assertIn(
+            "background_color",
+            paragraph_style_schema["properties"],
+        )
+        self.assertIn(
+            "borders",
+            paragraph_style_schema["properties"],
+        )
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(
+                main(["schema", "--kind", "paragraph-borders"]),
+                0,
+            )
+        paragraph_borders_schema = json.loads(stdout.getvalue())
+        self.assertFalse(
+            paragraph_borders_schema["additionalProperties"]
+        )
+        self.assertEqual(
+            set(paragraph_borders_schema["properties"]),
+            {"top", "right", "bottom", "left"},
+        )
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
             self.assertEqual(main(["schema", "--kind", "table-cell"]), 0)
         table_cell_schema = json.loads(stdout.getvalue())
         self.assertFalse(table_cell_schema["additionalProperties"])
@@ -201,6 +235,21 @@ class CliTests(unittest.TestCase):
             )
             self.assertTrue(
                 border_contract["direct_cell_precedence"]
+            )
+            self.assertTrue(
+                border_contract[
+                    "unsupported_theme_colors_preserved"
+                ]
+            )
+            paragraph_surface = capabilities["formatting"][
+                "paragraph_surface_contract"
+            ]
+            self.assertEqual(
+                paragraph_surface["background"],
+                "solid_srgb_fill",
+            )
+            self.assertTrue(
+                paragraph_surface["native_style_inheritance"]
             )
             render_providers = {
                 provider["name"]: provider

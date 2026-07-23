@@ -5,7 +5,18 @@ from __future__ import annotations
 from collections.abc import Iterable
 from xml.etree import ElementTree as ET
 
-from aioffice.spec.models import Length, LineSpacing, ParagraphStyle, TextStyle
+from aioffice.formats.docx_borders import (
+    clear_border_element,
+    read_border_element,
+    write_border_element,
+)
+from aioffice.spec.models import (
+    Length,
+    LineSpacing,
+    ParagraphBorders,
+    ParagraphStyle,
+    TextStyle,
+)
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -56,6 +67,29 @@ _RPR_ORDER = {
     )
 }
 _FALSE_VALUES = {"0", "false", "off", "no", "none"}
+_PARAGRAPH_BORDER_ORDER = {
+    name: index
+    for index, name in enumerate(
+        ("top", "left", "bottom", "right", "between", "bar")
+    )
+}
+_PARAGRAPH_BORDER_FIELDS = (
+    ("top", "top"),
+    ("right", "right"),
+    ("bottom", "bottom"),
+    ("left", "left"),
+)
+_SHADING_ATTRIBUTES = (
+    "val",
+    "color",
+    "fill",
+    "themeColor",
+    "themeTint",
+    "themeShade",
+    "themeFill",
+    "themeFillTint",
+    "themeFillShade",
+)
 
 
 def _q(local: str) -> str:
@@ -137,6 +171,128 @@ def _remove_if_empty(parent: ET.Element, child: ET.Element) -> None:
         parent.remove(child)
 
 
+def _read_paragraph_borders(
+    properties: ET.Element,
+) -> ParagraphBorders | None:
+    borders = properties.find(_q("pBdr"))
+    if borders is None:
+        return None
+    payload = {
+        field_name: value
+        for field_name, native_name in _PARAGRAPH_BORDER_FIELDS
+        if (
+            value := read_border_element(
+                borders.find(_q(native_name))
+            )
+        )
+        is not None
+    }
+    return (
+        ParagraphBorders.model_validate(payload)
+        if payload
+        else None
+    )
+
+
+def _read_paragraph_background(
+    properties: ET.Element,
+) -> str | None:
+    shading = properties.find(_q("shd"))
+    if shading is None or shading.get(_q("val")) != "clear":
+        return None
+    if any(
+        shading.get(_q(attribute)) is not None
+        for attribute in (
+            "themeFill",
+            "themeFillTint",
+            "themeFillShade",
+        )
+    ):
+        return None
+    fill = shading.get(_q("fill"), "")
+    if len(fill) != 6 or not all(
+        character in "0123456789ABCDEFabcdef"
+        for character in fill
+    ):
+        return None
+    return f"#{fill.upper()}"
+
+
+def _clear_paragraph_border(
+    borders: ET.Element,
+    native_name: str,
+) -> None:
+    element = borders.find(_q(native_name))
+    if element is None:
+        return
+    clear_border_element(element)
+    _remove_if_empty(borders, element)
+
+
+def _patch_paragraph_borders(
+    properties: ET.Element,
+    value: ParagraphBorders | None,
+) -> None:
+    borders = properties.find(_q("pBdr"))
+    has_values = value is not None and any(
+        getattr(value, field_name) is not None
+        for field_name, _ in _PARAGRAPH_BORDER_FIELDS
+    )
+    if borders is None and has_values:
+        borders = _ensure_ordered_child(
+            properties,
+            "pBdr",
+            _PPR_ORDER,
+        )
+    if borders is None:
+        return
+    for field_name, native_name in _PARAGRAPH_BORDER_FIELDS:
+        border = (
+            getattr(value, field_name)
+            if value is not None
+            else None
+        )
+        if border is None:
+            _clear_paragraph_border(borders, native_name)
+            continue
+        element = borders.find(_q(native_name))
+        if element is None:
+            element = _ensure_ordered_child(
+                borders,
+                native_name,
+                _PARAGRAPH_BORDER_ORDER,
+            )
+        write_border_element(element, border)
+    _remove_if_empty(properties, borders)
+
+
+def _clear_shading_attributes(shading: ET.Element) -> None:
+    for attribute in _SHADING_ATTRIBUTES:
+        shading.attrib.pop(_q(attribute), None)
+
+
+def _patch_paragraph_background(
+    properties: ET.Element,
+    value: str | None,
+) -> None:
+    shading = properties.find(_q("shd"))
+    if value is None:
+        if shading is not None:
+            _clear_shading_attributes(shading)
+            _remove_if_empty(properties, shading)
+        return
+    if shading is None:
+        shading = _ensure_ordered_child(
+            properties,
+            "shd",
+            _PPR_ORDER,
+        )
+    _clear_shading_attributes(shading)
+    shading.set(_q("val"), "clear")
+    shading.set(_q("color"), "auto")
+    shading.set(_q("fill"), value.removeprefix("#"))
+
+
 def read_paragraph_style(paragraph: ET.Element) -> ParagraphStyle | None:
     """Project supported direct ``w:pPr`` values without resolving named styles."""
 
@@ -144,6 +300,12 @@ def read_paragraph_style(paragraph: ET.Element) -> ParagraphStyle | None:
     if properties is None:
         return None
     values: dict[str, object] = {}
+    background_color = _read_paragraph_background(properties)
+    if background_color is not None:
+        values["background_color"] = background_color
+    borders = _read_paragraph_borders(properties)
+    if borders is not None:
+        values["borders"] = borders
     alignment = properties.find(_q("jc"))
     if alignment is not None:
         value = alignment.attrib.get(_q("val"))
@@ -311,6 +473,15 @@ def patch_paragraph_style(
         else:
             child = _ensure_ordered_child(properties, "jc", _PPR_ORDER)
             child.set(_q("val"), "both" if value == "justify" else value)
+
+    if "borders" in selected:
+        _patch_paragraph_borders(properties, values.borders)
+
+    if "background_color" in selected:
+        _patch_paragraph_background(
+            properties,
+            values.background_color,
+        )
 
     spacing_fields = {"spacing_before", "spacing_after", "line_spacing"}
     if selected & spacing_fields:

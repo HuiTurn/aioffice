@@ -101,7 +101,22 @@ def _merged_rich_document() -> Document:
                                                 },
                                             ],
                                             "paragraph_style": {
-                                                "alignment": "center"
+                                                "alignment": "center",
+                                                "background_color": "#D9EAD3",
+                                                "borders": {
+                                                    "bottom": {
+                                                        "style": "double",
+                                                        "width": {
+                                                            "value": 1.5,
+                                                            "unit": "pt",
+                                                        },
+                                                        "color": "#548235",
+                                                        "space": {
+                                                            "value": 2,
+                                                            "unit": "pt",
+                                                        },
+                                                    }
+                                                },
                                             },
                                         },
                                         {
@@ -245,6 +260,19 @@ class TableCellTests(unittest.TestCase):
             merged_properties.find(_q("shd")).get(_q("fill")),
             "EAF2F8",
         )
+        title_paragraph = merged.findall(_q("p"))[0]
+        title_properties = title_paragraph.find(_q("pPr"))
+        assert title_properties is not None
+        self.assertEqual(
+            title_properties.find(_q("shd")).get(_q("fill")),
+            "D9EAD3",
+        )
+        title_bottom = title_properties.find(
+            f"./{_q('pBdr')}/{_q('bottom')}"
+        )
+        assert title_bottom is not None
+        self.assertEqual(title_bottom.get(_q("val")), "double")
+        self.assertEqual(title_bottom.get(_q("sz")), "12")
         continuation = rows[2].findall(_q("tc"))[0]
         continuation_properties = continuation.find(_q("tcPr"))
         assert continuation_properties is not None
@@ -279,6 +307,17 @@ class TableCellTests(unittest.TestCase):
             ],
             ["merged_title", "merged_note"],
         )
+        projected_title = projected_cell["content"][0]
+        self.assertEqual(
+            projected_title["paragraph_style"]["background_color"],
+            "#D9EAD3",
+        )
+        self.assertEqual(
+            projected_title["paragraph_style"]["borders"]["bottom"][
+                "style"
+            ],
+            "double",
+        )
         self.assertEqual(reopened.to_bytes("docx"), source)
 
         html = reopened.to_bytes("html").decode()
@@ -286,6 +325,8 @@ class TableCellTests(unittest.TestCase):
         self.assertIn('colspan="2"', html)
         self.assertIn('rowspan="2"', html)
         self.assertIn("background-color:#EAF2F8", html)
+        self.assertIn("background-color:#D9EAD3", html)
+        self.assertIn("border-bottom:1.5pt double #548235", html)
         self.assertIn('id="merged_title"', html)
         self.assertIn("font-weight:700", html)
         self.assertIn(">Merged</span>", html)

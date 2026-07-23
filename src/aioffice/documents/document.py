@@ -668,6 +668,32 @@ class Document:
                 "clear_semantics": (
                     "Remove direct formatting so named styles or document defaults can apply."
                 ),
+                "paragraph_surface_contract": {
+                    "background": "solid_srgb_fill",
+                    "border_edges": [
+                        "top",
+                        "right",
+                        "bottom",
+                        "left",
+                    ],
+                    "border_styles": [
+                        "none",
+                        "single",
+                        "double",
+                        "dotted",
+                        "dashed",
+                        "thick",
+                    ],
+                    "native_container": "w:pPr",
+                    "native_style_inheritance": True,
+                    "unsupported_native_features_preserved": [
+                        "between_border",
+                        "bar_border",
+                        "theme_border_colors",
+                        "pattern_shading",
+                        "theme_shading",
+                    ],
+                },
                 "named_styles": [
                     {
                         "id": style.id,
@@ -752,6 +778,8 @@ class Document:
                             "left",
                         ],
                         "direct_cell_precedence": True,
+                        "color_modes": ["srgb", "auto"],
+                        "unsupported_theme_colors_preserved": True,
                         "clear_semantics": (
                             "Remove known direct border XML so table styles "
                             "or inherited formatting can apply."

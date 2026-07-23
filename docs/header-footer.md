@@ -40,6 +40,10 @@ legitimately occur in different parts.
 header/footer paragraph ID. Native lowering mutates only that part and the AiOffice
 identity manifest. Unknown XML in the same part remains in place.
 
+Paragraph background, border, paragraph, and text styles use the same inheritance
+and Patch contract as body paragraphs. Semantic HTML resolves those styles for
+header/footer previews; native PDF/PNG remains the pagination and visual authority.
+
 ## Conservative projection boundary
 
 PAGE, NUMPAGES, SECTION, and SECTIONPAGES fields are projected as structured inline
