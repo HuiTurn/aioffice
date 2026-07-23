@@ -19,7 +19,13 @@ from typing import Literal, Sequence
 from aioffice.core.diagnostics import Diagnostic, Severity
 from aioffice.core.errors import RenderingError
 
-from .models import RenderOptions, RenderResult
+from .analysis import analyze_raster_page
+from .models import (
+    PaginatedRenderResult,
+    RenderedPage,
+    RenderOptions,
+    RenderResult,
+)
 
 LIBREOFFICE_PROVIDER = "libreoffice"
 _PDF_SIGNATURE = b"%PDF-"
@@ -154,6 +160,8 @@ def libreoffice_render_capabilities() -> dict[str, object]:
         ),
         "font_inventory_available": discovered["fc-list"] is not None,
         "isolated_user_profile": True,
+        "paginated_render": discovered["pdftoppm"] is not None and bool(formats),
+        "max_pages_per_call": 500,
     }
 
 
@@ -245,6 +253,19 @@ def _png_size(content: bytes) -> tuple[int, int]:
     if width < 1 or height < 1:
         raise RenderingError("Poppler produced an empty PNG page render.")
     return width, height
+
+
+def _contiguous_ranges(page_numbers: Sequence[int]) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    start = previous = page_numbers[0]
+    for page_number in page_numbers[1:]:
+        if page_number == previous + 1:
+            previous = page_number
+            continue
+        ranges.append((start, previous))
+        start = previous = page_number
+    ranges.append((start, previous))
+    return ranges
 
 
 def render_docx_libreoffice(
@@ -439,8 +460,239 @@ def render_docx_libreoffice(
         )
 
 
+def render_docx_pages_libreoffice(
+    docx_content: bytes,
+    *,
+    page_numbers: Sequence[int] | None = None,
+    options: RenderOptions | None = None,
+    analyze: bool = False,
+    max_pages: int = 100,
+) -> PaginatedRenderResult:
+    """Render one PDF once, then rasterize a bounded selection of its pages."""
+
+    if isinstance(max_pages, bool) or not 1 <= max_pages <= 500:
+        raise ValueError("max_pages must be an integer between 1 and 500.")
+    active_options = options or RenderOptions()
+    if active_options.page_number is not None:
+        raise RenderingError(
+            "Use page_numbers for paginated rendering; RenderOptions.page_number "
+            "is valid only for a single PNG render."
+        )
+    pdf = render_docx_libreoffice(
+        docx_content,
+        format="pdf",
+        options=active_options,
+    )
+    page_count = int(pdf.metadata["page_count"])
+    if page_numbers is None:
+        if page_count > max_pages:
+            raise RenderingError(
+                f"The rendered document has {page_count} pages, exceeding "
+                f"max_pages={max_pages}. Select pages explicitly or raise the limit."
+            )
+        selected_pages = list(range(1, page_count + 1))
+    else:
+        requested = list(page_numbers)
+        if not requested:
+            raise ValueError("page_numbers must contain at least one page.")
+        if any(
+            isinstance(page_number, bool)
+            or not isinstance(page_number, int)
+            or page_number < 1
+            for page_number in requested
+        ):
+            raise ValueError(
+                "page_numbers must contain positive one-based integers."
+            )
+        if len(set(requested)) != len(requested):
+            raise ValueError("page_numbers cannot contain duplicates.")
+        selected_pages = sorted(requested)
+        if len(selected_pages) > max_pages:
+            raise RenderingError(
+                f"Requested {len(selected_pages)} pages, exceeding "
+                f"max_pages={max_pages}."
+            )
+        if selected_pages[-1] > page_count:
+            raise RenderingError(
+                f"Requested page {selected_pages[-1]}, but the rendered PDF has "
+                f"{page_count} page{'s' if page_count != 1 else ''}."
+            )
+
+    pdftoppm = _required_tool("pdftoppm", "Poppler pdftoppm")
+    rasterizer_version = _tool_version(
+        pdftoppm,
+        arguments=("-v",),
+        timeout_seconds=active_options.timeout_seconds,
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="aioffice-pages-",
+    ) as directory:
+        workspace = Path(directory)
+        pdf_path = workspace / "document.pdf"
+        pdf_path.write_bytes(pdf.content)
+        page_prefix = workspace / "page"
+        for first_page, last_page in _contiguous_ranges(selected_pages):
+            _run_command(
+                [
+                    pdftoppm,
+                    "-f",
+                    str(first_page),
+                    "-l",
+                    str(last_page),
+                    "-forcenum",
+                    "-r",
+                    str(active_options.dpi),
+                    "-png",
+                    str(pdf_path),
+                    str(page_prefix),
+                ],
+                timeout_seconds=active_options.timeout_seconds,
+                cwd=workspace,
+            )
+
+        rendered_files: dict[int, Path] = {}
+        for path in workspace.glob("page-*.png"):
+            match = re.fullmatch(r"page-(\d+)\.png", path.name)
+            if match is None:
+                continue
+            page_number = int(match.group(1))
+            if page_number in rendered_files:
+                raise RenderingError(
+                    f"Poppler produced duplicate evidence for page {page_number}."
+                )
+            rendered_files[page_number] = path
+        missing_pages = [
+            page_number
+            for page_number in selected_pages
+            if page_number not in rendered_files
+        ]
+        if missing_pages:
+            raise RenderingError(
+                "Poppler did not produce evidence for page"
+                f"{'s' if len(missing_pages) != 1 else ''} "
+                + ", ".join(str(page) for page in missing_pages)
+                + "."
+            )
+
+        pages: list[RenderedPage] = []
+        analysis_diagnostics: list[Diagnostic] = []
+        for page_number in selected_pages:
+            content = rendered_files[page_number].read_bytes()
+            width, height = _png_size(content)
+            analysis = (
+                analyze_raster_page(
+                    content,
+                    page_number=page_number,
+                )
+                if analyze
+                else None
+            )
+            diagnostics = (
+                [
+                    diagnostic.model_copy(deep=True)
+                    for diagnostic in analysis.diagnostics
+                ]
+                if analysis is not None
+                else []
+            )
+            analysis_diagnostics.extend(diagnostics)
+            page_cache_payload = {
+                "pdf_cache_key": pdf.cache_key,
+                "provider": LIBREOFFICE_PROVIDER,
+                "provider_version": pdf.provider_version,
+                "rasterizer_version": rasterizer_version,
+                "page_number": page_number,
+                "dpi": active_options.dpi,
+                "analysis": analyze,
+            }
+            pages.append(
+                RenderedPage.create(
+                    page_number=page_number,
+                    provider=LIBREOFFICE_PROVIDER,
+                    provider_version=pdf.provider_version,
+                    dpi=active_options.dpi,
+                    width_pixels=width,
+                    height_pixels=height,
+                    content=content,
+                    cache_material=json.dumps(
+                        page_cache_payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8"),
+                    analysis=analysis,
+                    diagnostics=diagnostics,
+                    metadata={
+                        "source_docx_sha256": pdf.metadata[
+                            "source_docx_sha256"
+                        ],
+                        "pdf_sha256": pdf.content_sha256,
+                        "rasterizer_version": rasterizer_version,
+                    },
+                )
+            )
+
+    bundle_cache_payload = {
+        "pdf_cache_key": pdf.cache_key,
+        "provider": LIBREOFFICE_PROVIDER,
+        "provider_version": pdf.provider_version,
+        "rasterizer_version": rasterizer_version,
+        "page_numbers": selected_pages,
+        "dpi": active_options.dpi,
+        "analysis": analyze,
+    }
+    return PaginatedRenderResult(
+        provider=LIBREOFFICE_PROVIDER,
+        provider_version=pdf.provider_version,
+        verification_status="unverified",
+        page_count=page_count,
+        pdf=pdf,
+        pages=pages,
+        cache_key=hashlib.sha256(
+            json.dumps(
+                bundle_cache_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        diagnostics=[
+            Diagnostic(
+                severity=Severity.INFO,
+                code="PAGINATED_RENDER_EVIDENCE_CREATED",
+                message=(
+                    f"Rendered one PDF and {len(pages)} page image"
+                    f"{'s' if len(pages) != 1 else ''} through the declared "
+                    "native-compatible provider."
+                ),
+                recoverable=True,
+                suggested_actions=[
+                    {
+                        "action": "inspect_rendered_pages",
+                        "page_numbers": selected_pages,
+                    }
+                ],
+            ),
+            *analysis_diagnostics,
+        ],
+        metadata={
+            "selected_pages": selected_pages,
+            "dpi": active_options.dpi,
+            "analysis_enabled": analyze,
+            "max_pages": max_pages,
+            "rasterizer_version": rasterizer_version,
+            "source_docx_sha256": pdf.metadata["source_docx_sha256"],
+            "pdf_sha256": pdf.content_sha256,
+            "font_environment_hash": pdf.metadata[
+                "font_environment_hash"
+            ],
+        },
+    )
+
+
 __all__ = [
     "LIBREOFFICE_PROVIDER",
     "libreoffice_render_capabilities",
     "render_docx_libreoffice",
+    "render_docx_pages_libreoffice",
 ]

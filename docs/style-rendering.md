@@ -150,6 +150,11 @@ selected page and DPI, PNG pixel dimensions, renderer/rasterizer versions, platf
 and a fontconfig inventory hash when available. A caller managing fonts independently
 can provide `font_environment_hash`.
 
+For whole-document review, `Document.render_pages()` renders one PDF and a bounded
+page selection from that common source. Optional `PageVisualAnalysis` measures page
+occupancy, whitespace, blank-page likelihood, and edge contact. These diagnostics
+help an agent prioritize page inspection but do not replace visual judgment.
+
 Successful native rendering reports `fidelity="native"` because layout came from the
 declared office renderer, but `verification_status="unverified"` because no visual
 review has happened yet. Provider identity matters: LibreOffice evidence is not a

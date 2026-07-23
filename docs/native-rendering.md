@@ -38,25 +38,42 @@ import aioffice
 
 document = aioffice.open("report.docx")
 
-pdf = document.render(format="pdf", provider="libreoffice")
-pdf.write("evidence/report.pdf")
+evidence = document.render_pages(
+    options={"dpi": 144, "timeout_seconds": 60},
+    analyze=True,
+    max_pages=100,
+)
+outputs = evidence.write("evidence", stem="report")
+```
 
-for page_number in range(1, pdf.metadata["page_count"] + 1):
-    page = document.render(
-        format="png",
-        provider="libreoffice",
-        options={
-            "page_number": page_number,
-            "dpi": 144,
-            "timeout_seconds": 60,
-        },
-    )
-    page.write(f"evidence/page-{page_number}.png")
+`render_pages()` creates one native PDF, then rasterizes all or a selected set of
+pages from that same PDF. This avoids repeated office-engine startups and ensures
+every returned page belongs to one pagination result:
+
+```python
+selected = document.render_pages(
+    page_numbers=[1, 3, 4],
+    options={"dpi": 144},
+    max_pages=10,
+)
 ```
 
 PNG page numbers are one-based. Omitting `page_number` selects page 1. DPI is
 strictly bounded from 72 to 600. `page_number` is rejected for PDF output instead of
-being ignored.
+being ignored. Paginated rendering uses `page_numbers`; duplicate, zero, negative,
+out-of-range, empty, and over-limit selections are rejected explicitly. The default
+limit is 100 emitted pages and the hard ceiling is 500.
+
+`analyze=True` requires the `aioffice[render]` Pillow extra. Each `RenderedPage`
+then contains a `PageVisualAnalysis` with:
+
+- estimated background color and non-background ink ratio;
+- pixel content bounding box;
+- normalized top, right, bottom, and left whitespace;
+- `PAGE_APPEARS_BLANK` when ink falls below the conservative threshold;
+- `PAGE_CONTENT_NEAR_EDGE` when visible content approaches a page edge.
+
+These measurements identify review targets; they are not subjective design scores.
 
 ## CLI
 
@@ -65,11 +82,18 @@ aioffice capabilities report.docx
 aioffice render report.docx --format pdf -o evidence/report.pdf
 aioffice render report.docx --format png --page 2 --dpi 144 \
   -o evidence/page-2.png
+aioffice render-pages report.docx --pages 1,3-5 --dpi 144 --analyze \
+  --max-pages 20 --output-directory evidence
 ```
 
 `--provider` is inferred as `semantic-html` for HTML and `libreoffice` for PDF/PNG.
 The command writes the requested artifact and prints a JSON render summary containing
 the output path but not the potentially large binary content.
+
+`render-pages` writes `<stem>.pdf` plus zero-padded
+`<stem>-page-0001.png` files. It refuses to overwrite any matching evidence file
+unless `--overwrite` is explicit. Files are staged inside the destination directory;
+exclusive creation closes the normal check/write race when overwrite is disabled.
 
 ## Evidence and cache identity
 
@@ -83,6 +107,10 @@ Every result includes:
 - platform and architecture;
 - font-environment fingerprint and source;
 - a cache key derived from the layout-affecting inputs.
+
+The paginated result adds the selected page list, per-page hashes and cache keys,
+pixel dimensions, analysis results, and a common intermediate PDF hash. This common
+hash proves that all returned PNG pages came from the same PDF render.
 
 When fontconfig is unavailable, rendering can still succeed but includes
 `FONT_ENVIRONMENT_UNVERIFIED`. A caller that provisions a controlled font image can

@@ -112,6 +112,58 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Caller-supplied font environment fingerprint for reproducible evidence.",
     )
 
+    render_pages = subparsers.add_parser(
+        "render-pages",
+        help="Render one native PDF and a bounded set of consistent PNG pages.",
+    )
+    render_pages.add_argument("input", type=Path)
+    render_pages.add_argument(
+        "-o",
+        "--output-directory",
+        required=True,
+        type=Path,
+    )
+    render_pages.add_argument(
+        "--pages",
+        help="One-based comma/range selection such as 1,3-5; defaults to all pages.",
+    )
+    render_pages.add_argument(
+        "--dpi",
+        type=int,
+        default=144,
+        help="PNG raster resolution from 72 to 600 DPI.",
+    )
+    render_pages.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="Per-command native renderer timeout in seconds.",
+    )
+    render_pages.add_argument(
+        "--max-pages",
+        type=int,
+        default=100,
+        help="Maximum number of PNG pages emitted in one call (1–500).",
+    )
+    render_pages.add_argument(
+        "--analyze",
+        action="store_true",
+        help="Measure blank pages, ink bounds, whitespace, and edge contact with Pillow.",
+    )
+    render_pages.add_argument(
+        "--font-environment-hash",
+        help="Caller-supplied font environment fingerprint for reproducible evidence.",
+    )
+    render_pages.add_argument(
+        "--stem",
+        help="Output filename stem; defaults to the input filename stem.",
+    )
+    render_pages.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace matching evidence files; default behavior refuses overwrite.",
+    )
+
     validate = subparsers.add_parser("validate", help="Validate a document.")
     validate.add_argument("input", type=Path)
     validate.add_argument("--json", action="store_true", dest="as_json")
@@ -229,6 +281,57 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _default_build_output(source: Path) -> Path:
     return source.with_suffix(".docx")
+
+
+def _parse_page_numbers(
+    value: str | None,
+    *,
+    max_pages: int,
+) -> list[int] | None:
+    if value is None:
+        return None
+    if isinstance(max_pages, bool) or not 1 <= max_pages <= 500:
+        raise ValueError("--max-pages must be between 1 and 500.")
+    selected: set[int] = set()
+    for raw_item in value.split(","):
+        item = raw_item.strip()
+        if not item:
+            raise ValueError("--pages contains an empty selection.")
+        if "-" in item:
+            parts = item.split("-")
+            if len(parts) != 2 or not all(part.isdigit() for part in parts):
+                raise ValueError(
+                    "--pages ranges must use positive integers such as 3-5."
+                )
+            first, last = (int(part) for part in parts)
+            if first < 1 or last < first:
+                raise ValueError(
+                    "--pages ranges must be positive and ascending."
+                )
+            if last - first + 1 > max_pages:
+                raise ValueError(
+                    "--pages selection exceeds the configured --max-pages limit."
+                )
+            range_pages = set(range(first, last + 1))
+            if selected.intersection(range_pages):
+                raise ValueError(
+                    "--pages cannot contain duplicate or overlapping selections."
+                )
+            selected.update(range_pages)
+        else:
+            if not item.isdigit() or int(item) < 1:
+                raise ValueError(
+                    "--pages entries must be positive one-based integers."
+                )
+            page_number = int(item)
+            if page_number in selected:
+                raise ValueError("--pages cannot contain duplicate selections.")
+            selected.add(page_number)
+        if len(selected) > max_pages:
+            raise ValueError(
+                "--pages selection exceeds the configured --max-pages limit."
+            )
+    return sorted(selected)
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -355,6 +458,37 @@ def _run(args: argparse.Namespace) -> int:
         output = result.write(args.output)
         summary = result.summary()
         summary["output"] = str(output)
+        _json_dump(summary)
+        return 0
+
+    if args.command == "render-pages":
+        page_numbers = _parse_page_numbers(
+            args.pages,
+            max_pages=args.max_pages,
+        )
+        document = open_artifact(args.input)
+        result = document.render_pages(
+            page_numbers=page_numbers,
+            options={
+                "dpi": args.dpi,
+                "timeout_seconds": args.timeout,
+                "font_environment_hash": args.font_environment_hash,
+            },
+            analyze=args.analyze,
+            max_pages=args.max_pages,
+        )
+        written = result.write(
+            args.output_directory,
+            stem=args.stem or args.input.stem,
+            overwrite=args.overwrite,
+        )
+        page_paths = written["pages"]
+        assert isinstance(page_paths, list)
+        summary = result.summary()
+        summary["outputs"] = {
+            "pdf": str(written["pdf"]),
+            "pages": [str(path) for path in page_paths],
+        }
         _json_dump(summary)
         return 0
 

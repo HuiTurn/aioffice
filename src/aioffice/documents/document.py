@@ -41,10 +41,12 @@ from aioffice.operations.text import (
 )
 from aioffice.rendering import (
     LIBREOFFICE_PROVIDER,
+    PaginatedRenderResult,
     RenderOptions,
     RenderResult,
     libreoffice_render_capabilities,
     render_docx_libreoffice,
+    render_docx_pages_libreoffice,
     render_semantic_html,
 )
 from aioffice.security import SecurityPolicy
@@ -547,6 +549,34 @@ class Document:
         raise UnsupportedFormatError(
             f"Unknown render provider {provider!r}; use 'semantic-html' or "
             f"{LIBREOFFICE_PROVIDER!r}."
+        )
+
+    def render_pages(
+        self,
+        *,
+        provider: str = LIBREOFFICE_PROVIDER,
+        page_numbers: Sequence[int] | None = None,
+        options: RenderOptions | Mapping[str, Any] | None = None,
+        analyze: bool = False,
+        max_pages: int = 100,
+    ) -> PaginatedRenderResult:
+        """Render one native PDF and a bounded set of consistent page images."""
+
+        if provider != LIBREOFFICE_PROVIDER:
+            raise UnsupportedFormatError(
+                "Paginated rendering currently requires provider='libreoffice'."
+            )
+        active_options = (
+            options
+            if isinstance(options, RenderOptions)
+            else RenderOptions.model_validate(options or {})
+        )
+        return render_docx_pages_libreoffice(
+            self.to_bytes("docx"),
+            page_numbers=page_numbers,
+            options=active_options,
+            analyze=analyze,
+            max_pages=max_pages,
         )
 
     def capabilities(self) -> dict[str, Any]:

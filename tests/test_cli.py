@@ -8,10 +8,26 @@ from io import StringIO
 from pathlib import Path
 
 from aioffice.cli import main
+from aioffice.cli.main import _parse_page_numbers
 from aioffice.documents import DocumentBuilder
 
 
 class CliTests(unittest.TestCase):
+    def test_page_selection_parser_is_bounded_and_one_based(self) -> None:
+        self.assertEqual(
+            _parse_page_numbers("1,3-5", max_pages=5),
+            [1, 3, 4, 5],
+        )
+        self.assertIsNone(_parse_page_numbers(None, max_pages=5))
+        with self.assertRaises(ValueError):
+            _parse_page_numbers("0", max_pages=5)
+        with self.assertRaises(ValueError):
+            _parse_page_numbers("5-3", max_pages=5)
+        with self.assertRaises(ValueError):
+            _parse_page_numbers("1-10", max_pages=5)
+        with self.assertRaises(ValueError):
+            _parse_page_numbers("1-3,3", max_pages=5)
+
     def test_schema_exposes_text_selector_contracts(self) -> None:
         stdout = StringIO()
         with redirect_stdout(stdout):

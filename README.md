@@ -16,13 +16,14 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev10`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev11`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
 parts, structured dynamic fields, explicit table geometry, logical merged cells,
 rich table-cell paragraphs, semantic diffs, isolated LibreOffice/Poppler native
-rendering, page evidence, visual-regression contracts, and fidelity reports.
+rendering, consistent multi-page evidence, page occupancy diagnostics,
+visual-regression contracts, and fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -467,6 +468,24 @@ page = doc.render(
 page.write("report-page-1.png")
 ```
 
+For an entire document, render the PDF only once and derive a bounded, consistent
+page set from it:
+
+```python
+evidence = doc.render_pages(
+    options={"dpi": 144},
+    analyze=True,
+    max_pages=100,
+)
+paths = evidence.write("evidence", stem="report")
+assert len(evidence.pages) == evidence.page_count
+```
+
+Page analysis reports the background, ink ratio, content bounding box, four-side
+whitespace, apparent blank pages, and visible content near a page edge. It requires
+`pip install "aioffice[render]"`; rendering pages without analysis does not require
+Pillow.
+
 Each job uses an isolated LibreOffice user profile and reports engine versions,
 source/output hashes, page count, font-environment hash, page dimensions, and
 diagnostics. Native evidence still reports `verification_status="unverified"`:
@@ -479,6 +498,7 @@ The equivalent CLI workflow is:
 ```bash
 aioffice render report.docx --format pdf -o report-render.pdf
 aioffice render report.docx --format png --page 1 --dpi 144 -o report-page-1.png
+aioffice render-pages report.docx --analyze --output-directory evidence
 ```
 
 You can also create a document directly from the strict spec:

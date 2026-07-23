@@ -98,11 +98,22 @@
   capability discovery.
 - Kept successful native evidence `unverified` until visual or regression review,
   so renderer success cannot be mistaken for aesthetic approval.
+- Added `Document.render_pages()` to convert DOCX to PDF once and derive a bounded,
+  internally consistent set of selected or complete page PNGs.
+- Added contiguous page-range batching, deterministic page ordering, duplicate and
+  out-of-range rejection, and a configurable 1–500 page resource ceiling.
+- Added `PageVisualAnalysis` for background, ink ratio, content bounding box,
+  four-side whitespace, apparent blank-page, and near-edge content diagnostics.
+- Added `PaginatedRenderResult` / `RenderedPage` contracts with binary-free summaries,
+  per-page hashes, safe output names, staged writes, rollback-on-error exclusive
+  creation, and explicit overwrite behavior.
+- Added `aioffice render-pages` with bounded comma/range selection, optional analysis,
+  structured outputs, and overwrite refusal by default.
 - Serialized OPC content-type and relationship control parts with default package
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.10`.
+- Advanced the AiOffice Document Spec to `0.2-draft.11`.
 
 ## 0.1.0
 
