@@ -132,11 +132,16 @@ python -m build
 python -m twine check dist/*
 ```
 
-To publish after checking the package metadata and selecting a project license:
+Production releases use PyPI Trusted Publishing. The tag must match the package
+version in `src/aioffice/_version.py`; pushing it starts
+`.github/workflows/publish.yml`:
 
 ```bash
-python -m twine upload dist/*
+git tag v0.1.0
+git push origin v0.1.0
 ```
+
+No long-lived PyPI API token is stored in GitHub.
 
 The current spec is a draft. Compatibility will be maintained within the `0.1.x`
 series where practical, but the public model can still evolve before 1.0.
