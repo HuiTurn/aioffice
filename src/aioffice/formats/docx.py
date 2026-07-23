@@ -18,6 +18,11 @@ from aioffice.native.identity import (
     native_ref_for_elements,
     serialize_identity_manifest,
 )
+from aioffice.formats.docx_style import (
+    apply_paragraph_mark_text_style,
+    apply_paragraph_style,
+    apply_text_style,
+)
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     BulletList,
@@ -25,8 +30,10 @@ from aioffice.spec.models import (
     OrderedList,
     PageBreak,
     Paragraph,
+    ParagraphStyle,
     Table,
     TextSpan,
+    TextStyle,
     NativeRef,
 )
 from aioffice.themes import get_theme
@@ -64,10 +71,14 @@ def _xml(element: ET.Element) -> bytes:
 
 
 def _child(parent: ET.Element, name: str, **attributes: str) -> ET.Element:
-    return ET.SubElement(parent, _q(W, name), {_q(W, key): value for key, value in attributes.items()})
+    return ET.SubElement(
+        parent, _q(W, name), {_q(W, key): value for key, value in attributes.items()}
+    )
 
 
-def _relationship(parent: ET.Element, rel_id: str, rel_type: str, target: str, **attrs: str) -> None:
+def _relationship(
+    parent: ET.Element, rel_id: str, rel_type: str, target: str, **attrs: str
+) -> None:
     values = {"Id": rel_id, "Type": rel_type, "Target": target, **attrs}
     ET.SubElement(parent, _q(REL, "Relationship"), values)
 
@@ -97,7 +108,29 @@ class _DocxContext:
         return rel_id
 
 
-def _add_run(parent: ET.Element, span: TextSpan, context: _DocxContext) -> None:
+def _merge_text_style(
+    base: TextStyle | None,
+    override: TextStyle | None,
+) -> TextStyle | None:
+    if base is None:
+        return override
+    if override is None:
+        return base
+    return TextStyle.model_validate(
+        {
+            **base.model_dump(mode="json", exclude_none=True),
+            **override.model_dump(mode="json", exclude_none=True),
+        }
+    )
+
+
+def _add_run(
+    parent: ET.Element,
+    span: TextSpan,
+    context: _DocxContext,
+    *,
+    default_style: TextStyle | None = None,
+) -> None:
     run_parent = parent
     if "link" in span.marks and span.href:
         run_parent = ET.SubElement(
@@ -106,24 +139,31 @@ def _add_run(parent: ET.Element, span: TextSpan, context: _DocxContext) -> None:
             {_q(R, "id"): context.add_hyperlink(span.href)},
         )
     run = _child(run_parent, "r")
+    apply_text_style(run, _merge_text_style(default_style, span.style))
     if span.marks:
-        properties = _child(run, "rPr")
+        mark_style: dict[str, object] = {}
         if "strong" in span.marks:
-            _child(properties, "b")
+            mark_style["bold"] = True
         if "emphasis" in span.marks:
-            _child(properties, "i")
+            mark_style["italic"] = True
         if "underline" in span.marks:
-            _child(properties, "u", val="single")
+            mark_style["underline"] = True
         if "strike" in span.marks:
-            _child(properties, "strike")
+            mark_style["strike"] = True
         if "subscript" in span.marks:
-            _child(properties, "vertAlign", val="subscript")
+            mark_style["baseline"] = "subscript"
         if "superscript" in span.marks:
-            _child(properties, "vertAlign", val="superscript")
+            mark_style["baseline"] = "superscript"
+        if "code" in span.marks:
+            mark_style["font_family"] = "Consolas"
+        if mark_style:
+            apply_text_style(run, TextStyle.model_validate(mark_style))
+        properties = run.find(_q(W, "rPr"))
+        if properties is None:
+            properties = ET.Element(_q(W, "rPr"))
+            run.insert(0, properties)
         if "highlight" in span.marks:
             _child(properties, "highlight", val="yellow")
-        if "code" in span.marks:
-            _child(properties, "rFonts", ascii="Consolas", hAnsi="Consolas")
         if "link" in span.marks:
             _child(properties, "rStyle", val="Hyperlink")
     text = _child(run, "t")
@@ -140,6 +180,8 @@ def _add_paragraph(
     style: str | None = None,
     numbering_id: int | None = None,
     native_anchor: str | None = None,
+    paragraph_style: ParagraphStyle | None = None,
+    text_style: TextStyle | None = None,
 ) -> ET.Element:
     attributes = {_q(W14, "paraId"): native_anchor} if native_anchor else {}
     paragraph = ET.SubElement(body, _q(W, "p"), attributes)
@@ -151,8 +193,10 @@ def _add_paragraph(
             numbering = _child(properties, "numPr")
             _child(numbering, "ilvl", val="0")
             _child(numbering, "numId", val=str(numbering_id))
+    apply_paragraph_style(paragraph, paragraph_style)
+    apply_paragraph_mark_text_style(paragraph, text_style)
     for span in spans:
-        _add_run(paragraph, span, context)
+        _add_run(paragraph, span, context, default_style=text_style)
     return paragraph
 
 
@@ -201,6 +245,8 @@ def _document_xml(
                 context,
                 style=f"Heading{block.level}",
                 native_anchor=_native_anchor(block.id),
+                paragraph_style=block.paragraph_style,
+                text_style=block.text_style,
             )
             index = len(body) - 1
             refs[block.id] = native_ref_for_elements(
@@ -216,6 +262,8 @@ def _document_xml(
                 spans,
                 context,
                 native_anchor=_native_anchor(block.id),
+                paragraph_style=block.paragraph_style,
+                text_style=block.text_style,
             )
             index = len(body) - 1
             refs[block.id] = native_ref_for_elements(
@@ -332,7 +380,13 @@ def _styles_xml(spec: AiOfficeDocumentSpec) -> bytes:
         _child(properties, "spacing", before=str(240 if level <= 2 else 160), after="120")
         _child(properties, "outlineLvl", val=str(level - 1))
         run_properties = _child(style, "rPr")
-        _child(run_properties, "rFonts", ascii=heading_latin, hAnsi=heading_latin, eastAsia=heading_east_asia)
+        _child(
+            run_properties,
+            "rFonts",
+            ascii=heading_latin,
+            hAnsi=heading_latin,
+            eastAsia=heading_east_asia,
+        )
         _child(run_properties, "b")
         _child(run_properties, "color", val=primary)
         _child(run_properties, "sz", val=str(sizes[level]))
@@ -376,7 +430,12 @@ def _numbering_xml() -> bytes:
 
 def _content_types_xml() -> bytes:
     root = ET.Element(_q(CT, "Types"))
-    ET.SubElement(root, _q(CT, "Default"), Extension="rels", ContentType="application/vnd.openxmlformats-package.relationships+xml")
+    ET.SubElement(
+        root,
+        _q(CT, "Default"),
+        Extension="rels",
+        ContentType="application/vnd.openxmlformats-package.relationships+xml",
+    )
     ET.SubElement(root, _q(CT, "Default"), Extension="xml", ContentType="application/xml")
     overrides = {
         "/word/document.xml": "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
@@ -484,9 +543,7 @@ def compile_docx(spec: AiOfficeDocumentSpec) -> bytes:
         parts = {
             "[Content_Types].xml": _content_types_xml(),
             "_rels/.rels": _root_relationships_xml(),
-            MANIFEST_PART_URI.lstrip("/"): serialize_identity_manifest(
-                identity_manifest
-            ),
+            MANIFEST_PART_URI.lstrip("/"): serialize_identity_manifest(identity_manifest),
             "docProps/app.xml": _app_properties_xml(),
             "docProps/core.xml": _core_properties_xml(spec),
             "word/document.xml": document_xml,

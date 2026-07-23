@@ -35,3 +35,7 @@ class NativePackageError(AiOfficeError):
 
 class WorkspaceError(AiOfficeError):
     """Raised when a workspace is invalid or a revision cannot be committed safely."""
+
+
+class RenderingError(AiOfficeError):
+    """Raised when a render provider or visual comparison cannot run safely."""

@@ -39,7 +39,23 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["capabilities", str(target)]), 0)
             capabilities = json.loads(stdout.getvalue())
             self.assertEqual(capabilities["origin"], "native")
-            self.assertEqual(capabilities["operations"], ["text.replace", "node.remove"])
+            self.assertEqual(
+                capabilities["operations"],
+                [
+                    "text.replace",
+                    "paragraph.format",
+                    "text.format",
+                    "node.remove",
+                ],
+            )
+            self.assertEqual(
+                capabilities["formatting"]["text_scope"],
+                "whole_node",
+            )
+            self.assertIn(
+                "alignment",
+                capabilities["formatting"]["paragraph_properties"],
+            )
             self.assertTrue(capabilities["roundtrip"]["noop_exact"])
 
             patch = root / "patch.json"

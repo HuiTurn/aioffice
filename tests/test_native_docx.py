@@ -26,9 +26,10 @@ def _rewrite_package(
     additions: dict[str, bytes] | None = None,
 ) -> bytes:
     output = io.BytesIO()
-    with ZipFile(io.BytesIO(source)) as input_archive, ZipFile(
-        output, "w", compression=ZIP_DEFLATED
-    ) as output_archive:
+    with (
+        ZipFile(io.BytesIO(source)) as input_archive,
+        ZipFile(output, "w", compression=ZIP_DEFLATED) as output_archive,
+    ):
         for info in input_archive.infolist():
             payload = replacements.get(info.filename, input_archive.read(info.filename))
             output_archive.writestr(copy.copy(info), payload)
@@ -69,9 +70,7 @@ class NativeDocxTests(unittest.TestCase):
 
     def test_cross_run_patch_preserves_unaffected_and_unknown_parts(self) -> None:
         source = self._source_document()
-        document_xml = parse_xml(
-            ZipFile(io.BytesIO(source)).read("word/document.xml")
-        )
+        document_xml = parse_xml(ZipFile(io.BytesIO(source)).read("word/document.xml"))
         body = document_xml.find(_q(W, "body"))
         assert body is not None
         first_paragraph = next(child for child in body if child.tag == _q(W, "p"))
@@ -85,9 +84,7 @@ class NativeDocxTests(unittest.TestCase):
 
         document = Document.from_docx(source)
         paragraph = next(
-            node
-            for node in document.to_spec()["content"]
-            if node.get("text") == "Alpha Beta Gamma"
+            node for node in document.to_spec()["content"] if node.get("text") == "Alpha Beta Gamma"
         )
         result = document.apply(
             [
@@ -156,9 +153,7 @@ class NativeDocxTests(unittest.TestCase):
     def test_identity_map_is_refreshed_after_removal(self) -> None:
         document = Document.from_docx(self._source_document())
         nodes = document.to_spec()["content"]
-        removed = document.apply(
-            [{"op": "node.remove", "target": f"#{nodes[0]['id']}"}]
-        )
+        removed = document.apply([{"op": "node.remove", "target": f"#{nodes[0]['id']}"}])
         self.assertTrue(removed.success)
         assert removed.document is not None
 
@@ -187,6 +182,144 @@ class NativeDocxTests(unittest.TestCase):
                 if node["type"] in {"heading", "paragraph"}
             ]
             self.assertIn("Alpha Delta Gamma", texts)
+
+    def test_native_format_patch_changes_only_known_properties(self) -> None:
+        source = self._source_document()
+        document_xml = parse_xml(ZipFile(io.BytesIO(source)).read("word/document.xml"))
+        body = document_xml.find(_q(W, "body"))
+        assert body is not None
+        paragraph = next(
+            element
+            for element in body.findall(_q(W, "p"))
+            if "Alpha Beta Gamma" == "".join(node.text or "" for node in element.iter(_q(W, "t")))
+        )
+        properties = paragraph.find(_q(W, "pPr"))
+        if properties is None:
+            properties = ET.Element(_q(W, "pPr"))
+            paragraph.insert(0, properties)
+        future = ET.SubElement(properties, "{urn:aioffice:test}futureLayout")
+        future.set("mode", "preserve")
+        source = _rewrite_package(
+            source,
+            {"word/document.xml": serialize_xml(document_xml)},
+        )
+
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "paragraph.format",
+                    "target": "#body",
+                    "set": {
+                        "alignment": "center",
+                        "spacing_before": {"value": 12, "unit": "pt"},
+                    },
+                },
+                {
+                    "op": "text.format",
+                    "target": "#body",
+                    "set": {
+                        "font_size": {"value": 13, "unit": "pt"},
+                        "color": "#C00000",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as archive:
+            patched_root = parse_xml(archive.read("word/document.xml"))
+            patched_body = patched_root.find(_q(W, "body"))
+            assert patched_body is not None
+            patched = next(
+                element
+                for element in patched_body.findall(_q(W, "p"))
+                if "Alpha Beta Gamma"
+                == "".join(node.text or "" for node in element.iter(_q(W, "t")))
+            )
+            patched_properties = patched.find(_q(W, "pPr"))
+            assert patched_properties is not None
+            self.assertIsNotNone(patched_properties.find("{urn:aioffice:test}futureLayout"))
+            alignment = patched_properties.find(_q(W, "jc"))
+            spacing = patched_properties.find(_q(W, "spacing"))
+            assert alignment is not None
+            assert spacing is not None
+            self.assertEqual(alignment.attrib[_q(W, "val")], "center")
+            self.assertEqual(spacing.attrib[_q(W, "before")], "240")
+            for run in patched.iter(_q(W, "r")):
+                run_properties = run.find(_q(W, "rPr"))
+                assert run_properties is not None
+                size = run_properties.find(_q(W, "sz"))
+                color = run_properties.find(_q(W, "color"))
+                assert size is not None
+                assert color is not None
+                self.assertEqual(size.attrib[_q(W, "val")], "26")
+                self.assertEqual(color.attrib[_q(W, "val")], "C00000")
+
+        reopened = Document.from_docx(output)
+        reopened_body = next(node for node in reopened.to_spec()["content"] if node["id"] == "body")
+        self.assertEqual(reopened_body["paragraph_style"]["alignment"], "center")
+        self.assertEqual(reopened_body["text_style"]["font_size"]["value"], 13.0)
+        self.assertEqual(reopened_body["text_style"]["color"], "#C00000")
+
+    def test_format_then_remove_in_one_native_patch_is_atomic(self) -> None:
+        document = Document.from_docx(self._source_document())
+        result = document.apply(
+            [
+                {
+                    "op": "paragraph.format",
+                    "target": "#body",
+                    "set": {"alignment": "right"},
+                },
+                {"op": "node.remove", "target": "#body"},
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        reopened = Document.from_docx(result.document.to_bytes("docx"))
+        self.assertNotIn(
+            "Alpha Beta Gamma",
+            [
+                node.get("text")
+                for node in reopened.to_spec()["content"]
+                if node["type"] in {"heading", "paragraph"}
+            ],
+        )
+
+    def test_empty_native_paragraph_keeps_text_style_on_paragraph_mark(self) -> None:
+        source = compile_docx(DocumentBuilder().paragraph("", id="empty").build().spec)
+        document_xml = parse_xml(ZipFile(io.BytesIO(source)).read("word/document.xml"))
+        body = document_xml.find(_q(W, "body"))
+        assert body is not None
+        paragraph = body.find(_q(W, "p"))
+        assert paragraph is not None
+        for run in list(paragraph.findall(_q(W, "r"))):
+            paragraph.remove(run)
+        source = _rewrite_package(
+            source,
+            {"word/document.xml": serialize_xml(document_xml)},
+        )
+
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "text.format",
+                    "target": "#empty",
+                    "set": {
+                        "font_size": {"value": 11, "unit": "pt"},
+                        "color": "#112233",
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        reopened = Document.from_docx(result.document.to_bytes("docx"))
+        node = next(node for node in reopened.to_spec()["content"] if node["id"] == "empty")
+        self.assertEqual(node["text_style"]["font_size"]["value"], 11.0)
+        self.assertEqual(node["text_style"]["color"], "#112233")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from aioffice.core.diagnostics import Diagnostic
+from aioffice.core.diff import DocumentDiff
 from aioffice.core.errors import SecurityError, WorkspaceError
 from aioffice.core.ids import new_id
 from aioffice.documents.document import Document, PatchResult
@@ -122,10 +123,7 @@ class Workspace:
         return self._index.workspace_id
 
     def list_artifacts(self) -> list[dict[str, Any]]:
-        return [
-            entry.model_dump(mode="json")
-            for _, entry in sorted(self._index.artifacts.items())
-        ]
+        return [entry.model_dump(mode="json") for _, entry in sorted(self._index.artifacts.items())]
 
     def capabilities(self, artifact_id: str | None = None) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -203,10 +201,7 @@ class Workspace:
     ) -> Document:
         entry = self._entry(artifact_id)
         selected_revision = entry.latest_revision if revision is None else revision
-        if (
-            selected_revision < entry.first_revision
-            or selected_revision > entry.latest_revision
-        ):
+        if selected_revision < entry.first_revision or selected_revision > entry.latest_revision:
             raise WorkspaceError(
                 f"Revision {selected_revision} is outside artifact {artifact_id!r} history."
             )
@@ -219,7 +214,9 @@ class Workspace:
             identity_manifest=identity,
         )
         if document.id != artifact_id or document.revision != selected_revision:
-            raise WorkspaceError("Workspace identity manifest did not restore the requested revision.")
+            raise WorkspaceError(
+                "Workspace identity manifest did not restore the requested revision."
+            )
         return document
 
     checkout = open_document
@@ -233,9 +230,7 @@ class Workspace:
         base_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> PatchResult:
-        normalized_operations = [
-            deepcopy(dict(operation)) for operation in operations
-        ]
+        normalized_operations = [deepcopy(dict(operation)) for operation in operations]
         if idempotency_key == "":
             raise WorkspaceError("Idempotency keys cannot be empty.")
         if idempotency_key is not None:
@@ -247,9 +242,7 @@ class Workspace:
             if replay is not None:
                 return replay
         entry = self._entry(artifact_id)
-        expected_revision = (
-            entry.latest_revision if base_revision is None else base_revision
-        )
+        expected_revision = entry.latest_revision if base_revision is None else base_revision
         document = self.open_document(artifact_id)
         result = document.apply(
             normalized_operations,
@@ -266,15 +259,11 @@ class Workspace:
             idempotency_key=idempotency_key,
             operations=normalized_operations,
             changes=deepcopy(result.changes),
-            diagnostics=[
-                diagnostic.model_dump(mode="json")
-                for diagnostic in result.diagnostics
-            ],
+            diagnostics=[diagnostic.model_dump(mode="json") for diagnostic in result.diagnostics],
             fidelity=(
-                result.fidelity.model_dump(mode="json")
-                if result.fidelity is not None
-                else None
+                result.fidelity.model_dump(mode="json") if result.fidelity is not None else None
             ),
+            diff=(result.diff.model_dump(mode="json") if result.diff is not None else None),
         )
         self._persist_revision(
             result.document,
@@ -330,11 +319,7 @@ class Workspace:
         ]
         if commit and ambiguous:
             node_ids = sorted(
-                {
-                    node_id
-                    for diagnostic in ambiguous
-                    for node_id in diagnostic.node_ids
-                }
+                {node_id for diagnostic in ambiguous for node_id in diagnostic.node_ids}
             )
             raise WorkspaceError(
                 "External edit has ambiguous native identities; refusing to commit "
@@ -360,8 +345,7 @@ class Workspace:
                 }
             ],
             diagnostics=[
-                diagnostic.model_dump(mode="json")
-                for diagnostic in synchronized.import_diagnostics
+                diagnostic.model_dump(mode="json") for diagnostic in synchronized.import_diagnostics
             ],
             fidelity=(
                 synchronized.fidelity.model_dump(mode="json")
@@ -490,9 +474,7 @@ class Workspace:
 
         self._index.artifacts[document.id] = ArtifactEntry(
             artifact_id=document.id,
-            first_revision=(
-                current.first_revision if current is not None else revision
-            ),
+            first_revision=(current.first_revision if current is not None else revision),
             latest_revision=revision,
             source_name=source_name,
         )
@@ -520,19 +502,17 @@ class Workspace:
                 continue
             if payload.operations != operations:
                 raise WorkspaceError(
-                    f"Idempotency key {idempotency_key!r} was already used "
-                    "for a different patch."
+                    f"Idempotency key {idempotency_key!r} was already used for a different patch."
                 )
-            diagnostics = [
-                Diagnostic.model_validate(value)
-                for value in payload.diagnostics
-            ]
+            diagnostics = [Diagnostic.model_validate(value) for value in payload.diagnostics]
             fidelity_value = payload.fidelity
             fidelity = (
                 FidelityReport.model_validate(fidelity_value)
                 if fidelity_value is not None
                 else None
             )
+            diff_value = payload.diff
+            diff = DocumentDiff.model_validate(diff_value) if diff_value is not None else None
             return PatchResult(
                 success=True,
                 base_revision=payload.base_revision,
@@ -543,6 +523,7 @@ class Workspace:
                 diagnostics=diagnostics,
                 idempotency_key=idempotency_key,
                 fidelity=fidelity,
+                diff=diff,
             )
         return None
 

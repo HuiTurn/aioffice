@@ -1,4 +1,4 @@
-"""AiOffice Spec 1.0 draft models and serialization helpers."""
+"""AiOffice Spec 0.2 draft models and serialization helpers."""
 
 from .models import (
     AiOfficeDocumentSpec,
@@ -7,15 +7,19 @@ from .models import (
     BulletList,
     DocumentMetadata,
     Heading,
+    Length,
+    LineSpacing,
     NativeRef,
     OpaqueBlock,
     OrderedList,
     PageBreak,
     Paragraph,
+    ParagraphStyle,
     Table,
     TableColumn,
     TableRow,
     TextSpan,
+    TextStyle,
     ThemeRef,
 )
 
@@ -26,14 +30,18 @@ __all__ = [
     "BulletList",
     "DocumentMetadata",
     "Heading",
+    "Length",
+    "LineSpacing",
     "NativeRef",
     "OpaqueBlock",
     "OrderedList",
     "PageBreak",
     "Paragraph",
+    "ParagraphStyle",
     "Table",
     "TableColumn",
     "TableRow",
     "TextSpan",
+    "TextStyle",
     "ThemeRef",
 ]

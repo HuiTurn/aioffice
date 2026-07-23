@@ -67,11 +67,14 @@ overwrite unless the caller explicitly opts in.
 
 ## Current native lowering boundary
 
-The current DOCX native layer lowers `text.replace` and `node.remove`. Text
-replacement can cross Word run boundaries while retaining run properties and
-unknown XML. List nodes may reference multiple native paragraphs, and removing a
-list removes that complete native range atomically.
+The current DOCX native layer lowers `text.replace`, `paragraph.format`,
+`text.format`, and `node.remove`. Text replacement can cross Word run boundaries
+while retaining run properties and unknown XML. Paragraph and text formatting
+mutate only selected supported `w:pPr` / `w:rPr` properties and preserve unrelated
+or unknown children. List nodes may reference multiple native paragraphs, and
+removing a list removes that complete native range atomically.
 
 Other operations are rejected before a new native revision is committed. Future
-iterations will add style, paragraph, table, section, header/footer, drawing, and
-layout-aware operations behind the same capability and fidelity contracts.
+iterations will add range-level text formatting, named-style editing, tables,
+sections, headers/footers, drawings, and layout-aware operations behind the same
+capability and fidelity contracts.

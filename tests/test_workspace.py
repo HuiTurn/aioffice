@@ -32,11 +32,14 @@ def _rewrite_package(
     replacements = replacements or {}
     removals = removals or set()
     output = io.BytesIO()
-    with ZipFile(io.BytesIO(source)) as input_archive, ZipFile(
-        output,
-        "w",
-        compression=ZIP_DEFLATED,
-    ) as output_archive:
+    with (
+        ZipFile(io.BytesIO(source)) as input_archive,
+        ZipFile(
+            output,
+            "w",
+            compression=ZIP_DEFLATED,
+        ) as output_archive,
+    ):
         for info in input_archive.infolist():
             if info.filename in removals:
                 continue
@@ -114,6 +117,7 @@ class WorkspaceTests(unittest.TestCase):
             )
             self.assertTrue(result.success)
             self.assertEqual(result.result_revision, 2)
+            self.assertIsNotNone(result.diff)
 
             reopened_workspace = Workspace.open(root / "project")
             revision_one = reopened_workspace.checkout(artifact_id, revision=1)
@@ -132,6 +136,7 @@ class WorkspaceTests(unittest.TestCase):
                 idempotency_key="approve-status",
             )
             self.assertEqual(replay.result_revision, 2)
+            self.assertEqual(replay.diff, result.diff)
             self.assertEqual(
                 reopened_workspace.list_artifacts()[0]["latest_revision"],
                 2,
@@ -255,19 +260,11 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_external_insertion_keeps_bound_ids_unique(self) -> None:
         source = _without_embedded_identity(
-            (
-                DocumentBuilder()
-                .paragraph("First")
-                .paragraph("Second")
-                .build()
-                .to_bytes("docx")
-            ),
+            (DocumentBuilder().paragraph("First").paragraph("Second").build().to_bytes("docx")),
             strip_native_ids=True,
         )
         document = Document.from_docx(source)
-        original_ids = [
-            node["id"] for node in document.to_spec()["content"]
-        ]
+        original_ids = [node["id"] for node in document.to_spec()["content"]]
         manifest = build_identity_manifest(
             document.spec,
             package_sha256=hashlib.sha256(source).hexdigest(),
@@ -310,9 +307,7 @@ class WorkspaceTests(unittest.TestCase):
             strip_native_ids=True,
         )
         document = Document.from_docx(source)
-        original_ids = [
-            node["id"] for node in document.to_spec()["content"]
-        ]
+        original_ids = [node["id"] for node in document.to_spec()["content"]]
         manifest = build_identity_manifest(
             document.spec,
             package_sha256=hashlib.sha256(source).hexdigest(),

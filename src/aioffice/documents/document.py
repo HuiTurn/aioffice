@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 from pydantic import TypeAdapter, ValidationError
 
 from aioffice.core.diagnostics import Diagnostic, Severity, ValidationResult
+from aioffice.core.diff import DocumentDiff, compute_document_diff
 from aioffice.core.errors import (
     ExportError,
     NativePackageError,
@@ -31,6 +32,7 @@ from aioffice.native import (
     build_identity_manifest,
     serialize_identity_manifest,
 )
+from aioffice.rendering import RenderOptions, RenderResult, render_semantic_html
 from aioffice.security import SecurityPolicy
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
@@ -43,8 +45,10 @@ from aioffice.spec.models import (
     OpaqueBlock,
     OrderedList,
     Paragraph,
+    ParagraphStyle,
     SPEC_VERSION,
     Table,
+    TextStyle,
 )
 from aioffice.themes import get_theme
 
@@ -78,10 +82,10 @@ def _parse_spec(value: AiOfficeDocumentSpec | Mapping[str, Any]) -> AiOfficeDocu
         return AiOfficeDocumentSpec.model_validate(payload)
     except ValidationError as error:
         diagnostics = _validation_error_diagnostics(error)
-        summary = "; ".join(
-            f"{item.path or '<root>'}: {item.message}" for item in diagnostics[:3]
-        )
-        raise SpecValidationError(f"Invalid AiOffice Document Spec: {summary}", diagnostics) from error
+        summary = "; ".join(f"{item.path or '<root>'}: {item.message}" for item in diagnostics[:3])
+        raise SpecValidationError(
+            f"Invalid AiOffice Document Spec: {summary}", diagnostics
+        ) from error
 
 
 @dataclass(slots=True)
@@ -95,6 +99,7 @@ class PatchResult:
     diagnostics: list[Diagnostic] = field(default_factory=list)
     idempotency_key: str | None = None
     fidelity: FidelityReport | None = None
+    diff: DocumentDiff | None = None
 
     def model_dump(self) -> dict[str, Any]:
         return {
@@ -108,6 +113,7 @@ class PatchResult:
             "fidelity": (
                 self.fidelity.model_dump(mode="json") if self.fidelity is not None else None
             ),
+            "diff": self.diff.model_dump(mode="json") if self.diff is not None else None,
         }
 
 
@@ -222,10 +228,7 @@ class Document:
 
     @property
     def import_diagnostics(self) -> list[Diagnostic]:
-        return [
-            diagnostic.model_copy(deep=True)
-            for diagnostic in self._import_diagnostics
-        ]
+        return [diagnostic.model_copy(deep=True) for diagnostic in self._import_diagnostics]
 
     def to_spec(self) -> dict[str, Any]:
         return self._spec.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -282,16 +285,59 @@ class Document:
             ]
         return result
 
+    def diff(
+        self,
+        other: "Document",
+        *,
+        include_native: bool = False,
+    ) -> DocumentDiff:
+        """Return a stable semantic diff keyed by persistent node identities."""
+
+        return compute_document_diff(
+            self._spec,
+            other._spec,
+            include_native=include_native,
+        )
+
+    def render(
+        self,
+        *,
+        format: str = "html",
+        provider: str = "semantic-html",
+        options: RenderOptions | Mapping[str, Any] | None = None,
+    ) -> RenderResult:
+        """Render through an explicit provider with declared layout fidelity."""
+
+        normalized_format = format.lower().lstrip(".")
+        if normalized_format != "html" or provider != "semantic-html":
+            raise UnsupportedFormatError(
+                "This release provides only provider='semantic-html', format='html'. "
+                "Its result is an approximate preview, not native Word layout evidence."
+            )
+        active_options = (
+            options
+            if isinstance(options, RenderOptions)
+            else RenderOptions.model_validate(options or {})
+        )
+        return render_semantic_html(self._spec, active_options)
+
     def capabilities(self) -> dict[str, Any]:
         operations = [
             "text.replace",
+            "paragraph.format",
+            "text.format",
             "node.append",
             "node.insert_after",
             "node.remove",
             "node.update",
         ]
         if self._native is not None:
-            operations = ["text.replace", "node.remove"]
+            operations = [
+                "text.replace",
+                "paragraph.format",
+                "text.format",
+                "node.remove",
+            ]
         native_extension = self._spec.extensions.get("dev.aioffice.native", {})
         ambiguous_node_ids = sorted(
             {
@@ -308,8 +354,28 @@ class Document:
             "spec_version": self.spec_version,
             "import_formats": ["json", "markdown", "docx"],
             "export_formats": ["json", "markdown", "html", "docx"],
+            "render": {
+                "providers": [
+                    {
+                        "name": "semantic-html",
+                        "formats": ["html"],
+                        "fidelity": "approximate",
+                        "verification_status": "preview_only",
+                    }
+                ],
+                "native_visual_verification_available": False,
+            },
             "operations": operations,
             "selectors": ["#node_id"],
+            "formatting": {
+                "length_units": ["pt", "in", "cm", "mm", "px"],
+                "paragraph_properties": sorted(ParagraphStyle.model_fields),
+                "text_properties": sorted(TextStyle.model_fields),
+                "text_scope": "whole_node",
+                "clear_semantics": (
+                    "Remove direct formatting so named styles or document defaults can apply."
+                ),
+            },
             "identity": {
                 "source": native_extension.get(
                     "identity_source",
@@ -388,10 +454,7 @@ class Document:
                 )
 
             if isinstance(node, Heading):
-                if (
-                    previous_heading_level is not None
-                    and node.level > previous_heading_level + 1
-                ):
+                if previous_heading_level is not None and node.level > previous_heading_level + 1:
                     diagnostics.append(
                         Diagnostic(
                             severity=Severity.WARNING,
@@ -403,7 +466,10 @@ class Document:
                             node_ids=[node.id],
                             path=f"content.{index}.level",
                             suggested_actions=[
-                                {"action": "set_heading_level", "maximum": previous_heading_level + 1}
+                                {
+                                    "action": "set_heading_level",
+                                    "maximum": previous_heading_level + 1,
+                                }
                             ],
                         )
                     )
@@ -456,12 +522,13 @@ class Document:
                                 severity=Severity.WARNING,
                                 code="TABLE_VALUE_MISSING",
                                 message=(
-                                    f"Table row {row.id!r} has no values for: "
-                                    f"{', '.join(missing)}."
+                                    f"Table row {row.id!r} has no values for: {', '.join(missing)}."
                                 ),
                                 node_ids=[node.id, row.id],
                                 path=f"content.{index}.rows.{row_index}.values",
-                                suggested_actions=[{"action": "fill_table_values", "keys": missing}],
+                                suggested_actions=[
+                                    {"action": "fill_table_values", "keys": missing}
+                                ],
                             )
                         )
         return ValidationResult(diagnostics=diagnostics)
@@ -514,14 +581,10 @@ class Document:
             native=self._native,
             import_diagnostics=self._import_diagnostics,
         )
-        if updated._native is not None and updated._native.has_part(
-            MANIFEST_PART_URI
-        ):
+        if updated._native is not None and updated._native.has_part(MANIFEST_PART_URI):
             updated._native.set_part(
                 MANIFEST_PART_URI,
-                serialize_identity_manifest(
-                    build_identity_manifest(updated._spec)
-                ),
+                serialize_identity_manifest(build_identity_manifest(updated._spec)),
             )
         return updated
 
@@ -658,6 +721,7 @@ class Document:
             diagnostics=validation.warnings,
             idempotency_key=idempotency_key,
             fidelity=fidelity,
+            diff=self.diff(updated),
         )
 
     @staticmethod
@@ -677,9 +741,7 @@ class Document:
                     suggested_actions=[
                         {
                             "action": "fix_content",
-                            "diagnostics": [
-                                item.model_dump(mode="json") for item in details
-                            ],
+                            "diagnostics": [item.model_dump(mode="json") for item in details],
                         }
                     ],
                 )
@@ -795,6 +857,156 @@ class Document:
                 "replacement_count": count,
             }
 
+        if operation_name in {"paragraph.format", "text.format"}:
+            _, node = Document._find_node(payload, operation.get("target"))
+            if node["type"] not in {"heading", "paragraph"}:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(f"{operation_name} does not support node type {node['type']!r}."),
+                        node_ids=[node["id"]],
+                    )
+                )
+            allowed_keys = {"op", "target", "set", "clear"}
+            unexpected = sorted(set(operation) - allowed_keys)
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"{operation_name} received unknown fields: {', '.join(unexpected)}."
+                        ),
+                        node_ids=[node["id"]],
+                    )
+                )
+            set_values = operation.get("set", {})
+            clear_values = operation.get("clear", [])
+            if not isinstance(set_values, dict):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"{operation_name} requires set to be an object.",
+                    )
+                )
+            if (
+                not isinstance(clear_values, list)
+                or any(not isinstance(value, str) for value in clear_values)
+                or len(clear_values) != len(set(clear_values))
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"{operation_name} requires clear to be a list of "
+                            "unique property names."
+                        ),
+                    )
+                )
+            if not set_values and not clear_values:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"{operation_name} requires at least one set or clear field.",
+                    )
+                )
+            if any(value is None for value in set_values.values()):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"{operation_name} uses clear for property removal; "
+                            "set values cannot be null."
+                        ),
+                    )
+                )
+            overlap = sorted(set(set_values) & set(clear_values))
+            if overlap:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"{operation_name} cannot set and clear the same fields: "
+                            f"{', '.join(overlap)}."
+                        ),
+                    )
+                )
+
+            style_field = (
+                "paragraph_style" if operation_name == "paragraph.format" else "text_style"
+            )
+            style_model = ParagraphStyle if operation_name == "paragraph.format" else TextStyle
+            known_fields = set(style_model.model_fields)
+            unknown_fields = sorted((set(set_values) | set(clear_values)) - known_fields)
+            if unknown_fields:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"{operation_name} does not recognize: {', '.join(unknown_fields)}."
+                        ),
+                        node_ids=[node["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_style_schema",
+                                "properties": sorted(known_fields),
+                            }
+                        ],
+                    )
+                )
+            before_style = deepcopy(node.get(style_field, {}))
+            candidate = deepcopy(before_style)
+            candidate.update(deepcopy(set_values))
+            for field_name in clear_values:
+                candidate.pop(field_name, None)
+            try:
+                normalized = style_model.model_validate(candidate).model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+            except ValidationError as error:
+                details = _validation_error_diagnostics(error)
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"{operation_name} contains invalid style values.",
+                        node_ids=[node["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "fix_style",
+                                "diagnostics": [item.model_dump(mode="json") for item in details],
+                            }
+                        ],
+                    )
+                ) from error
+            if normalized:
+                node[style_field] = normalized
+            else:
+                node.pop(style_field, None)
+            node["revision_updated"] = next_revision
+            changed_fields = sorted(set(set_values) | set(clear_values))
+            return {
+                "operation": operation_name,
+                "node_ids": [node["id"]],
+                "property_changes": [
+                    {
+                        "path": f"{style_field}.{field_name}",
+                        "before": before_style.get(field_name),
+                        "after": normalized.get(field_name),
+                    }
+                    for field_name in changed_fields
+                    if before_style.get(field_name) != normalized.get(field_name)
+                ],
+            }
+
         if operation_name == "node.append":
             target = operation.get("target", "$")
             if target not in {"$", payload["artifact"]["id"], f"#{payload['artifact']['id']}"}:
@@ -880,8 +1092,9 @@ class Document:
                 severity=Severity.ERROR,
                 code="UNSUPPORTED_FEATURE",
                 message=(
-                    f"Unsupported operation {operation_name!r}; AiOffice supports text.replace, "
-                    "node.append, node.insert_after, node.remove, and node.update."
+                    f"Unsupported operation {operation_name!r}; AiOffice supports "
+                    "text.replace, paragraph.format, text.format, node.append, "
+                    "node.insert_after, node.remove, and node.update."
                 ),
                 suggested_actions=[{"action": "use_supported_operation"}],
             )
@@ -889,8 +1102,7 @@ class Document:
 
     def __repr__(self) -> str:
         return (
-            f"Document(id={self.id!r}, revision={self.revision}, "
-            f"nodes={len(self._spec.content)})"
+            f"Document(id={self.id!r}, revision={self.revision}, nodes={len(self._spec.content)})"
         )
 
 
@@ -915,9 +1127,7 @@ def open_artifact(
             identity_manifest=identity_manifest,
         )
     if suffix in {".html", ".htm"}:
-        raise UnsupportedFormatError(
-            f"Importing {suffix} is planned for a later release."
-        )
+        raise UnsupportedFormatError(f"Importing {suffix} is planned for a later release.")
     raise UnsupportedFormatError(
         f"Unsupported source format {suffix or '<none>'!r}; use .json, .md, or .docx."
     )

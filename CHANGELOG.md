@@ -13,10 +13,16 @@
 - Added DOCX semantic projection with native source references.
 - Added capability discovery and refreshed native identity maps across sequential edits.
 - Added exact no-op DOCX round trips.
-- Added minimal native lowering for text replacement and node removal.
+- Added native lowering for text replacement, paragraph/text direct formatting, and
+  node removal while preserving unknown OOXML.
+- Added explicit-unit paragraph and text style models shared by semantic HTML,
+  generated DOCX, and imported DOCX projections.
+- Added stable semantic document diffs and per-property format Patch results.
+- Added render contracts that distinguish approximate previews from native evidence.
+- Added optional PNG visual-regression metrics for future native render providers.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Marked the AiOffice Document Spec as `0.2-draft.1`.
+- Advanced the AiOffice Document Spec to `0.2-draft.2`.
 
 ## 0.1.0
 

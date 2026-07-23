@@ -28,6 +28,9 @@ classifiers = [
 keywords = ["ai", "office", "docx", "document", "agent"]
 
 [project.optional-dependencies]
+render = [
+    "Pillow>=10,<13",
+]
 dev = [
     "build>=1.2,<2",
     "pyright>=1.1.400,<2",

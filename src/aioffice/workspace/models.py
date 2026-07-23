@@ -36,6 +36,7 @@ class PatchRecord(WorkspaceModel):
     changes: list[dict[str, Any]] = Field(default_factory=list)
     diagnostics: list[dict[str, Any]] = Field(default_factory=list)
     fidelity: dict[str, Any] | None = None
+    diff: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_revision_step(self) -> "PatchRecord":

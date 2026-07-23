@@ -16,10 +16,11 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev1`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev2`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
-workspaces, copy-on-write native parts, and fidelity reports. Workbook, presentation,
-PDF, rendering, and MCP remain planned.
+workspaces, copy-on-write native parts, strict paragraph/text formatting, semantic
+diffs, render contracts, and fidelity reports. Workbook, presentation, PDF, native
+visual rendering, and MCP remain planned.
 
 ## Install
 
@@ -108,13 +109,47 @@ Use `workspace.reconcile_document(...)` to preview an externally edited DOCX. A
 commit is refused when native identity is ambiguous. The detailed invariants are in
 [the native round-trip architecture](docs/native-roundtrip.md).
 
-Native DOCX lowering in this development version intentionally supports only
-`text.replace` and `node.remove`. Ask the artifact before planning an edit:
+Native DOCX lowering in this development version supports `text.replace`,
+`paragraph.format`, `text.format`, and `node.remove`. Ask the artifact before
+planning an edit:
 
 ```python
 capabilities = doc.capabilities()
 assert "text.replace" in capabilities["operations"]
 ```
+
+Formatting values always include units. This prevents an agent from confusing
+points, pixels, inches, and native OOXML twips:
+
+```python
+result = doc.apply([
+    {
+        "op": "paragraph.format",
+        "target": "#para_000001",
+        "set": {
+            "alignment": "justify",
+            "spacing_after": {"value": 8, "unit": "pt"},
+            "line_spacing": {"rule": "multiple", "value": 1.25},
+        },
+    },
+    {
+        "op": "text.format",
+        "target": "#para_000001",
+        "set": {
+            "font_size": {"value": 10.5, "unit": "pt"},
+            "color": "#1F4E78",
+        },
+    },
+])
+
+assert result.success
+print(result.diff.summary)
+```
+
+`doc.render()` currently returns a semantic HTML preview whose contract explicitly
+reports `fidelity="approximate"` and `verification_status="preview_only"`. It must
+not be treated as proof of Word pagination. See
+[style, diff, and rendering contracts](docs/style-rendering.md).
 
 You can also create a document directly from the strict spec:
 
@@ -154,8 +189,10 @@ assert result.success
 preview = result.document
 ```
 
-V0.1 supports `text.replace`, `node.append`, `node.insert_after`, `node.remove`, and
-`node.update`. Selectors are stable node IDs in this release.
+Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
+`node.append`, `node.insert_after`, `node.remove`, and `node.update`. Imported DOCX
+documents expose the smaller native-safe subset reported by `capabilities()`.
+Selectors are stable node IDs in this release.
 
 ## CLI
 

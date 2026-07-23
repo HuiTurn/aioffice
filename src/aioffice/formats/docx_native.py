@@ -6,7 +6,14 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from pydantic import ValidationError
+
 from aioffice.core.errors import NativePackageError
+from aioffice.formats.docx_style import (
+    patch_paragraph_mark_text_style,
+    patch_paragraph_style,
+    patch_text_style,
+)
 from aioffice.native import (
     FidelityReport,
     MANIFEST_PART_URI,
@@ -16,7 +23,7 @@ from aioffice.native import (
     serialize_identity_manifest,
 )
 from aioffice.native.xml import parse_xml, serialize_xml
-from aioffice.spec.models import AiOfficeDocumentSpec, NativeRef
+from aioffice.spec.models import AiOfficeDocumentSpec, NativeRef, ParagraphStyle, TextStyle
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 XML = "http://www.w3.org/XML/1998/namespace"
@@ -133,15 +140,18 @@ def apply_docx_operations(
     result_spec: AiOfficeDocumentSpec,
     operations: Sequence[Mapping[str, Any]],
 ) -> tuple[NativePackage, FidelityReport, dict[str, NativeRef]]:
-    supported = {"text.replace", "node.remove"}
-    unsupported = sorted(
-        {str(operation.get("op")) for operation in operations}
-        - supported
-    )
+    supported = {
+        "text.replace",
+        "paragraph.format",
+        "text.format",
+        "node.remove",
+    }
+    unsupported = sorted({str(operation.get("op")) for operation in operations} - supported)
     if unsupported:
         raise NativePackageError(
             "Imported DOCX V0.2 currently supports native lowering for "
-            f"text.replace and node.remove; unsupported: {', '.join(unsupported)}."
+            "text.replace, paragraph.format, text.format, and node.remove; "
+            f"unsupported: {', '.join(unsupported)}."
         )
 
     updated = package.clone()
@@ -161,9 +171,7 @@ def apply_docx_operations(
             and indices
             and all(index < len(original_elements) for index in indices)
         ):
-            source_elements[node.id] = [
-                original_elements[index] for index in indices
-            ]
+            source_elements[node.id] = [original_elements[index] for index in indices]
 
     for operation in operations:
         source_ref = _find_source_ref(spec, operation.get("target"))
@@ -189,12 +197,37 @@ def apply_docx_operations(
                 replacement,
                 replace_all=bool(operation.get("replace_all", False)),
             )
+        elif operation_name == "paragraph.format":
+            if len(elements) != 1 or elements[0].tag != _q(W, "p"):
+                raise NativePackageError(
+                    "paragraph.format requires a native reference to one w:p element."
+                )
+            fields = set(operation.get("set", {})) | set(operation.get("clear", []))
+            try:
+                style = ParagraphStyle.model_validate(operation.get("set", {}))
+            except ValidationError as error:
+                raise NativePackageError(
+                    f"Could not lower paragraph.format values: {error}"
+                ) from error
+            patch_paragraph_style(elements[0], style, fields)
+        elif operation_name == "text.format":
+            if len(elements) != 1 or elements[0].tag != _q(W, "p"):
+                raise NativePackageError(
+                    "text.format requires a native reference to one w:p element."
+                )
+            fields = set(operation.get("set", {})) | set(operation.get("clear", []))
+            try:
+                style = TextStyle.model_validate(operation.get("set", {}))
+            except ValidationError as error:
+                raise NativePackageError(f"Could not lower text.format values: {error}") from error
+            runs = list(elements[0].iter(_q(W, "r")))
+            patch_paragraph_mark_text_style(elements[0], style, fields)
+            for run in runs:
+                patch_text_style(run, style, fields)
         elif operation_name == "node.remove":
             for element in elements:
                 if element not in list(body):
-                    raise NativePackageError(
-                        "DOCX node has already been removed by this patch."
-                    )
+                    raise NativePackageError("DOCX node has already been removed by this patch.")
                 body.remove(element)
 
     current_indices = {id(element): index for index, element in enumerate(list(body))}

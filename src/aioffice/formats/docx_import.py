@@ -11,6 +11,7 @@ from xml.etree import ElementTree as ET
 
 from aioffice.core.diagnostics import Diagnostic
 from aioffice.core.errors import NativePackageError
+from aioffice.formats.docx_style import common_text_style, read_paragraph_style
 from aioffice.native import (
     FidelityPolicy,
     IdentityManifest,
@@ -91,6 +92,18 @@ def _paragraph_projection(
             "native_features": native_features,
         },
     }
+    paragraph_style = read_paragraph_style(element)
+    text_style = common_text_style(element)
+    if paragraph_style is not None:
+        common["paragraph_style"] = paragraph_style.model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+    if text_style is not None:
+        common["text_style"] = text_style.model_dump(
+            mode="json",
+            exclude_none=True,
+        )
     if heading_match:
         return {
             **common,
@@ -117,9 +130,7 @@ def _table_projection(
 ) -> dict[str, Any]:
     raw_rows: list[list[str]] = []
     for row in element.findall(f"./{_q(W, 'tr')}"):
-        raw_rows.append(
-            [_paragraph_text(cell) for cell in row.findall(f"./{_q(W, 'tc')}")]
-        )
+        raw_rows.append([_paragraph_text(cell) for cell in row.findall(f"./{_q(W, 'tc')}")])
     column_count = max((len(row) for row in raw_rows), default=1)
     header = raw_rows[0] if raw_rows else []
     columns = [
@@ -145,9 +156,7 @@ def _table_projection(
             {
                 "id": _unique_id("row", f"{index}_{row_index}", row_index, seen_ids),
                 "values": {
-                    column["key"]: values[column_index]
-                    if column_index < len(values)
-                    else ""
+                    column["key"]: values[column_index] if column_index < len(values) else ""
                     for column_index, column in enumerate(columns)
                 },
             }
@@ -183,10 +192,7 @@ def _page_break_projection(
 def _is_page_break(element: ET.Element) -> bool:
     if _paragraph_text(element):
         return False
-    return any(
-        node.attrib.get(_q(W, "type")) == "page"
-        for node in element.iter(_q(W, "br"))
-    )
+    return any(node.attrib.get(_q(W, "type")) == "page" for node in element.iter(_q(W, "br")))
 
 
 def _paragraph_numbering(element: ET.Element) -> tuple[str, int] | None:
@@ -252,9 +258,12 @@ def _list_projection(
     first = elements[0]
     first_index = indices[0]
     para_id = first.attrib.get(_q(W14, "paraId"))
-    hint = para_id or hashlib.sha256(
-        b"".join(ET.tostring(element, encoding="utf-8") for element in elements)
-    ).hexdigest()[:12]
+    hint = (
+        para_id
+        or hashlib.sha256(
+            b"".join(ET.tostring(element, encoding="utf-8") for element in elements)
+        ).hexdigest()[:12]
+    )
     list_type = "bullet_list" if format_name == "bullet" else "ordered_list"
     return {
         "id": _unique_id("list", hint, first_index, seen_ids),
@@ -304,9 +313,7 @@ def _embedded_identity_manifest(
     if not relationships:
         return None
     if len(relationships) != 1:
-        raise NativePackageError(
-            "DOCX package contains multiple AiOffice identity relationships."
-        )
+        raise NativePackageError("DOCX package contains multiple AiOffice identity relationships.")
     relationship = relationships[0]
     if relationship.external:
         raise NativePackageError("AiOffice identity relationship cannot be external.")
@@ -316,9 +323,7 @@ def _embedded_identity_manifest(
             "AiOffice identity relationship targets an unexpected package part."
         )
     if not package.has_part(MANIFEST_PART_URI):
-        raise NativePackageError(
-            "DOCX package identity relationship points to a missing manifest."
-        )
+        raise NativePackageError("DOCX package identity relationship points to a missing manifest.")
     return parse_identity_manifest(package.get_part(MANIFEST_PART_URI))
 
 
@@ -362,10 +367,7 @@ def import_docx(
                 next_index = index + 1
                 while next_index < len(body_elements):
                     candidate = body_elements[next_index]
-                    if (
-                        candidate.tag != _q(W, "p")
-                        or _paragraph_numbering(candidate) != numbering
-                    ):
+                    if candidate.tag != _q(W, "p") or _paragraph_numbering(candidate) != numbering:
                         break
                     group_elements.append(candidate)
                     group_indices.append(next_index)
@@ -433,9 +435,7 @@ def import_docx(
                 ),
                 "kind": "document",
                 "revision": (
-                    active_identity_manifest.revision
-                    if active_identity_manifest is not None
-                    else 1
+                    active_identity_manifest.revision if active_identity_manifest is not None else 1
                 ),
             },
             "metadata": _core_metadata(package),
