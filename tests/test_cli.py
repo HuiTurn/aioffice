@@ -68,6 +68,7 @@ class CliTests(unittest.TestCase):
                     "style.apply",
                     "style.define",
                     "style.format",
+                    "section.format",
                 ],
             )
             self.assertEqual(

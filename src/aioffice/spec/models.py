@@ -16,7 +16,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.4"
+SPEC_VERSION = "0.2-draft.5"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -192,6 +192,170 @@ class DocumentDefaults(StrictModel):
     text_style: TextStyle | None = None
 
 
+class PageSize(StrictModel):
+    """A standard paper preset or exact custom physical dimensions."""
+
+    preset: Literal[
+        "letter",
+        "legal",
+        "executive",
+        "a3",
+        "a4",
+        "tabloid",
+        "custom",
+    ] = "letter"
+    orientation: Literal["portrait", "landscape"] = "portrait"
+    width: Length | None = None
+    height: Length | None = None
+
+    @model_validator(mode="after")
+    def validate_dimensions(self) -> "PageSize":
+        if self.preset == "custom":
+            if self.width is None or self.height is None:
+                raise ValueError("Custom page size requires width and height.")
+            if self.width.to_points() <= 0 or self.height.to_points() <= 0:
+                raise ValueError("Custom page width and height must be positive.")
+            if self.width.to_points() > 1584 or self.height.to_points() > 1584:
+                raise ValueError("Custom page dimensions cannot exceed 22 inches.")
+        elif self.width is not None or self.height is not None:
+            raise ValueError("Standard page presets cannot include custom width or height.")
+        return self
+
+    def dimensions_points(self) -> tuple[float, float]:
+        if self.preset == "custom":
+            assert self.width is not None
+            assert self.height is not None
+            width = self.width.to_points()
+            height = self.height.to_points()
+        else:
+            width, height = {
+                "letter": (612.0, 792.0),
+                "legal": (612.0, 1008.0),
+                "executive": (522.0, 756.0),
+                "a3": (841.9, 1190.55),
+                "a4": (595.3, 841.9),
+                "tabloid": (792.0, 1224.0),
+            }[self.preset]
+        if self.orientation == "landscape" and width < height:
+            return height, width
+        if self.orientation == "portrait" and width > height:
+            return height, width
+        return width, height
+
+
+class SectionColumn(StrictModel):
+    width: Length
+    space_after: Length = Field(
+        default_factory=lambda: Length(value=36, unit="pt")
+    )
+
+    @model_validator(mode="after")
+    def validate_column(self) -> "SectionColumn":
+        if self.width.to_points() <= 0:
+            raise ValueError("Section column width must be positive.")
+        if self.space_after.to_points() < 0:
+            raise ValueError("Section column spacing cannot be negative.")
+        return self
+
+
+class ColumnLayout(StrictModel):
+    count: int = Field(default=1, ge=1, le=45, strict=True)
+    equal_width: bool = True
+    spacing: Length = Field(default_factory=lambda: Length(value=36, unit="pt"))
+    separator: bool = False
+    columns: list[SectionColumn] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_columns(self) -> "ColumnLayout":
+        if self.spacing.to_points() < 0:
+            raise ValueError("Column spacing cannot be negative.")
+        if self.equal_width and self.columns:
+            raise ValueError("Equal-width columns cannot include explicit column widths.")
+        if not self.equal_width and len(self.columns) != self.count:
+            raise ValueError(
+                "Unequal-width column layout requires one definition per column."
+            )
+        return self
+
+
+class SectionLayout(StrictModel):
+    """Supported direct properties of one WordprocessingML ``w:sectPr``."""
+
+    start_type: Literal[
+        "continuous",
+        "next_page",
+        "even_page",
+        "odd_page",
+        "next_column",
+    ] | None = None
+    page_size: PageSize | None = None
+    margin_top: Length | None = None
+    margin_right: Length | None = None
+    margin_bottom: Length | None = None
+    margin_left: Length | None = None
+    gutter: Length | None = None
+    header_distance: Length | None = None
+    footer_distance: Length | None = None
+    columns: ColumnLayout | None = None
+    vertical_alignment: Literal["top", "center", "both", "bottom"] | None = None
+    different_first_page: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_page_geometry(self) -> "SectionLayout":
+        non_negative = (
+            "margin_top",
+            "margin_right",
+            "margin_bottom",
+            "margin_left",
+            "gutter",
+            "header_distance",
+            "footer_distance",
+        )
+        if any(
+            (value := getattr(self, field_name)) is not None
+            and value.to_points() < 0
+            for field_name in non_negative
+            if field_name not in {"margin_top", "margin_bottom"}
+        ):
+            raise ValueError(
+                "Horizontal margins, gutter, and header/footer distances "
+                "cannot be negative."
+            )
+        if self.page_size is not None:
+            width, height = self.page_size.dimensions_points()
+            horizontal = sum(
+                value.to_points()
+                for value in (self.margin_left, self.margin_right, self.gutter)
+                if value is not None
+            )
+            vertical = sum(
+                value.to_points()
+                for value in (self.margin_top, self.margin_bottom)
+                if value is not None
+            )
+            if horizontal >= width:
+                raise ValueError("Horizontal margins and gutter must leave positive page width.")
+            if vertical >= height:
+                raise ValueError("Vertical margins must leave positive page height.")
+        return self
+
+
+def _default_section_layout() -> SectionLayout:
+    return SectionLayout(
+        page_size=PageSize(),
+        margin_top=Length(value=72, unit="pt"),
+        margin_right=Length(value=72, unit="pt"),
+        margin_bottom=Length(value=72, unit="pt"),
+        margin_left=Length(value=72, unit="pt"),
+        gutter=Length(value=0, unit="pt"),
+        header_distance=Length(value=36, unit="pt"),
+        footer_distance=Length(value=36, unit="pt"),
+        columns=ColumnLayout(),
+        vertical_alignment="top",
+        different_first_page=False,
+    )
+
+
 class NamedStyle(StrictModel):
     """An AI-addressable paragraph style with an explicit inheritance contract."""
 
@@ -287,6 +451,19 @@ class NativeRef(StrictModel):
         ):
             raise ValueError("element_index must equal the first element_indices value.")
         return self
+
+
+class DocumentSection(StrictModel):
+    """A stable semantic section anchored at its first content node."""
+
+    id: NodeId = Field(default_factory=lambda: new_id("section"))
+    type: Literal["section"] = "section"
+    start_at: NodeId | None = None
+    layout: SectionLayout = Field(default_factory=_default_section_layout)
+    source_ref: NativeRef | str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    revision_added: int = Field(default=1, ge=1)
+    revision_updated: int = Field(default=1, ge=1)
 
 
 class TextSpan(StrictModel):
@@ -433,6 +610,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.2",
         "0.2-draft.3",
         "0.2-draft.4",
+        "0.2-draft.5",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)
@@ -440,6 +618,12 @@ class AiOfficeDocumentSpec(StrictModel):
     theme: ThemeRef = Field(default_factory=ThemeRef)
     defaults: DocumentDefaults = Field(default_factory=DocumentDefaults)
     styles: list[NamedStyle] = Field(default_factory=list)
+    sections: list[DocumentSection] = Field(
+        default_factory=lambda: [
+            DocumentSection(id="section_default"),
+        ],
+        min_length=1,
+    )
     content: list[Block] = Field(default_factory=list)
     assets: list[AssetRef] = Field(default_factory=list)
     extensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -461,4 +645,7 @@ class AiOfficeDocumentSpec(StrictModel):
         style_ids = [style.id for style in self.styles]
         if len(style_ids) != len(set(style_ids)):
             raise ValueError("Named style IDs must be unique.")
+        section_ids = [section.id for section in self.sections]
+        if len(section_ids) != len(set(section_ids)):
+            raise ValueError("Document section IDs must be unique.")
         return self

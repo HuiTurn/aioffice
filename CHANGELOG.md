@@ -33,9 +33,19 @@
 - Added stable semantic document diffs and per-property format Patch results.
 - Added render contracts that distinguish approximate previews from native evidence.
 - Added optional PNG visual-regression metrics for future native render providers.
+- Added strict, ordered page and section models with standard/custom paper sizes,
+  orientation, margins, gutter, header/footer distances, equal or unequal columns,
+  section start types, vertical alignment, and first-page behavior.
+- Added correct DOCX projection for paragraph-carried and final body `w:sectPr`
+  elements, including structural carrier suppression and persistent section IDs.
+- Added deterministic multi-section DOCX generation and section-aware semantic HTML
+  page hints.
+- Added selective `section.format` native lowering that mutates one mapped
+  `w:sectPr`, preserves unknown section XML, and refreshes section fingerprints.
+- Added section anchor, ordering, page-geometry, and column-overflow diagnostics.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.4`.
+- Advanced the AiOffice Document Spec to `0.2-draft.5`.
 
 ## 0.1.0
 

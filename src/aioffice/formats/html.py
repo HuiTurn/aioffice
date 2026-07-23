@@ -7,6 +7,7 @@ from html import escape
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     BulletList,
+    DocumentSection,
     Heading,
     Length,
     OrderedList,
@@ -118,6 +119,73 @@ def _style_attribute(css: str) -> str:
     return f' style="{escape(css, quote=True)}"' if css else ""
 
 
+def _section_css(section: DocumentSection, *, page_view: bool) -> str:
+    if not page_view:
+        return ""
+    layout = section.layout
+    values = [
+        "box-sizing:border-box",
+        "margin:32px auto",
+        "background:white",
+        "box-shadow:0 2px 12px #00000014",
+    ]
+    if layout.page_size is not None:
+        width, height = layout.page_size.dimensions_points()
+        values.extend((f"width:{width:g}pt", f"min-height:{height:g}pt"))
+    if all(
+        value is not None
+        for value in (
+            layout.margin_top,
+            layout.margin_right,
+            layout.margin_bottom,
+            layout.margin_left,
+        )
+    ):
+        assert layout.margin_top is not None
+        assert layout.margin_right is not None
+        assert layout.margin_bottom is not None
+        assert layout.margin_left is not None
+        left = layout.margin_left.to_points() + (
+            layout.gutter.to_points() if layout.gutter is not None else 0
+        )
+        values.append(
+            "padding:"
+            f"{layout.margin_top.to_points():g}pt "
+            f"{layout.margin_right.to_points():g}pt "
+            f"{layout.margin_bottom.to_points():g}pt "
+            f"{left:g}pt"
+        )
+    if layout.columns is not None and layout.columns.count > 1:
+        values.append(f"column-count:{layout.columns.count}")
+        values.append(f"column-gap:{layout.columns.spacing.to_points():g}pt")
+        if layout.columns.separator:
+            values.append("column-rule:1px solid #b8c2cc")
+    if layout.start_type in {"next_page", "even_page", "odd_page"}:
+        values.append(
+            "break-before:"
+            + {
+                "next_page": "page",
+                "even_page": "left",
+                "odd_page": "right",
+            }[layout.start_type]
+        )
+    elif layout.start_type == "next_column":
+        values.append("break-before:column")
+    return ";".join(values)
+
+
+def _section_open(
+    section: DocumentSection,
+    *,
+    page_view: bool,
+) -> str:
+    return (
+        f'<section class="document-section" '
+        f'data-aioffice-section="{escape(section.id, quote=True)}"'
+        f"{_style_attribute(_section_css(section, page_view=page_view))}>"
+    )
+
+
 def _span_html(span: TextSpan, inherited_style: TextStyle | None = None) -> str:
     value = escape(span.text)
     css = _text_css(_merge_text_style(inherited_style, span.style))
@@ -173,8 +241,7 @@ def export_html(
         )
     )
     article_css = (
-        "article{box-sizing:border-box;max-width:840px;margin:32px auto;"
-        "padding:64px;background:white;box-shadow:0 2px 12px #00000014}"
+        "article{box-sizing:border-box;max-width:none;margin:0;padding:0}"
         if page_view
         else (
             "article{box-sizing:border-box;max-width:none;margin:0;"
@@ -228,7 +295,20 @@ def export_html(
         ]
     )
 
+    first_section = spec.sections[0]
+    opened_section_ids = {first_section.id}
+    section_starts = {
+        section.start_at: section
+        for section in spec.sections[1:]
+        if section.start_at is not None
+    }
+    lines.append(_section_open(first_section, page_view=page_view))
     for block in spec.content:
+        starting_section = section_starts.get(block.id)
+        if starting_section is not None:
+            lines.append("</section>")
+            lines.append(_section_open(starting_section, page_view=page_view))
+            opened_section_ids.add(starting_section.id)
         block_id = escape(block.id, quote=True)
         if isinstance(block, Heading):
             named_style_ref = block.style_ref or f"Heading{block.level}"
@@ -307,5 +387,14 @@ def export_html(
         elif isinstance(block, PageBreak):
             lines.append(f'<hr id="{block_id}" class="page-break">')
 
+    lines.append("</section>")
+    for section in spec.sections:
+        if section.id not in opened_section_ids:
+            lines.extend(
+                [
+                    _section_open(section, page_view=page_view),
+                    "</section>",
+                ]
+            )
     lines.extend(["</article>", "</body>", "</html>", ""])
     return "\n".join(lines)

@@ -118,6 +118,7 @@ def compute_document_diff(
 
     for payload in (before_payload, after_payload):
         payload.pop("content", None)
+        payload.pop("sections", None)
         payload.pop("engine_version", None)
         artifact = payload.get("artifact", {})
         artifact.pop("revision", None)
@@ -179,6 +180,60 @@ def compute_document_diff(
                 path=f"content.#{node_id}",
                 entries=entries,
                 node_id=node_id,
+            )
+
+    before_sections = {
+        section.id: _semantic_node(
+            section.model_dump(mode="json", exclude_none=True),
+            include_native=include_native,
+        )
+        for section in before.sections
+    }
+    after_sections = {
+        section.id: _semantic_node(
+            section.model_dump(mode="json", exclude_none=True),
+            include_native=include_native,
+        )
+        for section in after.sections
+    }
+    before_section_order = [section.id for section in before.sections]
+    after_section_order = [section.id for section in after.sections]
+    if before_section_order != after_section_order:
+        entries.append(
+            DiffEntry(
+                path="sections.order",
+                kind="moved",
+                before=before_section_order,
+                after=after_section_order,
+            )
+        )
+    for section_id in before_section_order:
+        if section_id not in after_sections:
+            entries.append(
+                DiffEntry(
+                    path=f"sections.#{section_id}",
+                    kind="removed",
+                    node_id=section_id,
+                    before=before_sections[section_id],
+                )
+            )
+    for section_id in after_section_order:
+        if section_id not in before_sections:
+            entries.append(
+                DiffEntry(
+                    path=f"sections.#{section_id}",
+                    kind="added",
+                    node_id=section_id,
+                    after=after_sections[section_id],
+                )
+            )
+        else:
+            _walk(
+                before_sections[section_id],
+                after_sections[section_id],
+                path=f"sections.#{section_id}",
+                entries=entries,
+                node_id=section_id,
             )
     return DocumentDiff(
         artifact_id=after.artifact.id,

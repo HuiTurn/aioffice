@@ -128,22 +128,25 @@ def build_identity_manifest(
     package_sha256: str | None = None,
 ) -> IdentityManifest:
     records: list[IdentityNode] = []
-    for node in spec.content:
-        source_ref = refs.get(node.id) if refs is not None else node.source_ref
-        if not isinstance(source_ref, NativeRef):
-            continue
-        records.append(
-            IdentityNode(
-                node_id=node.id,
-                node_type=node.type,
-                source_ref=source_ref,
+    for nodes in (spec.content, spec.sections):
+        group: list[IdentityNode] = []
+        for node in nodes:
+            source_ref = refs.get(node.id) if refs is not None else node.source_ref
+            if not isinstance(source_ref, NativeRef):
+                continue
+            group.append(
+                IdentityNode(
+                    node_id=node.id,
+                    node_type=node.type,
+                    source_ref=source_ref,
+                )
             )
-        )
-    for index, record in enumerate(records):
-        if index:
-            record.previous_fingerprint = records[index - 1].source_ref.fingerprint
-        if index + 1 < len(records):
-            record.next_fingerprint = records[index + 1].source_ref.fingerprint
+        for index, record in enumerate(group):
+            if index:
+                record.previous_fingerprint = group[index - 1].source_ref.fingerprint
+            if index + 1 < len(group):
+                record.next_fingerprint = group[index + 1].source_ref.fingerprint
+        records.extend(group)
     return IdentityManifest(
         artifact_id=spec.artifact.id,
         revision=spec.artifact.revision,
@@ -260,11 +263,28 @@ def apply_identity_manifest(
     manifest: IdentityManifest,
     *,
     package_sha256: str,
+    sections: list[dict[str, Any]] | None = None,
 ) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
+    projected = [*content, *(sections or [])]
     candidates = [
         (index, candidate, _candidate_ref(candidate))
-        for index, candidate in enumerate(content)
+        for index, candidate in enumerate(projected)
+    ]
+    candidates.sort(
+        key=lambda item: (
+            (
+                item[2].element_index
+                if item[2] is not None and item[2].element_index is not None
+                else 2**31
+            ),
+            item[2].native_kind if item[2] is not None else "",
+            item[0],
+        )
+    )
+    candidates = [
+        (index, candidate, source_ref)
+        for index, (_, candidate, source_ref) in enumerate(candidates)
     ]
     used: set[int] = set()
     bound_records: dict[int, int] = {}
@@ -414,7 +434,9 @@ def apply_identity_manifest(
         )
         for index, candidate, _ in candidates:
             if index not in used and candidate.get("id") == record.node_id:
-                candidate["id"] = new_id("node")
+                candidate["id"] = new_id(
+                    "section" if candidate.get("type") == "section" else "node"
+                )
 
     id_owners: dict[str, list[int]] = {}
     for index, candidate, _ in candidates:
@@ -432,7 +454,11 @@ def apply_identity_manifest(
         preserved = authoritative[0] if authoritative else owners[0]
         for index in owners:
             if index != preserved:
-                content[index]["id"] = new_id("node")
+                candidates[index][1]["id"] = new_id(
+                    "section"
+                    if candidates[index][1].get("type") == "section"
+                    else "node"
+                )
     return diagnostics
 
 

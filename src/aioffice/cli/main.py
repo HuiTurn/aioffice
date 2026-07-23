@@ -12,7 +12,14 @@ from aioffice._version import __version__
 from aioffice.core.errors import AiOfficeError
 from aioffice.documents import DocumentBuilder, open_artifact
 from aioffice.operations import TextMatch, TextRange
-from aioffice.spec.models import AiOfficeDocumentSpec, DocumentDefaults, NamedStyle
+from aioffice.spec.models import (
+    AiOfficeDocumentSpec,
+    DocumentDefaults,
+    DocumentSection,
+    NamedStyle,
+    PageSize,
+    SectionLayout,
+)
 from aioffice.workspace import Workspace
 
 
@@ -75,7 +82,10 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=(
             "document",
             "document-defaults",
+            "document-section",
             "named-style",
+            "page-size",
+            "section-layout",
             "text-range",
             "text-match",
         ),
@@ -322,7 +332,10 @@ def _run(args: argparse.Namespace) -> int:
         schema_models = {
             "document": AiOfficeDocumentSpec,
             "document-defaults": DocumentDefaults,
+            "document-section": DocumentSection,
             "named-style": NamedStyle,
+            "page-size": PageSize,
+            "section-layout": SectionLayout,
             "text-range": TextRange,
             "text-match": TextMatch,
         }

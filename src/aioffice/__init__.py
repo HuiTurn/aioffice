@@ -23,7 +23,17 @@ from .documents import Document, DocumentBuilder, PatchResult, open_artifact
 from .native import FidelityLevel, FidelityPolicy, FidelityReport
 from .operations import TextMatch, TextRange
 from .security import SecurityPolicy
-from .spec import DocumentDefaults, NamedStyle, ParagraphStyle, TextStyle
+from .spec import (
+    ColumnLayout,
+    DocumentDefaults,
+    DocumentSection,
+    NamedStyle,
+    PageSize,
+    ParagraphStyle,
+    SectionColumn,
+    SectionLayout,
+    TextStyle,
+)
 from .styles import ResolvedNamedStyle, resolve_named_style
 from .rendering import (
     RenderOptions,
@@ -43,6 +53,7 @@ __all__ = [
     "DocumentDiff",
     "Document",
     "DocumentBuilder",
+    "DocumentSection",
     "DocumentDefaults",
     "ExportError",
     "FidelityLevel",
@@ -50,8 +61,10 @@ __all__ = [
     "FidelityReport",
     "NativePackageError",
     "NamedStyle",
+    "PageSize",
     "PatchResult",
     "ParagraphStyle",
+    "ColumnLayout",
     "RenderOptions",
     "RenderResult",
     "RenderingError",
@@ -62,6 +75,8 @@ __all__ = [
     "TextMatch",
     "TextRange",
     "TextStyle",
+    "SectionColumn",
+    "SectionLayout",
     "UnsupportedFormatError",
     "ValidationResult",
     "VisualComparison",

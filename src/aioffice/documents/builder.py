@@ -17,17 +17,44 @@ class DocumentBuilder:
         theme: str = "business-clean",
         defaults: Mapping[str, Any] | None = None,
         styles: Iterable[Mapping[str, Any]] = (),
+        sections: Iterable[Mapping[str, Any]] | None = None,
     ) -> None:
         self._metadata: dict[str, Any] = {"title": title, "author": author}
         self._theme = theme
         self._defaults = deepcopy(dict(defaults)) if defaults is not None else {}
         self._styles = [deepcopy(dict(style)) for style in styles]
+        self._sections = (
+            [deepcopy(dict(section)) for section in sections]
+            if sections is not None
+            else None
+        )
         self._content: list[dict[str, Any]] = []
 
     def define_style(self, style: Mapping[str, Any]) -> "DocumentBuilder":
         """Add a strict document-local named style definition."""
 
         self._styles.append(deepcopy(dict(style)))
+        return self
+
+    def section(
+        self,
+        layout: Mapping[str, Any],
+        *,
+        start_at: str | None = None,
+        id: str | None = None,
+    ) -> "DocumentBuilder":
+        """Add an ordered page/section definition anchored at a content node."""
+
+        if self._sections is None:
+            self._sections = []
+        section: dict[str, Any] = {
+            "type": "section",
+            "start_at": start_at,
+            "layout": deepcopy(dict(layout)),
+        }
+        if id is not None:
+            section["id"] = id
+        self._sections.append(section)
         return self
 
     def heading(
@@ -204,15 +231,16 @@ class DocumentBuilder:
 
     def build(self) -> Document:
         metadata = {key: value for key, value in self._metadata.items() if value is not None}
-        return Document.from_spec(
-            {
-                "metadata": metadata,
-                "theme": {"ref": self._theme},
-                "defaults": deepcopy(self._defaults),
-                "styles": deepcopy(self._styles),
-                "content": deepcopy(self._content),
-            }
-        )
+        payload = {
+            "metadata": metadata,
+            "theme": {"ref": self._theme},
+            "defaults": deepcopy(self._defaults),
+            "styles": deepcopy(self._styles),
+            "content": deepcopy(self._content),
+        }
+        if self._sections is not None:
+            payload["sections"] = deepcopy(self._sections)
+        return Document.from_spec(payload)
 
 
 __all__ = ["DocumentBuilder"]

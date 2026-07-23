@@ -24,6 +24,10 @@ from aioffice.formats.docx_style import (
     apply_text_style,
 )
 from aioffice.formats.docx_named_styles import upsert_named_style
+from aioffice.formats.docx_section import (
+    apply_section_layout,
+    native_ref_for_section,
+)
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     BulletList,
@@ -242,7 +246,32 @@ def _document_xml(
     )
     body = _child(root, "body")
     refs: dict[str, NativeRef] = {}
+    sections = list(spec.sections)
+    section_index = 0
+    active_section = sections[0]
+    section_starts = {
+        section.start_at: index
+        for index, section in enumerate(sections[1:], start=1)
+        if section.start_at is not None
+    }
     for block in spec.content:
+        starting_section_index = section_starts.get(block.id)
+        if starting_section_index is not None:
+            if starting_section_index != section_index + 1:
+                raise ValueError(
+                    "Document sections must be ordered by their content anchors."
+                )
+            carrier = _child(body, "p")
+            carrier_properties = _child(carrier, "pPr")
+            carrier_section = _child(carrier_properties, "sectPr")
+            apply_section_layout(carrier_section, active_section.layout)
+            refs[active_section.id] = native_ref_for_section(
+                carrier_section,
+                len(body) - 1,
+                container="paragraph",
+            )
+            section_index = starting_section_index
+            active_section = sections[section_index]
         if isinstance(block, Heading):
             spans = block.content if block.text is None else [TextSpan(text=block.text)]
             element = _add_paragraph(
@@ -339,9 +368,15 @@ def _document_xml(
                 native_id=paragraph.attrib.get(_q(W14, "paraId")),
             )
 
+    if section_index + 1 != len(sections):
+        raise ValueError("Every document section after the first requires a valid start_at.")
     section = _child(body, "sectPr")
-    _child(section, "pgSz", w="12240", h="15840")
-    _child(section, "pgMar", top="1440", right="1440", bottom="1440", left="1440")
+    apply_section_layout(section, active_section.layout)
+    refs[active_section.id] = native_ref_for_section(
+        section,
+        len(body) - 1,
+        container="body",
+    )
     return _xml(root), refs
 
 

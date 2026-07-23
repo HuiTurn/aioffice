@@ -54,6 +54,7 @@ from aioffice.spec.models import (
     OrderedList,
     Paragraph,
     ParagraphStyle,
+    SectionLayout,
     SPEC_VERSION,
     Table,
     TextStyle,
@@ -262,6 +263,7 @@ class Document:
             "node_types": counts,
             "diagnostic_count": len(self._import_diagnostics),
             "style_count": len(style_catalog(self._spec)),
+            "section_count": len(self._spec.sections),
         }
         if response_format == "compact":
             style_usage: dict[str, int] = {}
@@ -305,9 +307,34 @@ class Document:
                 for style in style_catalog(self._spec).values()
                 if not style.hidden
             ]
+            result["sections"] = [
+                {
+                    "id": section.id,
+                    "start_at": section.start_at,
+                    "start_type": section.layout.start_type,
+                    "page_size": (
+                        section.layout.page_size.model_dump(
+                            mode="json",
+                            exclude_none=True,
+                        )
+                        if section.layout.page_size is not None
+                        else None
+                    ),
+                    "column_count": (
+                        section.layout.columns.count
+                        if section.layout.columns is not None
+                        else None
+                    ),
+                }
+                for section in self._spec.sections
+            ]
         elif response_format == "expanded":
             result["nodes"] = [
                 node.model_dump(mode="json", exclude_none=True) for node in self._spec.content
+            ]
+            result["sections"] = [
+                section.model_dump(mode="json", exclude_none=True)
+                for section in self._spec.sections
             ]
         return result
 
@@ -359,6 +386,7 @@ class Document:
             "style.apply",
             "style.define",
             "style.format",
+            "section.format",
         ]
         if self._native is not None:
             operations = [
@@ -369,6 +397,7 @@ class Document:
                 "style.apply",
                 "style.define",
                 "style.format",
+                "section.format",
             ]
         native_extension = self._spec.extensions.get("dev.aioffice.native", {})
         ambiguous_node_ids = sorted(
@@ -398,7 +427,7 @@ class Document:
                 "native_visual_verification_available": False,
             },
             "operations": operations,
-            "selectors": ["#node_id"],
+            "selectors": ["#node_id", "#section_id"],
             "formatting": {
                 "length_units": ["pt", "in", "cm", "mm", "px"],
                 "paragraph_properties": sorted(ParagraphStyle.model_fields),
@@ -426,6 +455,13 @@ class Document:
                     for style in style_catalog(self._spec).values()
                     if not style.hidden
                 ],
+                "section_properties": sorted(SectionLayout.model_fields),
+                "section_contract": {
+                    "ordered": True,
+                    "first_section_start_at": None,
+                    "later_sections_start_at": "existing_content_node_id",
+                    "native_patch_scope": "one mapped w:sectPr",
+                },
             },
             "identity": {
                 "source": native_extension.get(
@@ -451,6 +487,11 @@ class Document:
     def validate(self) -> ValidationResult:
         diagnostics = self.import_diagnostics
         seen: dict[str, str] = {self.id: "artifact"}
+        content_positions = {
+            node.id: index for index, node in enumerate(self._spec.content)
+        }
+        used_section_anchors: set[str] = set()
+        previous_section_position = -1
         previous_heading_level: int | None = None
         style_issue_severity = (
             Severity.WARNING if self._native is not None else Severity.ERROR
@@ -477,6 +518,169 @@ class Document:
                     suggested_actions=[{"action": "use_theme", "name": "business-clean"}],
                 )
             )
+
+        for index, section in enumerate(self._spec.sections):
+            if section.id in seen:
+                diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"Duplicate node ID {section.id!r}.",
+                        node_ids=[section.id],
+                        path=f"sections.{index}.id",
+                        suggested_actions=[{"action": "assign_unique_id"}],
+                    )
+                )
+            else:
+                seen[section.id] = f"sections.{index}"
+            if (
+                section.revision_added > self.revision
+                or section.revision_updated > self.revision
+            ):
+                diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"Section {section.id!r} references a revision newer "
+                            f"than artifact revision {self.revision}."
+                        ),
+                        node_ids=[section.id],
+                        path=f"sections.{index}",
+                    )
+                )
+            if index == 0:
+                if section.start_at is not None:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SECTION_ANCHOR",
+                            message="The first document section must have start_at=null.",
+                            node_ids=[section.id],
+                            path=f"sections.{index}.start_at",
+                            suggested_actions=[
+                                {
+                                    "action": "clear_section_anchor",
+                                    "section_id": section.id,
+                                }
+                            ],
+                        )
+                    )
+            elif section.start_at is None:
+                diagnostics.append(
+                    Diagnostic(
+                        severity=(
+                            Severity.WARNING
+                            if self._native is not None
+                            else Severity.ERROR
+                        ),
+                        code="INVALID_SECTION_ANCHOR",
+                        message=(
+                            f"Section {section.id!r} has no content anchor; this is "
+                            "only tolerated for an empty native section."
+                        ),
+                        node_ids=[section.id],
+                        path=f"sections.{index}.start_at",
+                        recoverable=True,
+                        suggested_actions=[
+                            {
+                                "action": "set_section_anchor",
+                                "section_id": section.id,
+                            }
+                        ],
+                    )
+                )
+            else:
+                position = content_positions.get(section.start_at)
+                if position is None:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SECTION_ANCHOR",
+                            message=(
+                                f"Section {section.id!r} starts at missing content "
+                                f"node {section.start_at!r}."
+                            ),
+                            node_ids=[section.id, section.start_at],
+                            path=f"sections.{index}.start_at",
+                            suggested_actions=[{"action": "inspect_nodes"}],
+                        )
+                    )
+                elif section.start_at in used_section_anchors:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SECTION_ANCHOR",
+                            message=(
+                                f"Multiple sections start at node "
+                                f"{section.start_at!r}."
+                            ),
+                            node_ids=[section.id, section.start_at],
+                            path=f"sections.{index}.start_at",
+                        )
+                    )
+                elif position <= previous_section_position:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SECTION_ORDER",
+                            message="Document sections are not in content order.",
+                            node_ids=[section.id],
+                            path=f"sections.{index}.start_at",
+                            suggested_actions=[{"action": "reorder_sections"}],
+                        )
+                    )
+                else:
+                    used_section_anchors.add(section.start_at)
+                    previous_section_position = position
+
+            columns = section.layout.columns
+            page_size = section.layout.page_size
+            if (
+                columns is not None
+                and not columns.equal_width
+                and page_size is not None
+                and section.layout.margin_left is not None
+                and section.layout.margin_right is not None
+            ):
+                width, _ = page_size.dimensions_points()
+                printable_width = (
+                    width
+                    - section.layout.margin_left.to_points()
+                    - section.layout.margin_right.to_points()
+                    - (
+                        section.layout.gutter.to_points()
+                        if section.layout.gutter is not None
+                        else 0
+                    )
+                )
+                required_width = sum(
+                    column.width.to_points()
+                    for column in columns.columns
+                ) + sum(
+                    column.space_after.to_points()
+                    for column in columns.columns[:-1]
+                )
+                if required_width > printable_width + 0.01:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="SECTION_COLUMNS_OVERFLOW",
+                            message=(
+                                f"Section {section.id!r} columns require "
+                                f"{required_width:.2f}pt but only "
+                                f"{printable_width:.2f}pt is printable."
+                            ),
+                            node_ids=[section.id],
+                            path=f"sections.{index}.layout.columns",
+                            suggested_actions=[
+                                {
+                                    "action": "reduce_column_widths_or_margins",
+                                    "available_width_pt": printable_width,
+                                }
+                            ],
+                        )
+                    )
 
         named_styles = style_catalog(self._spec)
         for style in self._spec.styles:
@@ -874,6 +1078,9 @@ class Document:
                 for node in updated._spec.content:
                     if node.id in identity_updates:
                         node.source_ref = identity_updates[node.id]
+                for section in updated._spec.sections:
+                    if section.id in identity_updates:
+                        section.source_ref = identity_updates[section.id]
                 updated._native = native
                 updated._import_diagnostics = self.import_diagnostics
         except _PatchFailure as error:
@@ -995,10 +1202,154 @@ class Document:
         return matches[0]
 
     @staticmethod
+    def _find_section(
+        payload: dict[str, Any],
+        target: Any,
+    ) -> tuple[int, dict[str, Any]]:
+        target_id = Document._target_id(target)
+        matches = [
+            (index, section)
+            for index, section in enumerate(payload["sections"])
+            if section.get("id") == target_id
+        ]
+        if not matches:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="TARGET_NOT_FOUND",
+                    message=f"No section matched #{target_id}.",
+                    suggested_actions=[{"action": "inspect_sections"}],
+                )
+            )
+        if len(matches) > 1:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="AMBIGUOUS_SELECTOR",
+                    message=f"Multiple sections matched #{target_id}.",
+                    node_ids=[target_id],
+                    suggested_actions=[{"action": "repair_duplicate_ids"}],
+                )
+            )
+        return matches[0]
+
+    @staticmethod
     def _apply_operation(
         payload: dict[str, Any], operation: dict[str, Any], next_revision: int
     ) -> dict[str, Any]:
         operation_name = operation.get("op")
+        if operation_name == "section.format":
+            unexpected = sorted(set(operation) - {"op", "target", "set", "clear"})
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.format received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                    )
+                )
+            _, section = Document._find_section(payload, operation.get("target"))
+            set_values = operation.get("set", {})
+            clear_values = operation.get("clear", [])
+            if (
+                not isinstance(set_values, dict)
+                or not isinstance(clear_values, list)
+                or any(not isinstance(value, str) for value in clear_values)
+                or len(clear_values) != len(set(clear_values))
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.format requires an object set and a list "
+                            "of unique clear property names."
+                        ),
+                        node_ids=[section["id"]],
+                    )
+                )
+            if not set_values and not clear_values:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="section.format requires at least one change.",
+                        node_ids=[section["id"]],
+                    )
+                )
+            known_fields = set(SectionLayout.model_fields)
+            unknown = sorted((set(set_values) | set(clear_values)) - known_fields)
+            overlap = sorted(set(set_values) & set(clear_values))
+            has_null = any(value is None for value in set_values.values())
+            if unknown or overlap or has_null:
+                detail = (
+                    f"unknown properties: {', '.join(unknown)}"
+                    if unknown
+                    else f"properties both set and cleared: {', '.join(overlap)}"
+                    if overlap
+                    else "set values cannot be null"
+                )
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"Invalid section.format: {detail}.",
+                        node_ids=[section["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_section_schema",
+                                "properties": sorted(known_fields),
+                            }
+                        ],
+                    )
+                )
+            before = deepcopy(section.get("layout", {}))
+            candidate = {**before, **deepcopy(set_values)}
+            for field_name in clear_values:
+                candidate.pop(field_name, None)
+            try:
+                normalized = SectionLayout.model_validate(candidate).model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="section.format has invalid values.",
+                        node_ids=[section["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "fix_section_layout",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(error)
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            section["layout"] = normalized
+            section["revision_updated"] = next_revision
+            changed_fields = sorted(set(set_values) | set(clear_values))
+            return {
+                "operation": "section.format",
+                "section_ids": [section["id"]],
+                "property_changes": [
+                    {
+                        "path": f"layout.{field_name}",
+                        "before": before.get(field_name),
+                        "after": normalized.get(field_name),
+                    }
+                    for field_name in changed_fields
+                    if before.get(field_name) != normalized.get(field_name)
+                ],
+            }
+
         if operation_name == "style.define":
             unexpected = sorted(set(operation) - {"op", "style"})
             if unexpected:
@@ -1754,7 +2105,7 @@ class Document:
                     f"Unsupported operation {operation_name!r}; AiOffice supports "
                     "text.replace, paragraph.format, text.format, node.append, "
                     "node.insert_after, node.remove, node.update, style.apply, "
-                    "style.define, and style.format."
+                    "style.define, style.format, and section.format."
                 ),
                 suggested_actions=[{"action": "use_supported_operation"}],
             )

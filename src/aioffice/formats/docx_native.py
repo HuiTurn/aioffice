@@ -21,6 +21,10 @@ from aioffice.formats.docx_named_styles import (
     format_named_style,
     upsert_named_style,
 )
+from aioffice.formats.docx_section import (
+    native_ref_for_section,
+    patch_section_layout,
+)
 from aioffice.native import (
     FidelityReport,
     MANIFEST_PART_URI,
@@ -37,6 +41,7 @@ from aioffice.spec.models import (
     NamedStyle,
     NativeRef,
     ParagraphStyle,
+    SectionLayout,
     TextStyle,
 )
 
@@ -73,6 +78,53 @@ def _find_source_ref(spec: AiOfficeDocumentSpec, target: Any) -> NativeRef:
             f"Semantic node {target_id!r} is not mapped to the DOCX main document part."
         )
     return source_ref
+
+
+def _find_section_source_ref(
+    spec: AiOfficeDocumentSpec,
+    target: Any,
+) -> tuple[str, NativeRef]:
+    target_id = _target_id(target)
+    matches = [section for section in spec.sections if section.id == target_id]
+    if len(matches) != 1:
+        raise NativePackageError(
+            f"Native DOCX target #{target_id} matched {len(matches)} semantic sections."
+        )
+    source_ref = matches[0].source_ref
+    if not isinstance(source_ref, NativeRef) or source_ref.format != "docx":
+        raise NativePackageError(
+            f"Semantic section {target_id!r} has no editable DOCX source reference."
+        )
+    if (
+        source_ref.part_uri != "/word/document.xml"
+        or source_ref.element_index is None
+        or source_ref.native_kind
+        not in {"w:sectPr-body", "w:sectPr-paragraph"}
+    ):
+        raise NativePackageError(
+            f"Semantic section {target_id!r} is not mapped to a DOCX section."
+        )
+    return target_id, source_ref
+
+
+def _section_element(
+    body_elements: Sequence[ET.Element],
+    source_ref: NativeRef,
+) -> tuple[ET.Element, ET.Element, str]:
+    assert source_ref.element_index is not None
+    if source_ref.element_index >= len(body_elements):
+        raise NativePackageError("DOCX section source reference points outside w:body.")
+    container = body_elements[source_ref.element_index]
+    if source_ref.native_kind == "w:sectPr-body":
+        if container.tag != _q(W, "sectPr"):
+            raise NativePackageError("DOCX body section source reference is stale.")
+        return container, container, "body"
+    if container.tag != _q(W, "p"):
+        raise NativePackageError("DOCX paragraph section source reference is stale.")
+    section = container.find(f"./{_q(W, 'pPr')}/{_q(W, 'sectPr')}")
+    if section is None:
+        raise NativePackageError("DOCX paragraph no longer contains its mapped section.")
+    return section, container, "paragraph"
 
 
 def _source_indices(source_ref: NativeRef) -> list[int]:
@@ -306,13 +358,14 @@ def apply_docx_operations(
         "style.apply",
         "style.define",
         "style.format",
+        "section.format",
     }
     unsupported = sorted({str(operation.get("op")) for operation in operations} - supported)
     if unsupported:
         raise NativePackageError(
             "Imported DOCX V0.2 currently supports native lowering for "
             "text.replace, paragraph.format, text.format, node.remove, "
-            "style.apply, style.define, and style.format; "
+            "style.apply, style.define, style.format, and section.format; "
             f"unsupported: {', '.join(unsupported)}."
         )
 
@@ -348,6 +401,22 @@ def apply_docx_operations(
             and all(index < len(original_elements) for index in indices)
         ):
             source_elements[node.id] = [original_elements[index] for index in indices]
+    source_sections: dict[
+        str,
+        tuple[ET.Element, ET.Element, str],
+    ] = {}
+    for section in spec.sections:
+        source_ref = section.source_ref
+        if (
+            isinstance(source_ref, NativeRef)
+            and source_ref.part_uri == "/word/document.xml"
+            and source_ref.native_kind
+            in {"w:sectPr-body", "w:sectPr-paragraph"}
+        ):
+            source_sections[section.id] = _section_element(
+                original_elements,
+                source_ref,
+            )
 
     for operation in operations:
         operation_name = operation.get("op")
@@ -401,6 +470,28 @@ def apply_docx_operations(
                 text_fields=text_fields,
             )
             styles_changed = True
+            continue
+        if operation_name == "section.format":
+            target_id, source_ref = _find_section_source_ref(
+                spec,
+                operation.get("target"),
+            )
+            section, _, _ = _section_element(original_elements, source_ref)
+            fields = set(operation.get("set", {})) | set(
+                operation.get("clear", [])
+            )
+            try:
+                layout = SectionLayout.model_validate(operation.get("set", {}))
+            except ValidationError as error:
+                raise NativePackageError(
+                    f"Could not lower section.format values: {error}"
+                ) from error
+            patch_section_layout(section, layout, fields)
+            source_sections[target_id] = _section_element(
+                original_elements,
+                source_ref,
+            )
+            document_changed = True
             continue
 
         source_ref = _find_source_ref(spec, operation.get("target"))
@@ -528,6 +619,15 @@ def apply_docx_operations(
             native_kind=original_ref.native_kind,
             native_id=original_ref.native_id,
         )
+    for section_id, (section, container, container_kind) in source_sections.items():
+        index = current_indices.get(id(container))
+        if index is None:
+            continue
+        identity_updates[section_id] = native_ref_for_section(
+            section,
+            index,
+            container=container_kind,
+        )
 
     if document_changed:
         updated.set_part("/word/document.xml", serialize_xml(root))
@@ -539,6 +639,9 @@ def apply_docx_operations(
         for node in manifest_spec.content:
             if node.id in identity_updates:
                 node.source_ref = identity_updates[node.id]
+        for section in manifest_spec.sections:
+            if section.id in identity_updates:
+                section.source_ref = identity_updates[section.id]
         updated.set_part(
             MANIFEST_PART_URI,
             serialize_identity_manifest(build_identity_manifest(manifest_spec)),

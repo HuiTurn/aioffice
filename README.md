@@ -16,11 +16,12 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev4`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev5`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
-named styles, document defaults, semantic diffs, render contracts, and fidelity
-reports. Workbook, presentation, PDF, native visual rendering, and MCP remain planned.
+named styles, document defaults, ordered page/section models, semantic diffs, render
+contracts, and fidelity reports. Workbook, presentation, PDF, native visual rendering,
+and MCP remain planned.
 
 ## Install
 
@@ -111,7 +112,7 @@ commit is refused when native identity is ambiguous. The detailed invariants are
 
 Native DOCX lowering in this development version supports `text.replace`,
 `paragraph.format`, `text.format`, `node.remove`, `style.define`, `style.apply`,
-and `style.format`. Ask the artifact before planning an edit:
+`style.format`, and `section.format`. Ask the artifact before planning an edit:
 
 ```python
 capabilities = doc.capabilities()
@@ -202,6 +203,60 @@ metadata, and paragraph `w:pStyle` references are projected into the Spec. Nativ
 style patches update only supported properties in `word/styles.xml`; unknown style
 XML and every untouched package part remain byte-for-byte preserved.
 
+Sections are ordered, AI-addressable page regions. The first section starts at the
+document root; each later section is anchored at its first content node. Page size,
+orientation, margins, gutter, header/footer distance, columns, vertical alignment,
+first-page behavior, and Word section-start type all use strict values:
+
+```python
+doc = DocumentBuilder(
+    sections=[
+        {
+            "id": "cover_section",
+            "start_at": None,
+            "layout": {
+                "page_size": {"preset": "letter"},
+                "margin_top": {"value": 1, "unit": "in"},
+                "margin_right": {"value": 1, "unit": "in"},
+                "margin_bottom": {"value": 1, "unit": "in"},
+                "margin_left": {"value": 1, "unit": "in"},
+            },
+        },
+        {
+            "id": "analysis_section",
+            "start_at": "analysis",
+            "layout": {
+                "start_type": "next_page",
+                "page_size": {
+                    "preset": "a4",
+                    "orientation": "landscape",
+                },
+                "columns": {
+                    "count": 2,
+                    "spacing": {"value": 24, "unit": "pt"},
+                    "separator": True,
+                },
+            },
+        },
+    ]
+).paragraph("Cover", id="cover").paragraph("Analysis", id="analysis").build()
+
+result = doc.apply([
+    {
+        "op": "section.format",
+        "target": "#analysis_section",
+        "set": {"margin_left": {"value": 18, "unit": "mm"}},
+        "clear": ["footer_distance"],
+    }
+])
+```
+
+Generated multi-section DOCX uses Word's native section placement rules. Imported
+paragraph-level and final body-level `w:sectPr` elements are projected separately,
+and `section.format` changes only the selected native section properties. Unknown
+section XML remains native and untouched. See
+[the page and section contract](docs/section-layout.md).
+
 `doc.render()` currently returns a semantic HTML preview whose contract explicitly
 reports `fidelity="approximate"` and `verification_status="preview_only"`. It must
 not be treated as proof of Word pagination. See
@@ -247,9 +302,9 @@ preview = result.document
 
 Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `node.append`, `node.insert_after`, `node.remove`, `node.update`, `style.define`,
-`style.apply`, and `style.format`. Imported DOCX documents expose the native-safe
-subset reported by `capabilities()`.
-Selectors are stable node IDs in this release.
+`style.apply`, `style.format`, and `section.format`. Imported DOCX documents expose
+the native-safe subset reported by `capabilities()`. Selectors are stable content or
+section IDs in this release.
 
 ## CLI
 
@@ -262,6 +317,9 @@ aioffice export examples/report.json --to report.html
 aioffice schema --output document.schema.json
 aioffice schema --kind named-style --output named-style.schema.json
 aioffice schema --kind document-defaults --output document-defaults.schema.json
+aioffice schema --kind page-size --output page-size.schema.json
+aioffice schema --kind section-layout --output section-layout.schema.json
+aioffice schema --kind document-section --output document-section.schema.json
 aioffice schema --kind text-range --output text-range.schema.json
 
 aioffice workspace init project

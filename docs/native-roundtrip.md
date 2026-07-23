@@ -26,9 +26,11 @@ AiOffice-generated DOCX files contain:
 /customXml/aioffice-manifest.xml
 ```
 
-The manifest stores the artifact ID, revision, Spec version, node IDs, native
-references, structural paths, native object IDs, and fingerprints. Paragraph anchors
-are emitted as `w14:paraId` values and declared through Markup Compatibility.
+The manifest stores the artifact ID, revision, Spec version, content and section IDs,
+native references, structural paths, native object IDs, and fingerprints. Paragraph
+anchors are emitted as `w14:paraId` values and declared through Markup Compatibility.
+Section identities point to the exact paragraph-carried or body-level `w:sectPr`
+without pretending the semantic Spec contains all of its XML.
 
 Third-party documents use the same identity model in a `.aioffice/` workspace
 sidecar. Rebinding after an external edit follows this order:
@@ -68,7 +70,8 @@ overwrite unless the caller explicitly opts in.
 ## Current native lowering boundary
 
 The current DOCX native layer lowers `text.replace`, `paragraph.format`,
-`text.format`, `node.remove`, `style.define`, `style.apply`, and `style.format`.
+`text.format`, `node.remove`, `style.define`, `style.apply`, `style.format`, and
+`section.format`.
 Text replacement can cross Word run boundaries while retaining run properties and
 unknown XML. Paragraph and text formatting mutate only selected supported
 `w:pPr` / `w:rPr` properties and preserve unrelated or unknown children. Character
@@ -85,6 +88,12 @@ AiOffice never overlays `business-clean` defaults on an existing template. Style
 edits mutate only `word/styles.xml` and, when a node reference changes, its single
 `w:pStyle`. Unknown style XML remains in place.
 
+Paragraph-carried section properties and the final body section are projected as
+ordered semantic sections. Native section edits update only explicitly selected
+`w:type`, `w:pgSz`, `w:pgMar`, `w:cols`, `w:vAlign`, or `w:titlePg` values.
+Unrecognized attributes, children, header/footer relationships, and other section
+settings remain untouched.
+
 Other operations are rejected before a new native revision is committed. Future
-iterations will add tables, sections, headers/footers, drawings, and layout-aware
+iterations will add tables, header/footer content, drawings, and further layout-aware
 operations behind the same capability and fidelity contracts.

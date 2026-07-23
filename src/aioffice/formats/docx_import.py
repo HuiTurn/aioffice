@@ -20,6 +20,10 @@ from aioffice.formats.docx_named_styles import (
     read_document_defaults,
     read_named_styles,
 )
+from aioffice.formats.docx_section import (
+    native_ref_for_section,
+    read_section_layout,
+)
 from aioffice.native import (
     FidelityPolicy,
     IdentityManifest,
@@ -58,6 +62,19 @@ def _unique_id(prefix: str, hint: str, index: int, seen: set[str]) -> str:
 
 def _paragraph_text(element: ET.Element) -> str:
     return "".join(node.text or "" for node in element.iter(_q(W, "t")))
+
+
+def _paragraph_section(element: ET.Element) -> ET.Element | None:
+    return element.find(f"./{_q(W, 'pPr')}/{_q(W, 'sectPr')}")
+
+
+def _is_section_carrier(element: ET.Element) -> bool:
+    return (
+        _paragraph_section(element) is not None
+        and not _paragraph_text(element)
+        and element.find(f".//{_q(W, 'drawing')}") is None
+        and element.find(f".//{_q(W, 'object')}") is None
+    )
 
 
 def _hyperlink_targets(package: NativePackage) -> dict[str, str]:
@@ -478,6 +495,49 @@ def import_docx(
     content: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     body_elements = list(body)
+    section_endpoints: list[tuple[int, ET.Element, str]] = []
+    for body_index, body_element in enumerate(body_elements):
+        if body_element.tag == _q(W, "p"):
+            paragraph_section = _paragraph_section(body_element)
+            if paragraph_section is not None:
+                section_endpoints.append(
+                    (body_index, paragraph_section, "paragraph")
+                )
+        elif body_element.tag == _q(W, "sectPr"):
+            section_endpoints.append((body_index, body_element, "body"))
+    sections: list[dict[str, Any]] = []
+    for section_index, (body_index, section, container) in enumerate(
+        section_endpoints
+    ):
+        fingerprint = hashlib.sha256(
+            ET.tostring(section, encoding="utf-8")
+        ).hexdigest()[:12]
+        section_id = _unique_id(
+            "section",
+            fingerprint,
+            section_index,
+            seen_ids,
+        )
+        sections.append(
+            {
+                "id": section_id,
+                "type": "section",
+                "start_at": None,
+                "layout": read_section_layout(
+                    section,
+                    first=section_index == 0,
+                ).model_dump(mode="json", exclude_none=True),
+                "source_ref": native_ref_for_section(
+                    section,
+                    body_index,
+                    container=container,
+                ).model_dump(mode="json", exclude_none=True),
+                "metadata": {
+                    "native_container": container,
+                },
+            }
+        )
+    body_index_to_node: dict[int, dict[str, Any]] = {}
     numbering_formats = _numbering_formats(package)
     hyperlink_targets = _hyperlink_targets(package)
     try:
@@ -504,59 +564,68 @@ def import_docx(
     while index < len(body_elements):
         element = body_elements[index]
         if element.tag == _q(W, "p"):
+            if _is_section_carrier(element):
+                index += 1
+                continue
             numbering = _paragraph_numbering(element)
             if numbering is not None and numbering in numbering_formats:
                 group_elements = [element]
                 group_indices = [index]
                 next_index = index + 1
-                while next_index < len(body_elements):
+                while (
+                    next_index < len(body_elements)
+                    and _paragraph_section(group_elements[-1]) is None
+                ):
                     candidate = body_elements[next_index]
                     if candidate.tag != _q(W, "p") or _paragraph_numbering(candidate) != numbering:
                         break
                     group_elements.append(candidate)
                     group_indices.append(next_index)
                     next_index += 1
-                content.append(
-                    _list_projection(
-                        group_elements,
-                        group_indices,
-                        seen_ids,
-                        number_id=numbering[0],
-                        level=numbering[1],
-                        format_name=numbering_formats[numbering],
-                    )
+                projected = _list_projection(
+                    group_elements,
+                    group_indices,
+                    seen_ids,
+                    number_id=numbering[0],
+                    level=numbering[1],
+                    format_name=numbering_formats[numbering],
                 )
+                content.append(projected)
+                for group_index in group_indices:
+                    body_index_to_node[group_index] = projected
                 index = next_index
                 continue
             if _is_page_break(element):
-                content.append(_page_break_projection(element, index, seen_ids))
+                projected = _page_break_projection(element, index, seen_ids)
             else:
-                content.append(
-                    _paragraph_projection(
-                        element,
-                        index,
-                        seen_ids,
-                        hyperlink_targets,
-                        named_styles,
-                    )
+                projected = _paragraph_projection(
+                    element,
+                    index,
+                    seen_ids,
+                    hyperlink_targets,
+                    named_styles,
                 )
+            content.append(projected)
+            body_index_to_node[index] = projected
         elif element.tag == _q(W, "tbl"):
-            content.append(_table_projection(element, index, seen_ids))
+            projected = _table_projection(element, index, seen_ids)
+            content.append(projected)
+            body_index_to_node[index] = projected
         elif element.tag == _q(W, "sectPr"):
             index += 1
             continue
         else:
             native_kind = element.tag.rsplit("}", 1)[-1]
-            content.append(
-                {
-                    "id": _unique_id("opaque", native_kind, index, seen_ids),
-                    "type": "opaque",
-                    "summary": f"Unsupported DOCX body element {native_kind}.",
-                    "source_ref": _source_ref([element], [index], native_kind),
-                    "capabilities": ["inspect", "move", "delete", "render"],
-                    "editable": False,
-                }
-            )
+            projected = {
+                "id": _unique_id("opaque", native_kind, index, seen_ids),
+                "type": "opaque",
+                "summary": f"Unsupported DOCX body element {native_kind}.",
+                "source_ref": _source_ref([element], [index], native_kind),
+                "capabilities": ["inspect", "move", "delete", "render"],
+                "editable": False,
+            }
+            content.append(projected)
+            body_index_to_node[index] = projected
         index += 1
 
     active_identity_manifest = identity_manifest
@@ -588,8 +657,25 @@ def import_docx(
                 content,
                 active_identity_manifest,
                 package_sha256=package.source_sha256,
+                sections=sections,
             )
         )
+
+    for section_index, section in enumerate(sections):
+        if section_index == 0:
+            section["start_at"] = None
+            continue
+        previous_endpoint = section_endpoints[section_index - 1][0]
+        current_endpoint = section_endpoints[section_index][0]
+        start_node = next(
+            (
+                body_index_to_node[body_index]
+                for body_index in range(previous_endpoint + 1, current_endpoint + 1)
+                if body_index in body_index_to_node
+            ),
+            None,
+        )
+        section["start_at"] = start_node["id"] if start_node is not None else None
 
     spec = AiOfficeDocumentSpec.model_validate(
         {
@@ -615,6 +701,7 @@ def import_docx(
                 style.model_dump(mode="json", exclude_none=True)
                 for style in projected_styles
             ],
+            "sections": sections or [{"id": "section_default"}],
             "content": content,
             "extensions": {
                 "dev.aioffice.native": {
