@@ -12,6 +12,7 @@ from aioffice._version import __version__
 from aioffice.core.errors import AiOfficeError
 from aioffice.documents import DocumentBuilder, open_artifact
 from aioffice.spec.models import AiOfficeDocumentSpec
+from aioffice.workspace import Workspace
 
 
 def _json_dump(value: Any) -> None:
@@ -72,6 +73,78 @@ def _build_parser() -> argparse.ArgumentParser:
     init = subparsers.add_parser("init", help="Initialize a small AiOffice project.")
     init.add_argument("directory", nargs="?", type=Path, default=Path("."))
 
+    workspace = subparsers.add_parser(
+        "workspace",
+        help="Manage persistent artifacts and revisions in .aioffice.",
+    )
+    workspace_commands = workspace.add_subparsers(
+        dest="workspace_command",
+        required=True,
+    )
+    workspace_init = workspace_commands.add_parser("init", help="Initialize a workspace.")
+    workspace_init.add_argument("root", nargs="?", type=Path, default=Path("."))
+
+    workspace_import = workspace_commands.add_parser(
+        "import",
+        help="Copy a DOCX into the workspace as a tracked artifact.",
+    )
+    workspace_import.add_argument("input", type=Path)
+    workspace_import.add_argument("--root", type=Path, default=Path("."))
+
+    workspace_list = workspace_commands.add_parser(
+        "list",
+        help="List tracked workspace artifacts.",
+    )
+    workspace_list.add_argument("--root", type=Path, default=Path("."))
+
+    workspace_capabilities = workspace_commands.add_parser(
+        "capabilities",
+        help="Report persistent workspace operations and guarantees.",
+    )
+    workspace_capabilities.add_argument("artifact_id", nargs="?")
+    workspace_capabilities.add_argument("--root", type=Path, default=Path("."))
+
+    workspace_inspect = workspace_commands.add_parser(
+        "inspect",
+        help="Inspect a tracked artifact revision.",
+    )
+    workspace_inspect.add_argument("artifact_id")
+    workspace_inspect.add_argument("--root", type=Path, default=Path("."))
+    workspace_inspect.add_argument("--revision", type=int)
+    workspace_inspect.add_argument(
+        "--response-format",
+        choices=("summary", "compact", "expanded"),
+        default="compact",
+    )
+
+    workspace_apply = workspace_commands.add_parser(
+        "apply",
+        help="Apply and persist an atomic patch as a new revision.",
+    )
+    workspace_apply.add_argument("artifact_id")
+    workspace_apply.add_argument("patch", type=Path)
+    workspace_apply.add_argument("--root", type=Path, default=Path("."))
+    workspace_apply.add_argument("--dry-run", action="store_true")
+
+    workspace_reconcile = workspace_commands.add_parser(
+        "reconcile",
+        help="Preview or commit an externally edited DOCX as a new revision.",
+    )
+    workspace_reconcile.add_argument("artifact_id")
+    workspace_reconcile.add_argument("input", type=Path)
+    workspace_reconcile.add_argument("--root", type=Path, default=Path("."))
+    workspace_reconcile.add_argument("--commit", action="store_true")
+
+    workspace_export = workspace_commands.add_parser(
+        "export",
+        help="Export a tracked revision without overwriting by default.",
+    )
+    workspace_export.add_argument("artifact_id")
+    workspace_export.add_argument("output", type=Path)
+    workspace_export.add_argument("--root", type=Path, default=Path("."))
+    workspace_export.add_argument("--revision", type=int)
+    workspace_export.add_argument("--overwrite", action="store_true")
+
     return parser
 
 
@@ -80,6 +153,96 @@ def _default_build_output(source: Path) -> Path:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "workspace":
+        workspace_command = args.workspace_command
+        if workspace_command == "init":
+            workspace = Workspace.init(args.root)
+            _json_dump(
+                {
+                    "workspace_id": workspace.id,
+                    "root": str(workspace.root),
+                }
+            )
+            return 0
+
+        workspace = Workspace.open(args.root)
+        if workspace_command == "import":
+            document = workspace.import_document(args.input)
+            _json_dump(
+                {
+                    "workspace_id": workspace.id,
+                    "artifact": document.inspect(response_format="summary"),
+                }
+            )
+            return 0
+        if workspace_command == "list":
+            _json_dump(
+                {
+                    "workspace_id": workspace.id,
+                    "artifacts": workspace.list_artifacts(),
+                }
+            )
+            return 0
+        if workspace_command == "capabilities":
+            _json_dump(workspace.capabilities(args.artifact_id))
+            return 0
+        if workspace_command == "inspect":
+            document = workspace.open_document(
+                args.artifact_id,
+                revision=args.revision,
+            )
+            _json_dump(document.inspect(response_format=args.response_format))
+            return 0
+        if workspace_command == "apply":
+            patch = _load_patch(args.patch)
+            operations = patch.get("operations")
+            if not isinstance(operations, list):
+                raise ValueError("Patch envelope requires an operations array.")
+            result = workspace.apply(
+                args.artifact_id,
+                operations,
+                dry_run=args.dry_run,
+                base_revision=patch.get("base_revision"),
+                idempotency_key=patch.get("idempotency_key"),
+            )
+            _json_dump(result.model_dump())
+            return 0 if result.success else 1
+        if workspace_command == "reconcile":
+            document = workspace.reconcile_document(
+                args.artifact_id,
+                args.input,
+                commit=args.commit,
+            )
+            diagnostics = [
+                diagnostic.model_dump(mode="json")
+                for diagnostic in document.import_diagnostics
+            ]
+            _json_dump(
+                {
+                    "committed": args.commit,
+                    "artifact": document.inspect(response_format="compact"),
+                    "diagnostics": diagnostics,
+                }
+            )
+            return (
+                1
+                if any(
+                    diagnostic["code"] == "IDENTITY_AMBIGUOUS"
+                    for diagnostic in diagnostics
+                )
+                else 0
+            )
+        if workspace_command == "export":
+            path = workspace.export_document(
+                args.artifact_id,
+                args.output,
+                revision=args.revision,
+                overwrite=args.overwrite,
+            )
+            print(path)
+            return 0
+        raise AssertionError(f"Unhandled workspace command: {workspace_command}")
+
     if args.command in {"build", "export"}:
         document = open_artifact(args.input)
         output = args.output if args.output is not None else _default_build_output(args.input)

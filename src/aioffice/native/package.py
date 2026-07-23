@@ -78,11 +78,18 @@ class NativePackage:
         policy: FidelityPolicy | str = FidelityPolicy.PRESERVE_UNKNOWN,
         security_policy: SecurityPolicy | None = None,
     ) -> "NativePackage":
+        active_security_policy = security_policy or SecurityPolicy()
         if isinstance(source, bytes):
             source_bytes = source
         else:
-            source_bytes = Path(source).read_bytes()
-        active_security_policy = security_policy or SecurityPolicy()
+            source_path = Path(source)
+            source_size = source_path.stat().st_size
+            if source_size > active_security_policy.max_file_size_bytes:
+                raise SecurityError(
+                    f"Package size {source_size} exceeds "
+                    f"{active_security_policy.max_file_size_mb} MB."
+                )
+            source_bytes = source_path.read_bytes()
         if len(source_bytes) > active_security_policy.max_file_size_bytes:
             raise SecurityError(
                 f"Package size {len(source_bytes)} exceeds "
@@ -110,6 +117,12 @@ class NativePackage:
     @property
     def affected_parts(self) -> tuple[str, ...]:
         return tuple(sorted(set(self._overrides) | self._deleted))
+
+    def has_part(self, uri: str) -> bool:
+        normalized = _part_uri(uri)
+        return normalized not in self._deleted and (
+            normalized in self._overrides or normalized in self._parts
+        )
 
     def clone(self) -> "NativePackage":
         cloned = object.__new__(NativePackage)

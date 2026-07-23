@@ -5,10 +5,11 @@ import unittest
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
-from aioffice.documents import DocumentBuilder
+from aioffice.documents import Document, DocumentBuilder
 from aioffice.formats.docx import compile_docx
 from aioffice.formats.html import export_html
 from aioffice.formats.markdown import export_markdown, import_markdown
+from aioffice.native import MANIFEST_PART_URI, MANIFEST_RELATIONSHIP_TYPE
 
 
 class FormatTests(unittest.TestCase):
@@ -65,6 +66,7 @@ class FormatTests(unittest.TestCase):
         required = {
             "[Content_Types].xml",
             "_rels/.rels",
+            MANIFEST_PART_URI.lstrip("/"),
             "word/document.xml",
             "word/_rels/document.xml.rels",
             "word/styles.xml",
@@ -81,6 +83,44 @@ class FormatTests(unittest.TestCase):
             relationships = archive.read("word/_rels/document.xml.rels").decode("utf-8")
             self.assertIn("AiOffice", document_xml)
             self.assertIn("https://example.com", relationships)
+            root_relationships = archive.read("_rels/.rels").decode("utf-8")
+            self.assertIn(MANIFEST_RELATIONSHIP_TYPE, root_relationships)
+
+    def test_generated_docx_restores_embedded_semantic_identity(self) -> None:
+        document = (
+            DocumentBuilder(title="Identity")
+            .heading("Identity", id="stable_heading")
+            .paragraph("Body", id="stable_paragraph")
+            .bullet_list(["One", "Two"], id="stable_list")
+            .page_break(id="stable_break")
+            .table(
+                [{"key": "name", "title": "Name"}],
+                [{"name": "AiOffice"}],
+                id="stable_table",
+            )
+            .build()
+        )
+        reopened = Document.from_docx(compile_docx(document.spec))
+        self.assertEqual(reopened.id, document.id)
+        self.assertEqual(reopened.revision, document.revision)
+        self.assertEqual(
+            [(node["id"], node["type"]) for node in reopened.to_spec()["content"]],
+            [
+                ("stable_heading", "heading"),
+                ("stable_paragraph", "paragraph"),
+                ("stable_list", "bullet_list"),
+                ("stable_break", "page_break"),
+                ("stable_table", "table"),
+            ],
+        )
+        self.assertEqual(reopened.import_diagnostics, [])
+        self.assertEqual(
+            reopened.capabilities()["identity"]["source"],
+            "embedded",
+        )
+        self.assertTrue(
+            reopened.capabilities()["identity"]["safe_to_commit"],
+        )
 
 
 if __name__ == "__main__":

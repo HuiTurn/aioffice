@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
 from xml.etree import ElementTree as ET
 
 from aioffice.core.errors import NativePackageError
-from aioffice.native import FidelityReport, NativePackage
+from aioffice.native import (
+    FidelityReport,
+    MANIFEST_PART_URI,
+    NativePackage,
+    build_identity_manifest,
+    native_ref_for_elements,
+    serialize_identity_manifest,
+)
 from aioffice.native.xml import parse_xml, serialize_xml
 from aioffice.spec.models import AiOfficeDocumentSpec, NativeRef
 
@@ -18,10 +24,6 @@ XML = "http://www.w3.org/XML/1998/namespace"
 
 def _q(namespace: str, local: str) -> str:
     return f"{{{namespace}}}{local}"
-
-
-def _fingerprint(element: ET.Element) -> str:
-    return "sha256:" + hashlib.sha256(serialize_xml(element)).hexdigest()
 
 
 def _target_id(value: Any) -> str:
@@ -42,11 +44,21 @@ def _find_source_ref(spec: AiOfficeDocumentSpec, target: Any) -> NativeRef:
         raise NativePackageError(
             f"Semantic node {target_id!r} has no editable DOCX source reference."
         )
-    if source_ref.part_uri != "/word/document.xml" or source_ref.element_index is None:
+    if source_ref.part_uri != "/word/document.xml" or (
+        source_ref.element_index is None and not source_ref.element_indices
+    ):
         raise NativePackageError(
             f"Semantic node {target_id!r} is not mapped to the DOCX main document part."
         )
     return source_ref
+
+
+def _source_indices(source_ref: NativeRef) -> list[int]:
+    if source_ref.element_indices:
+        return list(source_ref.element_indices)
+    if source_ref.element_index is not None:
+        return [source_ref.element_index]
+    raise NativePackageError("DOCX source reference has no native element indices.")
 
 
 def _occurrences(text: str, search: str, replace_all: bool) -> list[tuple[int, int]]:
@@ -118,6 +130,7 @@ def _replace_text_nodes(
 def apply_docx_operations(
     package: NativePackage,
     spec: AiOfficeDocumentSpec,
+    result_spec: AiOfficeDocumentSpec,
     operations: Sequence[Mapping[str, Any]],
 ) -> tuple[NativePackage, FidelityReport, dict[str, NativeRef]]:
     supported = {"text.replace", "node.remove"}
@@ -137,25 +150,33 @@ def apply_docx_operations(
     if body is None:
         raise NativePackageError("DOCX main document part has no w:body.")
     original_elements = list(body)
-    source_elements: dict[str, ET.Element] = {}
+    source_elements: dict[str, list[ET.Element]] = {}
     for node in spec.content:
         source_ref = node.source_ref
+        if not isinstance(source_ref, NativeRef):
+            continue
+        indices = _source_indices(source_ref)
         if (
-            isinstance(source_ref, NativeRef)
-            and source_ref.part_uri == "/word/document.xml"
-            and source_ref.element_index is not None
-            and source_ref.element_index < len(original_elements)
+            source_ref.part_uri == "/word/document.xml"
+            and indices
+            and all(index < len(original_elements) for index in indices)
         ):
-            source_elements[node.id] = original_elements[source_ref.element_index]
+            source_elements[node.id] = [
+                original_elements[index] for index in indices
+            ]
 
     for operation in operations:
         source_ref = _find_source_ref(spec, operation.get("target"))
-        assert source_ref.element_index is not None
-        if source_ref.element_index >= len(original_elements):
+        indices = _source_indices(source_ref)
+        if any(index >= len(original_elements) for index in indices):
             raise NativePackageError("DOCX source reference points outside w:body.")
-        element = original_elements[source_ref.element_index]
+        elements = [original_elements[index] for index in indices]
         operation_name = operation.get("op")
         if operation_name == "text.replace":
+            if len(elements) != 1:
+                raise NativePackageError(
+                    "text.replace requires a native reference to exactly one element."
+                )
             search = operation.get("search")
             replacement = operation.get("replacement")
             if not isinstance(search, str) or not search or not isinstance(replacement, str):
@@ -163,37 +184,49 @@ def apply_docx_operations(
                     "text.replace requires a non-empty search and string replacement."
                 )
             _replace_text_nodes(
-                element,
+                elements[0],
                 search,
                 replacement,
                 replace_all=bool(operation.get("replace_all", False)),
             )
         elif operation_name == "node.remove":
-            if element not in list(body):
-                raise NativePackageError("DOCX node has already been removed by this patch.")
-            body.remove(element)
+            for element in elements:
+                if element not in list(body):
+                    raise NativePackageError(
+                        "DOCX node has already been removed by this patch."
+                    )
+                body.remove(element)
 
     current_indices = {id(element): index for index, element in enumerate(list(body))}
     identity_updates: dict[str, NativeRef] = {}
-    for node_id, element in source_elements.items():
-        index = current_indices.get(id(element))
-        if index is None:
+    for node_id, elements in source_elements.items():
+        indices = [current_indices.get(id(element)) for element in elements]
+        if any(index is None for index in indices):
             continue
+        normalized_indices = [index for index in indices if index is not None]
         original_ref = next(
             node.source_ref
             for node in spec.content
             if node.id == node_id and isinstance(node.source_ref, NativeRef)
         )
         assert isinstance(original_ref, NativeRef)
-        identity_updates[node_id] = original_ref.model_copy(
-            update={
-                "element_index": index,
-                "path_hint": f"/w:document/w:body/*[{index + 1}]",
-                "fingerprint": _fingerprint(element),
-            }
+        identity_updates[node_id] = native_ref_for_elements(
+            elements,
+            normalized_indices,
+            native_kind=original_ref.native_kind,
+            native_id=original_ref.native_id,
         )
 
     updated.set_part("/word/document.xml", serialize_xml(root))
+    if updated.has_part(MANIFEST_PART_URI):
+        manifest_spec = result_spec.model_copy(deep=True)
+        for node in manifest_spec.content:
+            if node.id in identity_updates:
+                node.source_ref = identity_updates[node.id]
+        updated.set_part(
+            MANIFEST_PART_URI,
+            serialize_identity_manifest(build_identity_manifest(manifest_spec)),
+        )
     return updated, updated.fidelity_report(), identity_updates
 
 

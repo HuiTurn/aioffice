@@ -17,12 +17,20 @@ from aioffice.core.errors import (
     SpecValidationError,
     UnsupportedFormatError,
 )
-from aioffice.formats.docx import export_docx
+from aioffice.formats.docx import compile_docx, export_docx
 from aioffice.formats.docx_import import import_docx
 from aioffice.formats.docx_native import apply_docx_operations
 from aioffice.formats.html import export_html
 from aioffice.formats.markdown import export_markdown, import_markdown
-from aioffice.native import FidelityPolicy, FidelityReport, NativePackage
+from aioffice.native import (
+    FidelityPolicy,
+    FidelityReport,
+    IdentityManifest,
+    MANIFEST_PART_URI,
+    NativePackage,
+    build_identity_manifest,
+    serialize_identity_manifest,
+)
 from aioffice.security import SecurityPolicy
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
@@ -117,9 +125,13 @@ class Document:
         spec: AiOfficeDocumentSpec,
         *,
         native: NativePackage | None = None,
+        import_diagnostics: Sequence[Diagnostic] = (),
     ) -> None:
         self._spec = spec.model_copy(deep=True)
         self._native = native.clone() if native is not None else None
+        self._import_diagnostics = [
+            diagnostic.model_copy(deep=True) for diagnostic in import_diagnostics
+        ]
 
     @classmethod
     def from_spec(cls, spec: AiOfficeDocumentSpec | Mapping[str, Any]) -> "Document":
@@ -166,13 +178,19 @@ class Document:
         *,
         roundtrip: FidelityPolicy | str = FidelityPolicy.PRESERVE_UNKNOWN,
         security_policy: SecurityPolicy | None = None,
+        identity_manifest: IdentityManifest | None = None,
     ) -> "Document":
         imported = import_docx(
             source,
             roundtrip=roundtrip,
             security_policy=security_policy,
+            identity_manifest=identity_manifest,
         )
-        return cls(imported.spec, native=imported.native)
+        return cls(
+            imported.spec,
+            native=imported.native,
+            import_diagnostics=imported.diagnostics,
+        )
 
     @property
     def id(self) -> str:
@@ -202,6 +220,13 @@ class Document:
     def fidelity(self) -> FidelityReport | None:
         return self._native.fidelity_report() if self._native is not None else None
 
+    @property
+    def import_diagnostics(self) -> list[Diagnostic]:
+        return [
+            diagnostic.model_copy(deep=True)
+            for diagnostic in self._import_diagnostics
+        ]
+
     def to_spec(self) -> dict[str, Any]:
         return self._spec.model_dump(mode="json", by_alias=True, exclude_none=True)
 
@@ -223,6 +248,7 @@ class Document:
             "origin": self.origin,
             "node_count": len(self._spec.content),
             "node_types": counts,
+            "diagnostic_count": len(self._import_diagnostics),
         }
         if response_format == "compact":
             nodes: list[dict[str, Any]] = []
@@ -266,6 +292,15 @@ class Document:
         ]
         if self._native is not None:
             operations = ["text.replace", "node.remove"]
+        native_extension = self._spec.extensions.get("dev.aioffice.native", {})
+        ambiguous_node_ids = sorted(
+            {
+                node_id
+                for diagnostic in self._import_diagnostics
+                if diagnostic.code == "IDENTITY_AMBIGUOUS"
+                for node_id in diagnostic.node_ids
+            }
+        )
         return {
             "artifact_id": self.id,
             "kind": self.kind,
@@ -275,6 +310,15 @@ class Document:
             "export_formats": ["json", "markdown", "html", "docx"],
             "operations": operations,
             "selectors": ["#node_id"],
+            "identity": {
+                "source": native_extension.get(
+                    "identity_source",
+                    "semantic_spec" if self._native is None else None,
+                ),
+                "embedded_on_docx_export": True,
+                "ambiguous_node_ids": ambiguous_node_ids,
+                "safe_to_commit": not ambiguous_node_ids,
+            },
             "roundtrip": (
                 {
                     "format": self._native.format_name,
@@ -288,7 +332,7 @@ class Document:
         }
 
     def validate(self) -> ValidationResult:
-        diagnostics: list[Diagnostic] = []
+        diagnostics = self.import_diagnostics
         seen: dict[str, str] = {self.id: "artifact"}
         previous_heading_level: int | None = None
 
@@ -448,6 +492,39 @@ class Document:
             )
         return path
 
+    def to_bytes(self, format: str = "docx") -> bytes:
+        normalized = format.lower().lstrip(".")
+        if normalized == "docx":
+            if self._native is not None:
+                return self._native.export_bytes()
+            return compile_docx(self._spec)
+        if normalized == "json":
+            return self.to_json().encode("utf-8")
+        if normalized in {"md", "markdown"}:
+            return export_markdown(self._spec).encode("utf-8")
+        if normalized in {"html", "htm"}:
+            return export_html(self._spec).encode("utf-8")
+        raise UnsupportedFormatError(
+            f"Unsupported byte export format {format!r}; use docx, json, md, or html."
+        )
+
+    def synchronize_identity_manifest(self) -> "Document":
+        updated = Document(
+            self._spec,
+            native=self._native,
+            import_diagnostics=self._import_diagnostics,
+        )
+        if updated._native is not None and updated._native.has_part(
+            MANIFEST_PART_URI
+        ):
+            updated._native.set_part(
+                MANIFEST_PART_URI,
+                serialize_identity_manifest(
+                    build_identity_manifest(updated._spec)
+                ),
+            )
+        return updated
+
     def apply(
         self,
         operations: Sequence[Mapping[str, Any]],
@@ -523,12 +600,14 @@ class Document:
                 native, fidelity, identity_updates = apply_docx_operations(
                     self._native,
                     self._spec,
+                    updated._spec,
                     operations,
                 )
                 for node in updated._spec.content:
                     if node.id in identity_updates:
                         node.source_ref = identity_updates[node.id]
                 updated._native = native
+                updated._import_diagnostics = self.import_diagnostics
         except _PatchFailure as error:
             return PatchResult(
                 success=False,
@@ -723,7 +802,7 @@ class Document:
                     Diagnostic(
                         severity=Severity.ERROR,
                         code="UNSUPPORTED_FEATURE",
-                        message="V0.1 node.append supports only the document root target '$'.",
+                        message="node.append currently supports only the document root target '$'.",
                     )
                 )
             content = operation.get("content")
@@ -801,7 +880,7 @@ class Document:
                 severity=Severity.ERROR,
                 code="UNSUPPORTED_FEATURE",
                 message=(
-                    f"Unsupported operation {operation_name!r}; V0.1 supports text.replace, "
+                    f"Unsupported operation {operation_name!r}; AiOffice supports text.replace, "
                     "node.append, node.insert_after, node.remove, and node.update."
                 ),
                 suggested_actions=[{"action": "use_supported_operation"}],
@@ -820,6 +899,7 @@ def open_artifact(
     *,
     roundtrip: FidelityPolicy | str = FidelityPolicy.PRESERVE_UNKNOWN,
     security_policy: SecurityPolicy | None = None,
+    identity_manifest: IdentityManifest | None = None,
 ) -> Document:
     path = Path(source)
     suffix = path.suffix.lower()
@@ -832,6 +912,7 @@ def open_artifact(
             path,
             roundtrip=roundtrip,
             security_policy=security_policy,
+            identity_manifest=identity_manifest,
         )
     if suffix in {".html", ".htm"}:
         raise UnsupportedFormatError(

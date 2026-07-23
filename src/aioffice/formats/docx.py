@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -10,6 +11,13 @@ from typing import Any
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+from aioffice.native.identity import (
+    MANIFEST_PART_URI,
+    MANIFEST_RELATIONSHIP_TYPE,
+    build_identity_manifest,
+    native_ref_for_elements,
+    serialize_identity_manifest,
+)
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     BulletList,
@@ -19,10 +27,13 @@ from aioffice.spec.models import (
     Paragraph,
     Table,
     TextSpan,
+    NativeRef,
 )
 from aioffice.themes import get_theme
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -34,6 +45,8 @@ EP = "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
 VT = "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"
 
 ET.register_namespace("w", W)
+ET.register_namespace("w14", W14)
+ET.register_namespace("mc", MC)
 ET.register_namespace("r", R)
 ET.register_namespace("cp", CP)
 ET.register_namespace("dc", DC)
@@ -67,6 +80,11 @@ def _string_value(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return str(value)
+
+
+def _native_anchor(node_id: str, ordinal: int = 0) -> str:
+    value = hashlib.sha256(f"{node_id}:{ordinal}".encode()).hexdigest()[:8].upper()
+    return value if value != "00000000" else "00000001"
 
 
 @dataclass
@@ -121,8 +139,10 @@ def _add_paragraph(
     *,
     style: str | None = None,
     numbering_id: int | None = None,
-) -> None:
-    paragraph = _child(body, "p")
+    native_anchor: str | None = None,
+) -> ET.Element:
+    attributes = {_q(W14, "paraId"): native_anchor} if native_anchor else {}
+    paragraph = ET.SubElement(body, _q(W, "p"), attributes)
     if style or numbering_id is not None:
         properties = _child(paragraph, "pPr")
         if style:
@@ -133,9 +153,10 @@ def _add_paragraph(
             _child(numbering, "numId", val=str(numbering_id))
     for span in spans:
         _add_run(paragraph, span, context)
+    return paragraph
 
 
-def _add_table(body: ET.Element, table: Table, context: _DocxContext) -> None:
+def _add_table(body: ET.Element, table: Table, context: _DocxContext) -> ET.Element:
     element = _child(body, "tbl")
     properties = _child(element, "tblPr")
     _child(properties, "tblStyle", val="TableGrid")
@@ -159,39 +180,114 @@ def _add_table(body: ET.Element, table: Table, context: _DocxContext) -> None:
     add_row([column.title for column in table.columns], header=True)
     for row in table.rows:
         add_row([_string_value(row.values.get(column.key)) for column in table.columns])
+    return element
 
 
-def _document_xml(spec: AiOfficeDocumentSpec, context: _DocxContext) -> bytes:
-    root = ET.Element(_q(W, "document"))
+def _document_xml(
+    spec: AiOfficeDocumentSpec,
+    context: _DocxContext,
+) -> tuple[bytes, dict[str, NativeRef]]:
+    root = ET.Element(
+        _q(W, "document"),
+        {_q(MC, "Ignorable"): "w14"},
+    )
     body = _child(root, "body")
+    refs: dict[str, NativeRef] = {}
     for block in spec.content:
         if isinstance(block, Heading):
-            _add_paragraph(
+            element = _add_paragraph(
                 body,
                 [TextSpan(text=block.text)],
                 context,
                 style=f"Heading{block.level}",
+                native_anchor=_native_anchor(block.id),
+            )
+            index = len(body) - 1
+            refs[block.id] = native_ref_for_elements(
+                [element],
+                [index],
+                native_kind="w:p",
+                native_id=element.attrib.get(_q(W14, "paraId")),
             )
         elif isinstance(block, Paragraph):
             spans = block.content if block.text is None else [TextSpan(text=block.text)]
-            _add_paragraph(body, spans, context)
+            element = _add_paragraph(
+                body,
+                spans,
+                context,
+                native_anchor=_native_anchor(block.id),
+            )
+            index = len(body) - 1
+            refs[block.id] = native_ref_for_elements(
+                [element],
+                [index],
+                native_kind="w:p",
+                native_id=element.attrib.get(_q(W14, "paraId")),
+            )
         elif isinstance(block, BulletList):
-            for item in block.items:
-                _add_paragraph(body, [TextSpan(text=item)], context, numbering_id=1)
+            elements = [
+                _add_paragraph(
+                    body,
+                    [TextSpan(text=item)],
+                    context,
+                    numbering_id=1,
+                    native_anchor=_native_anchor(block.id, item_index),
+                )
+                for item_index, item in enumerate(block.items)
+            ]
+            indices = list(range(len(body) - len(elements), len(body)))
+            refs[block.id] = native_ref_for_elements(
+                elements,
+                indices,
+                native_kind="w:p-group",
+                native_id=elements[0].attrib.get(_q(W14, "paraId")),
+            )
         elif isinstance(block, OrderedList):
-            for item in block.items:
-                _add_paragraph(body, [TextSpan(text=item)], context, numbering_id=2)
+            elements = [
+                _add_paragraph(
+                    body,
+                    [TextSpan(text=item)],
+                    context,
+                    numbering_id=2,
+                    native_anchor=_native_anchor(block.id, item_index),
+                )
+                for item_index, item in enumerate(block.items)
+            ]
+            indices = list(range(len(body) - len(elements), len(body)))
+            refs[block.id] = native_ref_for_elements(
+                elements,
+                indices,
+                native_kind="w:p-group",
+                native_id=elements[0].attrib.get(_q(W14, "paraId")),
+            )
         elif isinstance(block, Table):
-            _add_table(body, block, context)
+            element = _add_table(body, block, context)
+            index = len(body) - 1
+            refs[block.id] = native_ref_for_elements(
+                [element],
+                [index],
+                native_kind="w:tbl",
+            )
         elif isinstance(block, PageBreak):
-            paragraph = _child(body, "p")
+            paragraph = ET.SubElement(
+                body,
+                _q(W, "p"),
+                {_q(W14, "paraId"): _native_anchor(block.id)},
+            )
             run = _child(paragraph, "r")
             _child(run, "br", type="page")
+            index = len(body) - 1
+            refs[block.id] = native_ref_for_elements(
+                [paragraph],
+                [index],
+                native_kind="w:page-break",
+                native_id=paragraph.attrib.get(_q(W14, "paraId")),
+            )
 
     section = _child(body, "sectPr")
     _child(section, "pgSz", w="12240", h="15840")
     _child(section, "pgMar", top="1440", right="1440", bottom="1440", left="1440")
-    return _xml(root)
+    return _xml(root), refs
 
 
 def _styles_xml(spec: AiOfficeDocumentSpec) -> bytes:
@@ -314,6 +410,12 @@ def _root_relationships_xml() -> bytes:
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties",
         "docProps/app.xml",
     )
+    _relationship(
+        root,
+        "rId4",
+        MANIFEST_RELATIONSHIP_TYPE,
+        MANIFEST_PART_URI.lstrip("/"),
+    )
     return _xml(root)
 
 
@@ -360,7 +462,7 @@ def _core_properties_xml(spec: AiOfficeDocumentSpec) -> bytes:
 def _app_properties_xml() -> bytes:
     root = ET.Element(_q(EP, "Properties"))
     ET.SubElement(root, _q(EP, "Application")).text = "AiOffice"
-    ET.SubElement(root, _q(EP, "AppVersion")).text = "0.1"
+    ET.SubElement(root, _q(EP, "AppVersion")).text = "0.2"
     return _xml(root)
 
 
@@ -375,12 +477,16 @@ def compile_docx(spec: AiOfficeDocumentSpec) -> bytes:
     """Compile a validated document into a deterministic OOXML package."""
 
     context = _DocxContext()
-    document_xml = _document_xml(spec, context)
+    document_xml, refs = _document_xml(spec, context)
+    identity_manifest = build_identity_manifest(spec, refs=refs)
     stream = BytesIO()
     with ZipFile(stream, mode="w") as archive:
         parts = {
             "[Content_Types].xml": _content_types_xml(),
             "_rels/.rels": _root_relationships_xml(),
+            MANIFEST_PART_URI.lstrip("/"): serialize_identity_manifest(
+                identity_manifest
+            ),
             "docProps/app.xml": _app_properties_xml(),
             "docProps/core.xml": _core_properties_xml(spec),
             "word/document.xml": document_xml,

@@ -4,12 +4,17 @@ import copy
 import io
 import unittest
 import warnings
+from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from aioffice.core.errors import NativePackageError, SecurityError
 from aioffice.documents import Document, DocumentBuilder
 from aioffice.formats.docx import compile_docx
-from aioffice.native import NativePackage
+from aioffice.native import (
+    MANIFEST_PART_URI,
+    MANIFEST_RELATIONSHIP_TYPE,
+    NativePackage,
+)
 
 
 def _append(source: bytes, name: str, payload: bytes) -> bytes:
@@ -74,6 +79,42 @@ class NativeSecurityTests(unittest.TestCase):
 </w:document>
 """
         malicious = _replace(self.source, "word/document.xml", malicious_xml)
+        with self.assertRaises(NativePackageError):
+            Document.from_docx(malicious)
+
+    def test_duplicate_embedded_identity_ids_are_rejected(self) -> None:
+        with ZipFile(io.BytesIO(self.source)) as archive:
+            manifest = ET.fromstring(
+                archive.read(MANIFEST_PART_URI.lstrip("/"))
+            )
+        first_node = next(iter(manifest))
+        manifest.append(copy.deepcopy(first_node))
+        malicious = _replace(
+            self.source,
+            MANIFEST_PART_URI.lstrip("/"),
+            ET.tostring(manifest, encoding="utf-8", xml_declaration=True),
+        )
+        with self.assertRaises(NativePackageError):
+            Document.from_docx(malicious)
+
+    def test_identity_relationship_must_target_manifest(self) -> None:
+        with ZipFile(io.BytesIO(self.source)) as archive:
+            relationships = ET.fromstring(archive.read("_rels/.rels"))
+        identity_relationship = next(
+            relationship
+            for relationship in relationships
+            if relationship.attrib.get("Type") == MANIFEST_RELATIONSHIP_TYPE
+        )
+        identity_relationship.set("Target", "customXml/other.xml")
+        malicious = _replace(
+            self.source,
+            "_rels/.rels",
+            ET.tostring(
+                relationships,
+                encoding="utf-8",
+                xml_declaration=True,
+            ),
+        )
         with self.assertRaises(NativePackageError):
             Document.from_docx(malicious)
 

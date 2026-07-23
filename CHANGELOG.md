@@ -2,6 +2,13 @@
 
 ## 0.2.0 (unreleased)
 
+- Added embedded DOCX identity manifests and `w14:paraId` anchors.
+- Added persistent `.aioffice/` workspaces with native revisions, semantic snapshots,
+  identity manifests, patch logs, checkout, and safe export.
+- Added idempotent workspace commits and external DOCX reconciliation.
+- Added ambiguity-safe identity matching using native IDs, fingerprints, paths, and
+  neighboring fingerprints.
+- Added semantic projection for native lists and page breaks.
 - Added a safe, copy-on-write native OPC package graph.
 - Added DOCX semantic projection with native source references.
 - Added capability discovery and refreshed native identity maps across sequential edits.

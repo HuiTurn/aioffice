@@ -31,3 +31,7 @@ class SecurityError(AiOfficeError):
 
 class NativePackageError(AiOfficeError):
     """Raised when an Office package is malformed or cannot be patched safely."""
+
+
+class WorkspaceError(AiOfficeError):
+    """Raised when a workspace is invalid or a revision cannot be committed safely."""

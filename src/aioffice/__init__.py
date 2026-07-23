@@ -13,11 +13,13 @@ from .core import (
     SpecValidationError,
     UnsupportedFormatError,
     ValidationResult,
+    WorkspaceError,
     new_id,
 )
 from .documents import Document, DocumentBuilder, PatchResult, open_artifact
 from .native import FidelityLevel, FidelityPolicy, FidelityReport
 from .security import SecurityPolicy
+from .workspace import Workspace
 
 # The product specification intentionally exposes ``aioffice.open(...)``.
 open = open_artifact
@@ -39,6 +41,8 @@ __all__ = [
     "SpecValidationError",
     "UnsupportedFormatError",
     "ValidationResult",
+    "Workspace",
+    "WorkspaceError",
     "__version__",
     "new_id",
     "open",

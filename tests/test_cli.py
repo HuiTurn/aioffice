@@ -68,6 +68,69 @@ class CliTests(unittest.TestCase):
             self.assertIn("New", updated.read_text(encoding="utf-8"))
             self.assertIn('"revision": 2', updated.read_text(encoding="utf-8"))
 
+            workspace_root = root / "workspace"
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(
+                    main(["workspace", "init", str(workspace_root)]),
+                    0,
+                )
+            self.assertIn("workspace_id", json.loads(stdout.getvalue()))
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(
+                    main(
+                        [
+                            "workspace",
+                            "import",
+                            str(target),
+                            "--root",
+                            str(workspace_root),
+                        ]
+                    ),
+                    0,
+                )
+            imported = json.loads(stdout.getvalue())
+            artifact_id = imported["artifact"]["artifact_id"]
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(
+                    main(
+                        [
+                            "workspace",
+                            "list",
+                            "--root",
+                            str(workspace_root),
+                        ]
+                    ),
+                    0,
+                )
+            listing = json.loads(stdout.getvalue())
+            self.assertEqual(listing["artifacts"][0]["artifact_id"], artifact_id)
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(
+                    main(
+                        [
+                            "workspace",
+                            "capabilities",
+                            artifact_id,
+                            "--root",
+                            str(workspace_root),
+                        ]
+                    ),
+                    0,
+                )
+            workspace_capabilities = json.loads(stdout.getvalue())
+            self.assertTrue(workspace_capabilities["revision_store"])
+            self.assertEqual(
+                workspace_capabilities["artifact"]["artifact_id"],
+                artifact_id,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ from .errors import (
     SecurityError,
     SpecValidationError,
     UnsupportedFormatError,
+    WorkspaceError,
 )
 from .ids import new_id
 
@@ -21,5 +22,6 @@ __all__ = [
     "SpecValidationError",
     "UnsupportedFormatError",
     "ValidationResult",
+    "WorkspaceError",
     "new_id",
 ]

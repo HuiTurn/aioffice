@@ -105,7 +105,10 @@ class NativeDocxTests(unittest.TestCase):
         self.assertIsNotNone(result.fidelity)
         assert result.document is not None
         assert result.fidelity is not None
-        self.assertEqual(result.fidelity.affected_parts, ["/word/document.xml"])
+        self.assertEqual(
+            result.fidelity.affected_parts,
+            ["/customXml/aioffice-manifest.xml", "/word/document.xml"],
+        )
         self.assertTrue(result.fidelity.visual_verification_required)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -113,7 +116,10 @@ class NativeDocxTests(unittest.TestCase):
             result.document.export(target)
             with ZipFile(io.BytesIO(source)) as before, ZipFile(target) as after:
                 for name in before.namelist():
-                    if name != "word/document.xml":
+                    if name not in {
+                        "word/document.xml",
+                        "customXml/aioffice-manifest.xml",
+                    }:
                         self.assertEqual(before.read(name), after.read(name), name)
                 patched_xml = after.read("word/document.xml")
                 self.assertIn(b"futureFeature", patched_xml)

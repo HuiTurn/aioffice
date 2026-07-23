@@ -1,4 +1,4 @@
-"""Strict Pydantic models for the AiOffice Document Spec 1.0 draft."""
+"""Strict Pydantic models for the AiOffice Document Spec 0.2 draft."""
 
 from __future__ import annotations
 
@@ -70,11 +70,29 @@ class NativeRef(StrictModel):
     part_uri: Annotated[str, StringConstraints(pattern=r"^/[^\\\x00]*$")]
     native_kind: str
     element_index: int | None = Field(default=None, ge=0)
+    element_indices: list[int] = Field(default_factory=list)
     path_hint: str | None = None
+    native_id: str | None = None
     fingerprint: Annotated[
         str,
         StringConstraints(pattern=r"^sha256:[a-fA-F0-9]{64}$"),
     ] | None = None
+
+    @model_validator(mode="after")
+    def validate_element_indices(self) -> "NativeRef":
+        if any(index < 0 for index in self.element_indices):
+            raise ValueError("Native element indices cannot be negative.")
+        if len(self.element_indices) != len(set(self.element_indices)):
+            raise ValueError("Native element indices must be unique.")
+        if self.element_indices != sorted(self.element_indices):
+            raise ValueError("Native element indices must be sorted.")
+        if (
+            self.element_index is not None
+            and self.element_indices
+            and self.element_index != self.element_indices[0]
+        ):
+            raise ValueError("element_index must equal the first element_indices value.")
+        return self
 
 
 class TextSpan(StrictModel):

@@ -16,10 +16,10 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev0`. It adds lossless DOCX opening, semantic
-projection over a native package, copy-on-write native parts, and fidelity reports.
-Workbook, presentation, PDF, persistent revision history, rendering, and MCP remain
-planned.
+The development branch is now `0.2.0.dev1`. It adds lossless DOCX opening, semantic
+projection over a native package, persistent native identities, local revision
+workspaces, copy-on-write native parts, and fidelity reports. Workbook, presentation,
+PDF, rendering, and MCP remain planned.
 
 ## Install
 
@@ -76,6 +76,37 @@ result.document.export("updated.docx")
 Exporting an imported DOCX without changes returns the exact original package bytes.
 When a supported edit is applied, AiOffice rewrites only the affected native part and
 preserves untouched part payloads.
+
+AiOffice-generated DOCX files embed a versioned identity manifest. Artifact IDs,
+semantic node IDs, native anchors, and revisions therefore survive export and reopen.
+Third-party documents can keep the same guarantees through a local workspace:
+
+```python
+from aioffice import Workspace
+
+workspace = Workspace.init("project")
+doc = workspace.import_document("existing.docx")
+
+result = workspace.apply(
+    doc.id,
+    [{
+        "op": "text.replace",
+        "target": f"#{doc.to_spec()['content'][0]['id']}",
+        "search": "Draft",
+        "replacement": "Approved",
+    }],
+    base_revision=doc.revision,
+    idempotency_key="approve-first-paragraph",
+)
+
+assert result.success
+revision_one = workspace.checkout(doc.id, revision=1)
+revision_two = workspace.open_document(doc.id)
+```
+
+Use `workspace.reconcile_document(...)` to preview an externally edited DOCX. A
+commit is refused when native identity is ambiguous. The detailed invariants are in
+[the native round-trip architecture](docs/native-roundtrip.md).
 
 Native DOCX lowering in this development version intentionally supports only
 `text.replace` and `node.remove`. Ask the artifact before planning an edit:
@@ -135,6 +166,16 @@ aioffice validate examples/report.json
 aioffice build examples/report.json --output report.docx
 aioffice export examples/report.json --to report.html
 aioffice schema --output document.schema.json
+
+aioffice workspace init project
+aioffice workspace import existing.docx --root project
+aioffice workspace list --root project
+aioffice workspace capabilities ARTIFACT_ID --root project
+aioffice workspace inspect ARTIFACT_ID --root project
+aioffice workspace apply ARTIFACT_ID patch.json --root project
+aioffice workspace reconcile ARTIFACT_ID edited.docx --root project
+aioffice workspace reconcile ARTIFACT_ID edited.docx --root project --commit
+aioffice workspace export ARTIFACT_ID updated.docx --root project
 ```
 
 Patch files may be an operation array or an envelope:
@@ -164,7 +205,10 @@ aioffice apply examples/report.json patch.json --output updated.json
 ## Development and release
 
 ```bash
+python -m pip install -e ".[dev]"
 python -m unittest discover -s tests -v
+ruff check src tests
+pyright src
 python -m build
 python -m twine check dist/*
 ```
