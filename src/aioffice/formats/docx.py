@@ -239,9 +239,10 @@ def _document_xml(
     refs: dict[str, NativeRef] = {}
     for block in spec.content:
         if isinstance(block, Heading):
+            spans = block.content if block.text is None else [TextSpan(text=block.text)]
             element = _add_paragraph(
                 body,
-                [TextSpan(text=block.text)],
+                spans,
                 context,
                 style=f"Heading{block.level}",
                 native_anchor=_native_anchor(block.id),

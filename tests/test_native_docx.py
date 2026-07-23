@@ -20,6 +20,15 @@ def _q(namespace: str, local: str) -> str:
     return f"{{{namespace}}}{local}"
 
 
+def _semantic_text(node: dict[str, object]) -> str:
+    text = node.get("text")
+    if isinstance(text, str):
+        return text
+    content = node.get("content", [])
+    assert isinstance(content, list)
+    return "".join(str(span.get("text", "")) for span in content if isinstance(span, dict))
+
+
 def _rewrite_package(
     source: bytes,
     replacements: dict[str, bytes],
@@ -84,7 +93,9 @@ class NativeDocxTests(unittest.TestCase):
 
         document = Document.from_docx(source)
         paragraph = next(
-            node for node in document.to_spec()["content"] if node.get("text") == "Alpha Beta Gamma"
+            node
+            for node in document.to_spec()["content"]
+            if _semantic_text(node) == "Alpha Beta Gamma"
         )
         result = document.apply(
             [
@@ -127,7 +138,7 @@ class NativeDocxTests(unittest.TestCase):
                 )
             reopened = Document.from_docx(target)
             texts = [
-                node.get("text")
+                _semantic_text(node)
                 for node in reopened.to_spec()["content"]
                 if node["type"] in {"heading", "paragraph"}
             ]
@@ -177,7 +188,7 @@ class NativeDocxTests(unittest.TestCase):
             edited.document.export(target)
             reopened = Document.from_docx(target)
             texts = [
-                node.get("text")
+                _semantic_text(node)
                 for node in reopened.to_spec()["content"]
                 if node["type"] in {"heading", "paragraph"}
             ]
@@ -281,7 +292,7 @@ class NativeDocxTests(unittest.TestCase):
         self.assertNotIn(
             "Alpha Beta Gamma",
             [
-                node.get("text")
+                _semantic_text(node)
                 for node in reopened.to_spec()["content"]
                 if node["type"] in {"heading", "paragraph"}
             ],
@@ -320,6 +331,248 @@ class NativeDocxTests(unittest.TestCase):
         node = next(node for node in reopened.to_spec()["content"] if node["id"] == "empty")
         self.assertEqual(node["text_style"]["font_size"]["value"], 11.0)
         self.assertEqual(node["text_style"]["color"], "#112233")
+
+    def test_native_range_format_splits_cross_run_selection_exactly(self) -> None:
+        document = Document.from_docx(self._source_document())
+        result = document.apply(
+            [
+                {
+                    "op": "text.format",
+                    "target": "#body",
+                    "match": {"text": "ha Be"},
+                    "set": {"color": "#FF0000"},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        root = parse_xml(
+            ZipFile(io.BytesIO(result.document.to_bytes("docx"))).read("word/document.xml")
+        )
+        body = root.find(_q(W, "body"))
+        assert body is not None
+        paragraph = next(
+            element
+            for element in body.findall(_q(W, "p"))
+            if _semantic_text(
+                {"text": "".join(text.text or "" for text in element.iter(_q(W, "t")))}
+            )
+            == "Alpha Beta Gamma"
+        )
+        runs = []
+        for run in paragraph.iter(_q(W, "r")):
+            text = "".join(node.text or "" for node in run.iter(_q(W, "t")))
+            color = run.find(f"./{_q(W, 'rPr')}/{_q(W, 'color')}")
+            runs.append(
+                (
+                    text,
+                    color.attrib.get(_q(W, "val")) if color is not None else None,
+                )
+            )
+        self.assertEqual(
+            runs,
+            [
+                ("Alp", None),
+                ("ha ", "FF0000"),
+                ("Be", "FF0000"),
+                ("ta", None),
+                (" Gamma", None),
+            ],
+        )
+        reopened = Document.from_docx(result.document.to_bytes("docx"))
+        node = next(node for node in reopened.to_spec()["content"] if node["id"] == "body")
+        self.assertEqual(_semantic_text(node), "Alpha Beta Gamma")
+        self.assertEqual(
+            [
+                span["text"]
+                for span in node["content"]
+                if span.get("style", {}).get("color") == "#FF0000"
+            ],
+            ["ha ", "Be"],
+        )
+
+    def test_partial_range_refuses_complex_run_without_data_loss(self) -> None:
+        source = self._source_document()
+        document_xml = parse_xml(ZipFile(io.BytesIO(source)).read("word/document.xml"))
+        body = document_xml.find(_q(W, "body"))
+        assert body is not None
+        paragraph = next(
+            element
+            for element in body.findall(_q(W, "p"))
+            if "Alpha Beta Gamma" == "".join(node.text or "" for node in element.iter(_q(W, "t")))
+        )
+        first_run = next(paragraph.iter(_q(W, "r")))
+        future = ET.SubElement(first_run, "{urn:aioffice:test}futureInline")
+        future.text = "preserve"
+        source = _rewrite_package(
+            source,
+            {"word/document.xml": serialize_xml(document_xml)},
+        )
+
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "text.format",
+                    "target": "#body",
+                    "range": {"start": 1, "end": 3},
+                    "set": {"bold": True},
+                }
+            ]
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.diagnostics[0].code, "NATIVE_PATCH_FAILED")
+        self.assertIn("complex native run", result.diagnostics[0].message)
+        self.assertEqual(document.to_bytes("docx"), source)
+
+    def test_hyperlink_projection_and_range_split_preserve_target(self) -> None:
+        source = (
+            DocumentBuilder()
+            .rich_paragraph(
+                [
+                    {"text": "See "},
+                    {
+                        "text": "docs",
+                        "marks": ["link"],
+                        "href": "https://example.com/docs",
+                    },
+                    {"text": " now"},
+                ],
+                id="link_para",
+            )
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        projected = document.to_spec()["content"][0]
+        link_span = next(
+            span for span in projected["content"] if span.get("href") == "https://example.com/docs"
+        )
+        self.assertEqual(link_span["text"], "docs")
+        self.assertEqual(link_span["marks"], ["link"])
+
+        result = document.apply(
+            [
+                {
+                    "op": "text.format",
+                    "target": "#link_para",
+                    "match": {"text": "oc"},
+                    "set": {"bold": True},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        reopened = Document.from_docx(result.document.to_bytes("docx"))
+        spans = reopened.to_spec()["content"][0]["content"]
+        linked = [span for span in spans if span.get("href") == "https://example.com/docs"]
+        self.assertEqual([span["text"] for span in linked], ["d", "oc", "s"])
+        self.assertEqual(linked[1]["style"]["bold"], True)
+        self.assertTrue(all(span["marks"] == ["link"] for span in linked))
+
+    def test_range_selection_uses_text_after_earlier_operation(self) -> None:
+        document = Document.from_docx(self._source_document())
+        result = document.apply(
+            [
+                {
+                    "op": "text.replace",
+                    "target": "#body",
+                    "search": "Alpha",
+                    "replacement": "A",
+                },
+                {
+                    "op": "text.format",
+                    "target": "#body",
+                    "match": {"text": "Beta"},
+                    "set": {"underline": True},
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        reopened = Document.from_docx(result.document.to_bytes("docx"))
+        node = next(node for node in reopened.to_spec()["content"] if node["id"] == "body")
+        self.assertEqual(_semantic_text(node), "A Beta Gamma")
+        beta = next(span for span in node["content"] if span["text"] == "Beta")
+        self.assertEqual(beta["style"]["underline"], True)
+
+    def test_range_split_preserves_multiple_text_nodes_in_one_run(self) -> None:
+        source = DocumentBuilder().paragraph("Alpha", id="multi_text").build().to_bytes("docx")
+        document_xml = parse_xml(ZipFile(io.BytesIO(source)).read("word/document.xml"))
+        body = document_xml.find(_q(W, "body"))
+        assert body is not None
+        paragraph = body.find(_q(W, "p"))
+        assert paragraph is not None
+        run = paragraph.find(_q(W, "r"))
+        assert run is not None
+        text = run.find(_q(W, "t"))
+        assert text is not None
+        text.text = "Al"
+        second = copy.deepcopy(text)
+        second.text = "pha"
+        run.append(second)
+        source = _rewrite_package(
+            source,
+            {"word/document.xml": serialize_xml(document_xml)},
+        )
+
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "text.format",
+                    "target": "#multi_text",
+                    "range": {"start": 1, "end": 4},
+                    "set": {"italic": True},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        root = parse_xml(
+            ZipFile(io.BytesIO(result.document.to_bytes("docx"))).read("word/document.xml")
+        )
+        paragraph = next(root.iter(_q(W, "p")))
+        runs = [
+            (
+                "".join(node.text or "" for node in run.iter(_q(W, "t"))),
+                run.find(f"./{_q(W, 'rPr')}/{_q(W, 'i')}") is not None,
+            )
+            for run in paragraph.iter(_q(W, "r"))
+        ]
+        self.assertEqual(runs, [("A", False), ("lph", True), ("a", False)])
+
+    def test_native_range_clear_removes_only_selected_direct_property(self) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph(
+                "ABCD",
+                id="clear_range",
+                text_style={"bold": True, "color": "#1F4E78"},
+            )
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "text.format",
+                    "target": "#clear_range",
+                    "range": {"start": 1, "end": 3},
+                    "clear": ["bold"],
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        reopened = Document.from_docx(result.document.to_bytes("docx"))
+        node = reopened.to_spec()["content"][0]
+        self.assertEqual(
+            [(span["text"], span.get("style", {}).get("bold")) for span in node["content"]],
+            [("A", True), ("BC", None), ("D", True)],
+        )
+        self.assertEqual(node["text_style"]["color"], "#1F4E78")
 
 
 if __name__ == "__main__":

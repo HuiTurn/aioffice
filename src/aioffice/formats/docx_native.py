@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -23,6 +24,7 @@ from aioffice.native import (
     serialize_identity_manifest,
 )
 from aioffice.native.xml import parse_xml, serialize_xml
+from aioffice.operations.text import resolve_text_selection
 from aioffice.spec.models import AiOfficeDocumentSpec, NativeRef, ParagraphStyle, TextStyle
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -134,6 +136,149 @@ def _replace_text_nodes(
     return len(matches)
 
 
+def _set_xml_space(text: ET.Element) -> None:
+    value = text.text or ""
+    xml_space = _q(XML, "space")
+    if value[:1].isspace() or value[-1:].isspace() or "  " in value:
+        text.set(xml_space, "preserve")
+    else:
+        text.attrib.pop(xml_space, None)
+
+
+def _run_text(run: ET.Element) -> str:
+    return "".join(node.text or "" for node in run.iter(_q(W, "t")))
+
+
+def _clone_run_segment(
+    run: ET.Element,
+    text_children: Sequence[ET.Element],
+    *,
+    preserve_tail: bool,
+) -> ET.Element:
+    clone = ET.Element(run.tag, dict(run.attrib))
+    clone.text = run.text
+    properties = run.find(_q(W, "rPr"))
+    if properties is not None:
+        clone.append(deepcopy(properties))
+    clone.extend(text_children)
+    clone.tail = run.tail if preserve_tail else None
+    return clone
+
+
+def _split_and_format_run(
+    run: ET.Element,
+    *,
+    run_start: int,
+    selection_start: int,
+    selection_end: int,
+    style: TextStyle,
+    fields: set[str],
+    parent_map: Mapping[ET.Element, ET.Element],
+) -> int:
+    children = list(run)
+    unsupported = [
+        child.tag.rsplit("}", 1)[-1]
+        for child in children
+        if child.tag not in {_q(W, "rPr"), _q(W, "t")}
+    ]
+    if unsupported:
+        raise NativePackageError(
+            "A partial text range crosses a complex native run containing "
+            f"{', '.join(sorted(set(unsupported)))}; refusing to duplicate or "
+            "drop unknown inline content."
+        )
+    text_nodes = [child for child in children if child.tag == _q(W, "t")]
+    segments: list[tuple[bool, list[ET.Element]]] = []
+    cursor = run_start
+    for text_node in text_nodes:
+        value = text_node.text or ""
+        node_start = cursor
+        node_end = cursor + len(value)
+        cursor = node_end
+        cuts = {
+            0,
+            len(value),
+            max(0, min(len(value), selection_start - node_start)),
+            max(0, min(len(value), selection_end - node_start)),
+        }
+        ordered = sorted(cuts)
+        for left, right in zip(ordered, ordered[1:]):
+            if left == right:
+                continue
+            piece_start = node_start + left
+            piece_end = node_start + right
+            selected = (
+                piece_start >= selection_start
+                and piece_end <= selection_end
+                and piece_start < piece_end
+            )
+            cloned_text = deepcopy(text_node)
+            cloned_text.text = value[left:right]
+            cloned_text.tail = text_node.tail if right == len(value) else None
+            _set_xml_space(cloned_text)
+            if segments and segments[-1][0] == selected:
+                segments[-1][1].append(cloned_text)
+            else:
+                segments.append((selected, [cloned_text]))
+    if not segments:
+        raise NativePackageError("Could not split the selected native DOCX text run.")
+    try:
+        parent = parent_map[run]
+    except KeyError as error:
+        raise NativePackageError("Could not locate the native run parent.") from error
+    index = list(parent).index(run)
+    parent.remove(run)
+    selected_runs = 0
+    for offset, (selected, text_children) in enumerate(segments):
+        clone = _clone_run_segment(
+            run,
+            text_children,
+            preserve_tail=offset == len(segments) - 1,
+        )
+        if selected:
+            patch_text_style(clone, style, fields)
+            selected_runs += 1
+        parent.insert(index + offset, clone)
+    return selected_runs
+
+
+def _format_text_range(
+    paragraph: ET.Element,
+    *,
+    start: int,
+    end: int,
+    style: TextStyle,
+    fields: set[str],
+) -> int:
+    runs = list(paragraph.iter(_q(W, "r")))
+    parent_map = {child: parent for parent in paragraph.iter() for child in list(parent)}
+    cursor = 0
+    selected_runs = 0
+    for run in runs:
+        value = _run_text(run)
+        run_start = cursor
+        run_end = cursor + len(value)
+        cursor = run_end
+        if not value or run_end <= start or run_start >= end:
+            continue
+        if start <= run_start and run_end <= end:
+            patch_text_style(run, style, fields)
+            selected_runs += 1
+        else:
+            selected_runs += _split_and_format_run(
+                run,
+                run_start=run_start,
+                selection_start=start,
+                selection_end=end,
+                style=style,
+                fields=fields,
+                parent_map=parent_map,
+            )
+    if selected_runs == 0:
+        raise NativePackageError("The selected text range mapped to no editable DOCX runs.")
+    return selected_runs
+
+
 def apply_docx_operations(
     package: NativePackage,
     spec: AiOfficeDocumentSpec,
@@ -220,10 +365,30 @@ def apply_docx_operations(
                 style = TextStyle.model_validate(operation.get("set", {}))
             except ValidationError as error:
                 raise NativePackageError(f"Could not lower text.format values: {error}") from error
-            runs = list(elements[0].iter(_q(W, "r")))
-            patch_paragraph_mark_text_style(elements[0], style, fields)
-            for run in runs:
-                patch_text_style(run, style, fields)
+            text = "".join(node.text or "" for node in elements[0].iter(_q(W, "t")))
+            try:
+                selection = resolve_text_selection(
+                    text,
+                    range_value=operation.get("range"),
+                    match_value=operation.get("match"),
+                )
+            except (ValidationError, ValueError) as error:
+                raise NativePackageError(
+                    f"Could not resolve native text.format selection: {error}"
+                ) from error
+            if selection is None:
+                runs = list(elements[0].iter(_q(W, "r")))
+                patch_paragraph_mark_text_style(elements[0], style, fields)
+                for run in runs:
+                    patch_text_style(run, style, fields)
+            else:
+                _format_text_range(
+                    elements[0],
+                    start=selection.start,
+                    end=selection.end,
+                    style=style,
+                    fields=fields,
+                )
         elif operation_name == "node.remove":
             for element in elements:
                 if element not in list(body):

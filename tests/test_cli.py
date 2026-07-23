@@ -12,6 +12,17 @@ from aioffice.documents import DocumentBuilder
 
 
 class CliTests(unittest.TestCase):
+    def test_schema_exposes_text_selector_contracts(self) -> None:
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(main(["schema", "--kind", "text-range"]), 0)
+        schema = json.loads(stdout.getvalue())
+        self.assertEqual(
+            schema["properties"]["unit"]["const"],
+            "unicode_codepoint",
+        )
+        self.assertEqual(schema["properties"]["start"]["minimum"], 0)
+
     def test_build_validate_inspect_and_apply(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -49,8 +60,8 @@ class CliTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(
-                capabilities["formatting"]["text_scope"],
-                "whole_node",
+                capabilities["formatting"]["text_scopes"],
+                ["whole_node", "range", "match"],
             )
             self.assertIn(
                 "alignment",

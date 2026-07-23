@@ -25,30 +25,33 @@ def _escape_cell(value: Any) -> str:
     return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\n", "<br>")
 
 
+def _rich_text_markdown(text: str | None, content: list[Any]) -> str:
+    if text is not None:
+        return text
+    rendered: list[str] = []
+    for span in content:
+        value = span.text
+        if "code" in span.marks:
+            value = f"`{value}`"
+        if "strong" in span.marks:
+            value = f"**{value}**"
+        if "emphasis" in span.marks:
+            value = f"*{value}*"
+        if "strike" in span.marks:
+            value = f"~~{value}~~"
+        if "link" in span.marks and span.href:
+            value = f"[{value}]({span.href})"
+        rendered.append(value)
+    return "".join(rendered)
+
+
 def export_markdown(spec: AiOfficeDocumentSpec) -> str:
     lines: list[str] = []
     for block in spec.content:
         if isinstance(block, Heading):
-            lines.append(f"{'#' * block.level} {block.text}")
+            lines.append(f"{'#' * block.level} {_rich_text_markdown(block.text, block.content)}")
         elif isinstance(block, Paragraph):
-            if block.text is not None:
-                lines.append(block.text)
-            else:
-                rendered: list[str] = []
-                for span in block.content:
-                    value = span.text
-                    if "code" in span.marks:
-                        value = f"`{value}`"
-                    if "strong" in span.marks:
-                        value = f"**{value}**"
-                    if "emphasis" in span.marks:
-                        value = f"*{value}*"
-                    if "strike" in span.marks:
-                        value = f"~~{value}~~"
-                    if "link" in span.marks and span.href:
-                        value = f"[{value}]({span.href})"
-                    rendered.append(value)
-                lines.append("".join(rendered))
+            lines.append(_rich_text_markdown(block.text, block.content))
         elif isinstance(block, BulletList):
             lines.extend(f"- {item}" for item in block.items)
         elif isinstance(block, OrderedList):

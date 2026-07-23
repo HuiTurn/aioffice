@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev2`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev3`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, strict paragraph/text formatting, semantic
 diffs, render contracts, and fidelity reports. Workbook, presentation, PDF, native
@@ -135,6 +135,10 @@ result = doc.apply([
     {
         "op": "text.format",
         "target": "#para_000001",
+        "match": {
+            "text": "重要结论",
+            "occurrence": 1,
+        },
         "set": {
             "font_size": {"value": 10.5, "unit": "pt"},
             "color": "#1F4E78",
@@ -145,6 +149,12 @@ result = doc.apply([
 assert result.success
 print(result.diff.summary)
 ```
+
+`text.format` can target the whole node, an exact text occurrence, or a half-open
+Unicode code-point range such as
+`{"range": {"start": 4, "end": 10, "unit": "unicode_codepoint"}}`. Imported
+mixed Word runs and hyperlinks are projected as rich `TextSpan` content, so an
+agent can inspect and edit local formatting without losing link targets.
 
 `doc.render()` currently returns a semantic HTML preview whose contract explicitly
 reports `fidelity="approximate"` and `verification_status="preview_only"`. It must
@@ -203,6 +213,7 @@ aioffice validate examples/report.json
 aioffice build examples/report.json --output report.docx
 aioffice export examples/report.json --to report.html
 aioffice schema --output document.schema.json
+aioffice schema --kind text-range --output text-range.schema.json
 
 aioffice workspace init project
 aioffice workspace import existing.docx --root project

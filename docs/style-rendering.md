@@ -34,9 +34,17 @@ and conflicting first-line/hanging indents fail validation. `set` changes select
 properties; `clear` removes direct formatting so the native named style or document
 default can take effect again.
 
-`text.format` currently applies to all native runs mapped to one heading or
-paragraph. Range-level run splitting is a later native capability and is not
-silently approximated.
+`text.format` supports three explicit scopes:
+
+- no selector: all text runs and the paragraph mark;
+- `match`: the requested one-based exact occurrence;
+- `range`: a half-open `[start, end)` interval measured in Unicode code points.
+
+Range operations split only the boundary runs, preserve their existing `w:rPr`,
+hyperlink container, attributes, and untouched text, then update the selected
+clones. A partial boundary run containing fields, drawings, or another unsupported
+inline child causes an atomic `NATIVE_PATCH_FAILED` result rather than a lossy
+approximation.
 
 ## Native lowering
 
@@ -50,8 +58,11 @@ model. A format patch updates only the requested native properties:
 - character spacing and baseline.
 
 Unknown OOXML children and untouched package parts are retained. Mixed run
-formatting remains in the native package; `text_style` on the projected paragraph
-contains only direct properties common to every text-bearing run.
+formatting and hyperlinks are projected as rich `TextSpan` content.
+`text_style` on the projected paragraph contains only direct properties common to
+every text-bearing run; each span contains the residual direct properties and link
+target. Cross-span text replacement inherits the first replaced run's formatting,
+matching the native DOCX lowering behavior.
 
 ## Semantic diff
 

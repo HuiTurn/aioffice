@@ -21,6 +21,7 @@ from .core import (
 )
 from .documents import Document, DocumentBuilder, PatchResult, open_artifact
 from .native import FidelityLevel, FidelityPolicy, FidelityReport
+from .operations import TextMatch, TextRange
 from .security import SecurityPolicy
 from .rendering import (
     RenderOptions,
@@ -53,6 +54,8 @@ __all__ = [
     "SecurityError",
     "SecurityPolicy",
     "SpecValidationError",
+    "TextMatch",
+    "TextRange",
     "UnsupportedFormatError",
     "ValidationResult",
     "VisualComparison",

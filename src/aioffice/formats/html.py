@@ -231,11 +231,20 @@ def export_html(
         block_id = escape(block.id, quote=True)
         if isinstance(block, Heading):
             paragraph_css = _paragraph_css(block.paragraph_style)
-            text_css = _text_css(block.text_style)
-            combined_css = ";".join(value for value in (paragraph_css, text_css) if value)
+            if block.text is not None:
+                heading_value = (
+                    f"<span{_style_attribute(_text_css(block.text_style))}>"
+                    f"{escape(block.text)}</span>"
+                    if block.text_style is not None
+                    else escape(block.text)
+                )
+            else:
+                heading_value = "".join(
+                    _span_html(span, block.text_style) for span in block.content
+                )
             lines.append(
-                f'<h{block.level} id="{block_id}"{_style_attribute(combined_css)}>'
-                f"{escape(block.text)}</h{block.level}>"
+                f'<h{block.level} id="{block_id}"{_style_attribute(paragraph_css)}>'
+                f"{heading_value}</h{block.level}>"
             )
         elif isinstance(block, Paragraph):
             paragraph_css = _paragraph_css(block.paragraph_style)

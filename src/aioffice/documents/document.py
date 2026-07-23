@@ -32,6 +32,13 @@ from aioffice.native import (
     build_identity_manifest,
     serialize_identity_manifest,
 )
+from aioffice.operations.text import (
+    format_entire_text,
+    format_text_range,
+    node_plain_text,
+    replace_node_text,
+    resolve_text_selection,
+)
 from aioffice.rendering import RenderOptions, RenderResult, render_semantic_html
 from aioffice.security import SecurityPolicy
 from aioffice.spec.models import (
@@ -261,7 +268,7 @@ class Document:
                     "type": node.type,
                 }
                 if isinstance(node, Heading):
-                    compact.update(text=node.text, level=node.level)
+                    compact.update(text=node.plain_text, level=node.level)
                 elif isinstance(node, Paragraph):
                     compact["text"] = node.plain_text
                 elif isinstance(node, (BulletList, OrderedList)):
@@ -371,7 +378,15 @@ class Document:
                 "length_units": ["pt", "in", "cm", "mm", "px"],
                 "paragraph_properties": sorted(ParagraphStyle.model_fields),
                 "text_properties": sorted(TextStyle.model_fields),
-                "text_scope": "whole_node",
+                "text_scopes": ["whole_node", "range", "match"],
+                "range": {
+                    "indexing": "half_open",
+                    "unit": "unicode_codepoint",
+                },
+                "match": {
+                    "mode": "exact",
+                    "occurrence_indexing": "one_based",
+                },
                 "clear_semantics": (
                     "Remove direct formatting so named styles or document defaults can apply."
                 ),
@@ -796,6 +811,18 @@ class Document:
         operation_name = operation.get("op")
         if operation_name == "text.replace":
             _, node = Document._find_node(payload, operation.get("target"))
+            unexpected = sorted(
+                set(operation) - {"op", "target", "search", "replacement", "replace_all"}
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(f"text.replace received unknown fields: {', '.join(unexpected)}."),
+                        node_ids=[node["id"]],
+                    )
+                )
             search = operation.get("search")
             replacement = operation.get("replacement")
             replace_all = operation.get("replace_all", False)
@@ -815,23 +842,15 @@ class Document:
                         message="text.replace requires a string replacement.",
                     )
                 )
-            count = 0
-            if node["type"] == "heading" or node.get("text") is not None:
-                old_text = node.get("text", "")
-                count = old_text.count(search) if replace_all else int(search in old_text)
-                node["text"] = old_text.replace(search, replacement, -1 if replace_all else 1)
-            elif node["type"] == "paragraph":
-                for span in node.get("content", []):
-                    old_text = span["text"]
-                    span_count = old_text.count(search) if replace_all else int(search in old_text)
-                    if span_count:
-                        span["text"] = old_text.replace(
-                            search, replacement, -1 if replace_all else 1
-                        )
-                        count += span_count
-                        if not replace_all:
-                            break
-            else:
+            if not isinstance(replace_all, bool):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="text.replace requires replace_all to be a boolean.",
+                    )
+                )
+            if node["type"] not in {"heading", "paragraph"}:
                 raise _PatchFailure(
                     Diagnostic(
                         severity=Severity.ERROR,
@@ -840,6 +859,12 @@ class Document:
                         node_ids=[node["id"]],
                     )
                 )
+            count = replace_node_text(
+                node,
+                search=search,
+                replacement=replacement,
+                replace_all=bool(replace_all),
+            )
             if count == 0:
                 raise _PatchFailure(
                     Diagnostic(
@@ -869,6 +894,8 @@ class Document:
                     )
                 )
             allowed_keys = {"op", "target", "set", "clear"}
+            if operation_name == "text.format":
+                allowed_keys.update({"range", "match"})
             unexpected = sorted(set(operation) - allowed_keys)
             if unexpected:
                 raise _PatchFailure(
@@ -961,16 +988,60 @@ class Document:
                         ],
                     )
                 )
+            selection = None
+            plain_text = node_plain_text(node)
+            if operation_name == "text.format":
+                try:
+                    selection = resolve_text_selection(
+                        plain_text,
+                        range_value=operation.get("range"),
+                        match_value=operation.get("match"),
+                    )
+                except (ValidationError, ValueError) as error:
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_TEXT_SELECTION",
+                            message=str(error),
+                            node_ids=[node["id"]],
+                            suggested_actions=[
+                                {
+                                    "action": "inspect_node_text",
+                                    "length": len(plain_text),
+                                    "unit": "unicode_codepoint",
+                                }
+                            ],
+                        )
+                    ) from error
             before_style = deepcopy(node.get(style_field, {}))
-            candidate = deepcopy(before_style)
-            candidate.update(deepcopy(set_values))
-            for field_name in clear_values:
-                candidate.pop(field_name, None)
             try:
-                normalized = style_model.model_validate(candidate).model_dump(
-                    mode="json",
-                    exclude_none=True,
-                )
+                if selection is not None:
+                    normalized_set = TextStyle.model_validate(set_values).model_dump(
+                        mode="json",
+                        exclude_none=True,
+                    )
+                    format_text_range(
+                        node,
+                        selection,
+                        set_values=normalized_set,
+                        clear_values=clear_values,
+                    )
+                    normalized = {}
+                elif operation_name == "text.format":
+                    before_style, normalized = format_entire_text(
+                        node,
+                        set_values=set_values,
+                        clear_values=clear_values,
+                    )
+                else:
+                    candidate = deepcopy(before_style)
+                    candidate.update(deepcopy(set_values))
+                    for field_name in clear_values:
+                        candidate.pop(field_name, None)
+                    normalized = style_model.model_validate(candidate).model_dump(
+                        mode="json",
+                        exclude_none=True,
+                    )
             except ValidationError as error:
                 details = _validation_error_diagnostics(error)
                 raise _PatchFailure(
@@ -987,12 +1058,21 @@ class Document:
                         ],
                     )
                 ) from error
-            if normalized:
-                node[style_field] = normalized
-            else:
-                node.pop(style_field, None)
+            if operation_name == "paragraph.format":
+                if normalized:
+                    node[style_field] = normalized
+                else:
+                    node.pop(style_field, None)
             node["revision_updated"] = next_revision
             changed_fields = sorted(set(set_values) | set(clear_values))
+            if selection is not None:
+                return {
+                    "operation": operation_name,
+                    "node_ids": [node["id"]],
+                    "selection": selection.model_dump(mode="json"),
+                    "selected_text": plain_text[selection.start : selection.end],
+                    "fields": changed_fields,
+                }
             return {
                 "operation": operation_name,
                 "node_ids": [node["id"]],

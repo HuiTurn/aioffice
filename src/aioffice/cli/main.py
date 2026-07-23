@@ -11,6 +11,7 @@ from typing import Any, Sequence
 from aioffice._version import __version__
 from aioffice.core.errors import AiOfficeError
 from aioffice.documents import DocumentBuilder, open_artifact
+from aioffice.operations import TextMatch, TextRange
 from aioffice.spec.models import AiOfficeDocumentSpec
 from aioffice.workspace import Workspace
 
@@ -67,8 +68,14 @@ def _build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--dry-run", action="store_true")
     apply.add_argument("-o", "--output", type=Path)
 
-    schema = subparsers.add_parser("schema", help="Print the Document Spec JSON Schema.")
+    schema = subparsers.add_parser("schema", help="Print a strict AiOffice JSON Schema.")
     schema.add_argument("-o", "--output", type=Path)
+    schema.add_argument(
+        "--kind",
+        choices=("document", "text-range", "text-match"),
+        default="document",
+        help="Select the strict model whose JSON Schema is printed.",
+    )
 
     init = subparsers.add_parser("init", help="Initialize a small AiOffice project.")
     init.add_argument("directory", nargs="?", type=Path, default=Path("."))
@@ -214,8 +221,7 @@ def _run(args: argparse.Namespace) -> int:
                 commit=args.commit,
             )
             diagnostics = [
-                diagnostic.model_dump(mode="json")
-                for diagnostic in document.import_diagnostics
+                diagnostic.model_dump(mode="json") for diagnostic in document.import_diagnostics
             ]
             _json_dump(
                 {
@@ -226,10 +232,7 @@ def _run(args: argparse.Namespace) -> int:
             )
             return (
                 1
-                if any(
-                    diagnostic["code"] == "IDENTITY_AMBIGUOUS"
-                    for diagnostic in diagnostics
-                )
+                if any(diagnostic["code"] == "IDENTITY_AMBIGUOUS" for diagnostic in diagnostics)
                 else 0
             )
         if workspace_command == "export":
@@ -301,18 +304,28 @@ def _run(args: argparse.Namespace) -> int:
             return 1
         if not args.dry_run:
             if args.output is None:
-                raise ValueError("Committed patches require --output; input files are never overwritten.")
+                raise ValueError(
+                    "Committed patches require --output; input files are never overwritten."
+                )
             assert result.document is not None
             result.document.export(args.output)
             print(args.output, file=sys.stderr)
         return 0
 
     if args.command == "schema":
-        value = json.dumps(
-            AiOfficeDocumentSpec.model_json_schema(by_alias=True),
-            ensure_ascii=False,
-            indent=2,
-        ) + "\n"
+        schema_models = {
+            "document": AiOfficeDocumentSpec,
+            "text-range": TextRange,
+            "text-match": TextMatch,
+        }
+        value = (
+            json.dumps(
+                schema_models[args.kind].model_json_schema(by_alias=True),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
+        )
         if args.output is None:
             print(value, end="")
         else:

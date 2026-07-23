@@ -16,7 +16,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.2"
+SPEC_VERSION = "0.2-draft.3"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -253,9 +253,24 @@ class Heading(NodeBase):
     id: NodeId = Field(default_factory=lambda: new_id("heading"))
     type: Literal["heading"] = "heading"
     level: int = Field(default=1, ge=1, le=6)
-    text: str
+    text: str | None = None
+    content: list[TextSpan] = Field(default_factory=list)
     paragraph_style: ParagraphStyle | None = None
     text_style: TextStyle | None = None
+
+    @model_validator(mode="after")
+    def validate_content(self) -> "Heading":
+        if self.text is None and not self.content:
+            raise ValueError("A heading must include text or content.")
+        if self.text is not None and self.content:
+            raise ValueError("A heading cannot include both text and content.")
+        return self
+
+    @property
+    def plain_text(self) -> str:
+        if self.text is not None:
+            return self.text
+        return "".join(span.text for span in self.content)
 
 
 class Paragraph(NodeBase):
@@ -346,7 +361,11 @@ class AiOfficeDocumentSpec(StrictModel):
         default=DOCUMENT_SCHEMA_URL,
         alias="$schema",
     )
-    spec_version: Literal["0.2-draft.1", "0.2-draft.2"] = SPEC_VERSION
+    spec_version: Literal[
+        "0.2-draft.1",
+        "0.2-draft.2",
+        "0.2-draft.3",
+    ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)
     metadata: DocumentMetadata = Field(default_factory=DocumentMetadata)

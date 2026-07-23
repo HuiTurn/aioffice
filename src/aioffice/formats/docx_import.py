@@ -11,7 +11,11 @@ from xml.etree import ElementTree as ET
 
 from aioffice.core.diagnostics import Diagnostic
 from aioffice.core.errors import NativePackageError
-from aioffice.formats.docx_style import common_text_style, read_paragraph_style
+from aioffice.formats.docx_style import (
+    common_text_style,
+    read_paragraph_style,
+    read_text_style,
+)
 from aioffice.native import (
     FidelityPolicy,
     IdentityManifest,
@@ -28,7 +32,11 @@ from aioffice.spec.models import AiOfficeDocumentSpec
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 DC = "http://purl.org/dc/elements/1.1/"
+HYPERLINK_RELATIONSHIP_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+)
 
 
 def _q(namespace: str, local: str) -> str:
@@ -46,6 +54,104 @@ def _unique_id(prefix: str, hint: str, index: int, seen: set[str]) -> str:
 
 def _paragraph_text(element: ET.Element) -> str:
     return "".join(node.text or "" for node in element.iter(_q(W, "t")))
+
+
+def _hyperlink_targets(package: NativePackage) -> dict[str, str]:
+    return {
+        relationship.relationship_id: relationship.target
+        for relationship in package.relationships
+        if relationship.source_part == "/word/document.xml"
+        and relationship.relationship_type == HYPERLINK_RELATIONSHIP_TYPE
+    }
+
+
+def _iter_text_runs(
+    element: ET.Element,
+    hyperlink_targets: dict[str, str],
+    *,
+    inherited_href: str | None = None,
+) -> list[tuple[ET.Element, str | None]]:
+    result: list[tuple[ET.Element, str | None]] = []
+    for child in list(element):
+        if child.tag == _q(W, "pPr"):
+            continue
+        if child.tag == _q(W, "hyperlink"):
+            relationship_id = child.attrib.get(_q(R, "id"))
+            anchor = child.attrib.get(_q(W, "anchor"))
+            href = (
+                hyperlink_targets.get(relationship_id, "")
+                if relationship_id
+                else f"#{anchor}"
+                if anchor
+                else None
+            )
+            result.extend(
+                _iter_text_runs(
+                    child,
+                    hyperlink_targets,
+                    inherited_href=href or inherited_href,
+                )
+            )
+        elif child.tag == _q(W, "r"):
+            result.append((child, inherited_href))
+        else:
+            result.extend(
+                _iter_text_runs(
+                    child,
+                    hyperlink_targets,
+                    inherited_href=inherited_href,
+                )
+            )
+    return result
+
+
+def _merge_projected_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for span in spans:
+        if not span["text"]:
+            continue
+        if result and {key: value for key, value in result[-1].items() if key != "text"} == {
+            key: value for key, value in span.items() if key != "text"
+        }:
+            result[-1]["text"] += span["text"]
+        else:
+            result.append(span)
+    return result
+
+
+def _text_projection(
+    element: ET.Element,
+    hyperlink_targets: dict[str, str],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    common_style = common_text_style(element)
+    common_payload = (
+        common_style.model_dump(mode="json", exclude_none=True) if common_style is not None else {}
+    )
+    spans: list[dict[str, Any]] = []
+    for run, href in _iter_text_runs(element, hyperlink_targets):
+        text = _paragraph_text(run)
+        if not text:
+            continue
+        run_style = read_text_style(run)
+        style_payload = (
+            run_style.model_dump(mode="json", exclude_none=True) if run_style is not None else {}
+        )
+        for field_name, common_value in common_payload.items():
+            if style_payload.get(field_name) == common_value:
+                style_payload.pop(field_name)
+        span: dict[str, Any] = {"type": "text", "text": text}
+        if href:
+            span["marks"] = ["link"]
+            span["href"] = href
+        if style_payload:
+            span["style"] = style_payload
+        spans.append(span)
+    spans = _merge_projected_spans(spans)
+    if len(spans) == 1 and not spans[0].get("marks") and not spans[0].get("style"):
+        return {"text": spans[0]["text"]}, common_payload or None
+    if spans:
+        return {"content": spans}, common_payload or None
+    return {"text": _paragraph_text(element)}, common_payload or None
 
 
 def _source_ref(
@@ -67,7 +173,9 @@ def _paragraph_projection(
     element: ET.Element,
     index: int,
     seen_ids: set[str],
+    hyperlink_targets: dict[str, str],
 ) -> dict[str, Any]:
+    text_projection, text_style = _text_projection(element, hyperlink_targets)
     text = _paragraph_text(element)
     para_id = element.attrib.get(_q(W14, "paraId"), f"{index:06d}")
     node_id = _unique_id("para", para_id, index, seen_ids)
@@ -93,23 +201,19 @@ def _paragraph_projection(
         },
     }
     paragraph_style = read_paragraph_style(element)
-    text_style = common_text_style(element)
     if paragraph_style is not None:
         common["paragraph_style"] = paragraph_style.model_dump(
             mode="json",
             exclude_none=True,
         )
     if text_style is not None:
-        common["text_style"] = text_style.model_dump(
-            mode="json",
-            exclude_none=True,
-        )
+        common["text_style"] = text_style
     if heading_match:
         return {
             **common,
             "type": "heading",
             "level": int(heading_match.group(1)),
-            "text": text,
+            **text_projection,
         }
     if not text and native_features:
         return {
@@ -120,7 +224,7 @@ def _paragraph_projection(
             "capabilities": ["inspect", "move", "delete", "render"],
             "editable": False,
         }
-    return {**common, "type": "paragraph", "text": text}
+    return {**common, "type": "paragraph", **text_projection}
 
 
 def _table_projection(
@@ -356,6 +460,7 @@ def import_docx(
     seen_ids: set[str] = set()
     body_elements = list(body)
     numbering_formats = _numbering_formats(package)
+    hyperlink_targets = _hyperlink_targets(package)
     index = 0
     while index < len(body_elements):
         element = body_elements[index]
@@ -387,7 +492,14 @@ def import_docx(
             if _is_page_break(element):
                 content.append(_page_break_projection(element, index, seen_ids))
             else:
-                content.append(_paragraph_projection(element, index, seen_ids))
+                content.append(
+                    _paragraph_projection(
+                        element,
+                        index,
+                        seen_ids,
+                        hyperlink_targets,
+                    )
+                )
         elif element.tag == _q(W, "tbl"):
             content.append(_table_projection(element, index, seen_ids))
         elif element.tag == _q(W, "sectPr"):

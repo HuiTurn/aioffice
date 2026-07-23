@@ -17,12 +17,17 @@
   node removal while preserving unknown OOXML.
 - Added explicit-unit paragraph and text style models shared by semantic HTML,
   generated DOCX, and imported DOCX projections.
+- Added exact Unicode code-point range and occurrence selectors for text formatting.
+- Added minimal DOCX run splitting across mixed formatting and hyperlinks, with
+  atomic refusal when a partial selection crosses unsupported inline content.
+- Added rich run-style and hyperlink projection for imported paragraphs and headings.
+- Added cross-span semantic text replacement and rich heading content.
 - Added stable semantic document diffs and per-property format Patch results.
 - Added render contracts that distinguish approximate previews from native evidence.
 - Added optional PNG visual-regression metrics for future native render providers.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.2`.
+- Advanced the AiOffice Document Spec to `0.2-draft.3`.
 
 ## 0.1.0
 

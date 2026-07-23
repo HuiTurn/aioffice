@@ -68,6 +68,31 @@ class DocumentBuilder:
         self._content.append(node)
         return self
 
+    def rich_heading(
+        self,
+        spans: Iterable[Mapping[str, Any]],
+        *,
+        level: int = 1,
+        id: str | None = None,
+        tags: Iterable[str] = (),
+        paragraph_style: Mapping[str, Any] | None = None,
+        text_style: Mapping[str, Any] | None = None,
+    ) -> "DocumentBuilder":
+        node: dict[str, Any] = {
+            "type": "heading",
+            "content": [deepcopy(dict(span)) for span in spans],
+            "level": level,
+            "tags": list(tags),
+        }
+        if paragraph_style is not None:
+            node["paragraph_style"] = deepcopy(dict(paragraph_style))
+        if text_style is not None:
+            node["text_style"] = deepcopy(dict(text_style))
+        if id is not None:
+            node["id"] = id
+        self._content.append(node)
+        return self
+
     def rich_paragraph(
         self,
         spans: Iterable[Mapping[str, Any]],
