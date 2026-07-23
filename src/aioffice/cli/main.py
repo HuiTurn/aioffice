@@ -23,6 +23,9 @@ from aioffice.spec.models import (
     NamedStyle,
     PageSize,
     SectionLayout,
+    TableColumn,
+    TableLayout,
+    TableWidth,
 )
 from aioffice.workspace import Workspace
 
@@ -94,6 +97,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "named-style",
             "page-size",
             "section-layout",
+            "table-column",
+            "table-layout",
+            "table-width",
             "text-range",
             "text-match",
         ),
@@ -348,6 +354,9 @@ def _run(args: argparse.Namespace) -> int:
             "named-style": NamedStyle,
             "page-size": PageSize,
             "section-layout": SectionLayout,
+            "table-column": TableColumn,
+            "table-layout": TableLayout,
+            "table-width": TableWidth,
             "text-range": TextRange,
             "text-match": TextMatch,
         }

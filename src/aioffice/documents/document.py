@@ -50,6 +50,7 @@ from aioffice.spec.models import (
     Heading,
     LEGACY_DOCUMENT_SCHEMA_URL,
     LEGACY_SPEC_VERSION,
+    Length,
     NamedStyle,
     OpaqueBlock,
     OrderedList,
@@ -58,6 +59,8 @@ from aioffice.spec.models import (
     SectionLayout,
     SPEC_VERSION,
     Table,
+    TableColumn,
+    TableLayout,
     TextStyle,
 )
 from aioffice.styles import style_catalog, theme_named_styles
@@ -308,6 +311,44 @@ class Document:
                     compact.update(
                         column_count=len(node.columns),
                         row_count=len(node.rows),
+                        regular_grid=node.metadata.get(
+                            "regular_grid",
+                            True,
+                        ),
+                        layout=node.layout.model_dump(
+                            mode="json",
+                            exclude_none=True,
+                        ),
+                        columns=[
+                            {
+                                "id": column.id,
+                                "key": column.key,
+                                "title": column.title,
+                                "data_type": column.data_type,
+                                "width": (
+                                    column.width.model_dump(mode="json")
+                                    if column.width is not None
+                                    else None
+                                ),
+                            }
+                            for column in node.columns
+                        ],
+                        rows=[
+                            {
+                                "id": row.id,
+                                "values": row.values,
+                                "allow_break_across_pages": (
+                                    row.allow_break_across_pages
+                                ),
+                                "height": (
+                                    row.height.model_dump(mode="json")
+                                    if row.height is not None
+                                    else None
+                                ),
+                                "height_rule": row.height_rule,
+                            }
+                            for row in node.rows[:3]
+                        ],
                     )
                 elif isinstance(node, OpaqueBlock):
                     compact.update(
@@ -474,6 +515,8 @@ class Document:
             "style.format",
             "section.format",
             "field.update",
+            "table.format",
+            "table.column.format",
         ]
         if self._native is not None:
             operations = [
@@ -486,6 +529,8 @@ class Document:
                 "style.format",
                 "section.format",
                 "field.update",
+                "table.format",
+                "table.column.format",
             ]
         native_extension = self._spec.extensions.get("dev.aioffice.native", {})
         ambiguous_node_ids = sorted(
@@ -520,6 +565,7 @@ class Document:
                 "#section_id",
                 "#header_footer_block_id",
                 "#field_id",
+                "#table_id + column id/key",
             ],
             "formatting": {
                 "length_units": ["pt", "in", "cm", "mm", "px"],
@@ -578,6 +624,32 @@ class Document:
                     "generated_form": "complex_field",
                     "native_forms": ["complex_field", "simple_field"],
                     "native_patch_scope": "one field instruction",
+                },
+                "table_contract": {
+                    "model": "semantic_columns_and_stable_rows",
+                    "table_properties": sorted(TableLayout.model_fields),
+                    "column_properties": ["width"],
+                    "native_table_patch_scope": "one w:tbl",
+                    "native_column_patch_scope": (
+                        "one regular w:gridCol and its one-to-one cells"
+                    ),
+                    "tables": [
+                        {
+                            "id": node.id,
+                            "regular_grid": node.metadata.get(
+                                "regular_grid",
+                                True,
+                            ),
+                            "column_ids": [
+                                column.id for column in node.columns
+                            ],
+                            "column_keys": [
+                                column.key for column in node.columns
+                            ],
+                        }
+                        for node in self._spec.content
+                        if isinstance(node, Table)
+                    ],
                 },
             },
             "identity": {
@@ -1160,6 +1232,181 @@ class Document:
                         )
                     )
                 known_keys = set(keys)
+                active_section = self._spec.sections[0]
+                for candidate_section in self._spec.sections[1:]:
+                    anchor_position = (
+                        content_positions.get(candidate_section.start_at)
+                        if candidate_section.start_at is not None
+                        else None
+                    )
+                    if (
+                        anchor_position is not None
+                        and anchor_position <= index
+                    ):
+                        active_section = candidate_section
+                page_size = active_section.layout.page_size
+                margin_left = active_section.layout.margin_left
+                margin_right = active_section.layout.margin_right
+                if (
+                    page_size is not None
+                    and margin_left is not None
+                    and margin_right is not None
+                ):
+                    page_width, _ = page_size.dimensions_points()
+                    printable_width = (
+                        page_width
+                        - margin_left.to_points()
+                        - margin_right.to_points()
+                        - (
+                            active_section.layout.gutter.to_points()
+                            if active_section.layout.gutter is not None
+                            else 0
+                        )
+                    )
+                    explicit_widths = [
+                        column.width.to_points()
+                        for column in node.columns
+                        if column.width is not None
+                    ]
+                    table_indent = (
+                        node.layout.indent.to_points()
+                        if node.layout.indent is not None
+                        else 0
+                    )
+                    if (
+                        len(explicit_widths) == len(node.columns)
+                        and sum(explicit_widths) + table_indent
+                        > printable_width + 0.01
+                    ):
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=Severity.WARNING,
+                                code="TABLE_WIDTH_OVERFLOW",
+                                message=(
+                                    f"Table {node.id!r} requests "
+                                    f"{sum(explicit_widths) + table_indent:.2f}pt "
+                                    f"inside {printable_width:.2f}pt of printable "
+                                    "section width."
+                                ),
+                                node_ids=[
+                                    active_section.id,
+                                    node.id,
+                                    *[
+                                        column.id
+                                        for column in node.columns
+                                    ],
+                                ],
+                                path=f"content.{index}.columns",
+                                recoverable=True,
+                                suggested_actions=[
+                                    {
+                                        "action": "resize_table_columns",
+                                        "available_width_pt": printable_width,
+                                    }
+                                ],
+                            )
+                        )
+                    preferred = node.layout.preferred_width
+                    if (
+                        preferred is not None
+                        and preferred.mode == "exact"
+                        and isinstance(preferred.value, Length)
+                        and preferred.value.to_points() + table_indent
+                        > printable_width + 0.01
+                    ):
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=Severity.WARNING,
+                                code="TABLE_WIDTH_OVERFLOW",
+                                message=(
+                                    f"Table {node.id!r} preferred width exceeds "
+                                    "the printable section width."
+                                ),
+                                node_ids=[active_section.id, node.id],
+                                path=(
+                                    f"content.{index}.layout."
+                                    "preferred_width"
+                                ),
+                                recoverable=True,
+                                suggested_actions=[
+                                    {
+                                        "action": "set_table_width",
+                                        "maximum_width_pt": (
+                                            printable_width - table_indent
+                                        ),
+                                    }
+                                ],
+                            )
+                        )
+                if (
+                    node.layout.algorithm == "fixed"
+                    and any(
+                        column.width is None
+                        for column in node.columns
+                    )
+                ):
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.WARNING,
+                            code="TABLE_COLUMN_WIDTH_INCOMPLETE",
+                            message=(
+                                f"Fixed-layout table {node.id!r} has columns "
+                                "without explicit widths."
+                            ),
+                            node_ids=[
+                                node.id,
+                                *[
+                                    column.id
+                                    for column in node.columns
+                                    if column.width is None
+                                ],
+                            ],
+                            path=f"content.{index}.columns",
+                            suggested_actions=[
+                                {"action": "set_table_column_widths"}
+                            ],
+                        )
+                    )
+                for column_index, column in enumerate(node.columns):
+                    if column.id in seen:
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=Severity.ERROR,
+                                code="INVALID_SPEC",
+                                message=f"Duplicate node ID {column.id!r}.",
+                                node_ids=[node.id, column.id],
+                                path=(
+                                    f"content.{index}.columns."
+                                    f"{column_index}.id"
+                                ),
+                                suggested_actions=[
+                                    {"action": "assign_unique_id"}
+                                ],
+                            )
+                        )
+                    else:
+                        seen[column.id] = (
+                            f"content.{index}.columns.{column_index}"
+                        )
+                    if (
+                        column.revision_added > self.revision
+                        or column.revision_updated > self.revision
+                    ):
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=Severity.ERROR,
+                                code="INVALID_SPEC",
+                                message=(
+                                    f"Table column {column.id!r} references "
+                                    "a revision newer than the artifact."
+                                ),
+                                node_ids=[node.id, column.id],
+                                path=(
+                                    f"content.{index}.columns."
+                                    f"{column_index}"
+                                ),
+                            )
+                        )
                 for row_index, row in enumerate(node.rows):
                     if row.id in seen:
                         diagnostics.append(
@@ -1173,6 +1420,22 @@ class Document:
                         )
                     else:
                         seen[row.id] = f"content.{index}.rows.{row_index}"
+                    if (
+                        row.revision_added > self.revision
+                        or row.revision_updated > self.revision
+                    ):
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=Severity.ERROR,
+                                code="INVALID_SPEC",
+                                message=(
+                                    f"Table row {row.id!r} references a "
+                                    "revision newer than the artifact."
+                                ),
+                                node_ids=[node.id, row.id],
+                                path=f"content.{index}.rows.{row_index}",
+                            )
+                        )
                     unknown = sorted(set(row.values) - known_keys)
                     if unknown:
                         diagnostics.append(
@@ -1421,6 +1684,19 @@ class Document:
                         document_field.source_ref = identity_updates[
                             document_field.id
                         ]
+                for table in (
+                    node
+                    for node in updated._spec.content
+                    if isinstance(node, Table)
+                ):
+                    for column in table.columns:
+                        if column.id in identity_updates:
+                            column.source_ref = identity_updates[
+                                column.id
+                            ]
+                    for row in table.rows:
+                        if row.id in identity_updates:
+                            row.source_ref = identity_updates[row.id]
                 updated._native = native
                 updated._import_diagnostics = self.import_diagnostics
         except _PatchFailure as error:
@@ -1628,6 +1904,92 @@ class Document:
         return matches[0]
 
     @staticmethod
+    def _find_table(
+        payload: dict[str, Any],
+        target: Any,
+    ) -> dict[str, Any]:
+        target_id = Document._target_id(target)
+        matches = [
+            node
+            for node in payload.get("content", [])
+            if node.get("type") == "table"
+            and node.get("id") == target_id
+        ]
+        if not matches:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="TARGET_NOT_FOUND",
+                    message=f"No table matched #{target_id}.",
+                    suggested_actions=[{"action": "inspect_tables"}],
+                )
+            )
+        if len(matches) > 1:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="AMBIGUOUS_SELECTOR",
+                    message=f"Multiple tables matched #{target_id}.",
+                    node_ids=[target_id],
+                )
+            )
+        return matches[0]
+
+    @staticmethod
+    def _find_table_column(
+        table: dict[str, Any],
+        selector: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(selector, str) or not selector:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="INVALID_SPEC",
+                    message=(
+                        "table.column.format requires a non-empty "
+                        "column ID or key."
+                    ),
+                    node_ids=[table["id"]],
+                )
+            )
+        normalized = selector[1:] if selector.startswith("#") else selector
+        matches = [
+            column
+            for column in table.get("columns", [])
+            if column.get("id") == normalized
+            or column.get("key") == normalized
+        ]
+        if not matches:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="TARGET_NOT_FOUND",
+                    message=(
+                        f"No column matched {selector!r} in table "
+                        f"{table['id']!r}."
+                    ),
+                    node_ids=[table["id"]],
+                    suggested_actions=[{"action": "inspect_table_columns"}],
+                )
+            )
+        if len(matches) > 1:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="AMBIGUOUS_SELECTOR",
+                    message=(
+                        f"Column selector {selector!r} is ambiguous in "
+                        f"table {table['id']!r}."
+                    ),
+                    node_ids=[
+                        table["id"],
+                        *[column["id"] for column in matches],
+                    ],
+                )
+            )
+        return matches[0]
+
+    @staticmethod
     def _find_section(
         payload: dict[str, Any],
         target: Any,
@@ -1664,6 +2026,258 @@ class Document:
         payload: dict[str, Any], operation: dict[str, Any], next_revision: int
     ) -> dict[str, Any]:
         operation_name = operation.get("op")
+        if operation_name == "table.format":
+            unexpected = sorted(
+                set(operation) - {"op", "target", "set", "clear"}
+            )
+            table = Document._find_table(
+                payload,
+                operation.get("target"),
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "table.format received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[table["id"]],
+                    )
+                )
+            set_values = operation.get("set", {})
+            clear_values = operation.get("clear", [])
+            if (
+                not isinstance(set_values, dict)
+                or not isinstance(clear_values, list)
+                or any(not isinstance(value, str) for value in clear_values)
+                or len(clear_values) != len(set(clear_values))
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "table.format requires an object set and a "
+                            "list of unique clear property names."
+                        ),
+                        node_ids=[table["id"]],
+                    )
+                )
+            known_fields = set(TableLayout.model_fields)
+            unknown = sorted(
+                (set(set_values) | set(clear_values)) - known_fields
+            )
+            overlap = sorted(set(set_values) & set(clear_values))
+            has_null = any(value is None for value in set_values.values())
+            if (
+                not set_values
+                and not clear_values
+                or unknown
+                or overlap
+                or has_null
+            ):
+                detail = (
+                    "at least one change is required"
+                    if not set_values and not clear_values
+                    else f"unknown properties: {', '.join(unknown)}"
+                    if unknown
+                    else (
+                        "properties both set and cleared: "
+                        f"{', '.join(overlap)}"
+                    )
+                    if overlap
+                    else "set values cannot be null"
+                )
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"Invalid table.format: {detail}.",
+                        node_ids=[table["id"]],
+                    )
+                )
+            before = deepcopy(table.get("layout", {}))
+            candidate = {**before, **deepcopy(set_values)}
+            for field_name in clear_values:
+                candidate.pop(field_name, None)
+            try:
+                normalized = TableLayout.model_validate(
+                    candidate
+                ).model_dump(mode="json", exclude_none=True)
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="table.format has invalid values.",
+                        node_ids=[table["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_table_layout_schema",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            table["layout"] = normalized
+            table["revision_updated"] = next_revision
+            changed_fields = sorted(set(set_values) | set(clear_values))
+            return {
+                "operation": "table.format",
+                "table_ids": [table["id"]],
+                "property_changes": [
+                    {
+                        "path": f"layout.{field_name}",
+                        "before": before.get(field_name),
+                        "after": normalized.get(field_name),
+                    }
+                    for field_name in changed_fields
+                    if before.get(field_name) != normalized.get(field_name)
+                ],
+            }
+
+        if operation_name == "table.column.format":
+            unexpected = sorted(
+                set(operation)
+                - {"op", "target", "column", "set", "clear"}
+            )
+            table = Document._find_table(
+                payload,
+                operation.get("target"),
+            )
+            column = Document._find_table_column(
+                table,
+                operation.get("column"),
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "table.column.format received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[table["id"], column["id"]],
+                    )
+                )
+            set_values = operation.get("set", {})
+            clear_values = operation.get("clear", [])
+            valid_shape = (
+                isinstance(set_values, dict)
+                and isinstance(clear_values, list)
+                and all(
+                    isinstance(value, str)
+                    for value in clear_values
+                )
+                and len(clear_values) == len(set(clear_values))
+            )
+            unknown = (
+                sorted(
+                    (set(set_values) | set(clear_values)) - {"width"}
+                )
+                if valid_shape
+                else []
+            )
+            overlap = (
+                sorted(set(set_values) & set(clear_values))
+                if valid_shape
+                else []
+            )
+            has_null = (
+                any(value is None for value in set_values.values())
+                if isinstance(set_values, dict)
+                else False
+            )
+            if (
+                not valid_shape
+                or not set_values
+                and not clear_values
+                or unknown
+                or overlap
+                or has_null
+            ):
+                detail = (
+                    "set must be an object and clear a unique string list"
+                    if not valid_shape
+                    else "at least one change is required"
+                    if not set_values and not clear_values
+                    else f"unknown properties: {', '.join(unknown)}"
+                    if unknown
+                    else (
+                        "properties both set and cleared: "
+                        f"{', '.join(overlap)}"
+                    )
+                    if overlap
+                    else "set values cannot be null"
+                )
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "Invalid table.column.format: "
+                            f"{detail}."
+                        ),
+                        node_ids=[table["id"], column["id"]],
+                    )
+                )
+            before = deepcopy(column)
+            candidate = {**before, **deepcopy(set_values)}
+            for field_name in clear_values:
+                candidate.pop(field_name, None)
+            candidate["revision_updated"] = next_revision
+            try:
+                normalized = TableColumn.model_validate(
+                    candidate
+                ).model_dump(mode="json", exclude_none=True)
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "table.column.format has invalid values."
+                        ),
+                        node_ids=[table["id"], column["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_table_column_schema",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            column.clear()
+            column.update(normalized)
+            table["revision_updated"] = next_revision
+            return {
+                "operation": "table.column.format",
+                "table_ids": [table["id"]],
+                "column_ids": [column["id"]],
+                "property_changes": [
+                    {
+                        "path": "width",
+                        "before": before.get("width"),
+                        "after": normalized.get("width"),
+                    }
+                ]
+                if before.get("width") != normalized.get("width")
+                else [],
+            }
+
         if operation_name == "field.update":
             unexpected = sorted(
                 set(operation) - {"op", "target", "set", "clear"}

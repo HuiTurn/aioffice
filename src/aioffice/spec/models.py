@@ -16,7 +16,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.7"
+SPEC_VERSION = "0.2-draft.8"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -654,15 +654,105 @@ class OrderedList(ListBase):
     type: Literal["ordered_list"] = "ordered_list"
 
 
+class TableWidth(StrictModel):
+    """A preferred table width with explicit auto, percent, or physical units."""
+
+    mode: Literal["auto", "percent", "exact"] = "auto"
+    value: float | Length | None = None
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def reject_boolean_value(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("Table width cannot be a boolean.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_mode_value(self) -> "TableWidth":
+        if self.mode == "auto":
+            if self.value is not None:
+                raise ValueError("Auto table width cannot include a value.")
+        elif self.mode == "percent":
+            if isinstance(self.value, Length) or self.value is None:
+                raise ValueError("Percent table width requires a numeric value.")
+            if self.value <= 0 or self.value > 100:
+                raise ValueError("Percent table width must be greater than 0 and at most 100.")
+        else:
+            if not isinstance(self.value, Length):
+                raise ValueError("Exact table width requires an explicit physical length.")
+            if self.value.to_points() <= 0:
+                raise ValueError("Exact table width must be greater than zero.")
+        return self
+
+
+class TableLayout(StrictModel):
+    """Supported table-wide geometry independent of cell data semantics."""
+
+    style_ref: StyleId | None = None
+    preferred_width: TableWidth | None = None
+    alignment: Literal["left", "center", "right"] | None = None
+    algorithm: Literal["autofit", "fixed"] | None = None
+    indent: Length | None = None
+    cell_spacing: Length | None = None
+    cell_margin_top: Length | None = None
+    cell_margin_right: Length | None = None
+    cell_margin_bottom: Length | None = None
+    cell_margin_left: Length | None = None
+    repeat_header: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_lengths(self) -> "TableLayout":
+        for field_name in (
+            "indent",
+            "cell_spacing",
+            "cell_margin_top",
+            "cell_margin_right",
+            "cell_margin_bottom",
+            "cell_margin_left",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and value.to_points() < 0:
+                raise ValueError(f"{field_name} cannot be negative.")
+        return self
+
+
 class TableColumn(StrictModel):
+    id: NodeId = Field(default_factory=lambda: new_id("column"))
+    type: Literal["table_column"] = "table_column"
     key: Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_.-]*$")]
     title: str
     data_type: Literal["text", "number", "integer", "boolean", "date", "enum"] = "text"
+    width: Length | None = None
+    source_ref: NativeRef | str | None = None
+    revision_added: int = Field(default=1, ge=1)
+    revision_updated: int = Field(default=1, ge=1)
+
+    @field_validator("width")
+    @classmethod
+    def validate_width(cls, value: Length | None) -> Length | None:
+        if value is not None and value.to_points() <= 0:
+            raise ValueError("Table column width must be greater than zero.")
+        return value
 
 
 class TableRow(StrictModel):
     id: NodeId = Field(default_factory=lambda: new_id("row"))
+    type: Literal["table_row"] = "table_row"
     values: dict[str, Any]
+    allow_break_across_pages: bool | None = None
+    height: Length | None = None
+    height_rule: Literal["at_least", "exact"] | None = None
+    source_ref: NativeRef | str | None = None
+    revision_added: int = Field(default=1, ge=1)
+    revision_updated: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_height(self) -> "TableRow":
+        if self.height is not None and self.height.to_points() <= 0:
+            raise ValueError("Table row height must be greater than zero.")
+        if self.height_rule is not None and self.height is None:
+            raise ValueError("Table row height_rule requires height.")
+        return self
 
 
 class Table(NodeBase):
@@ -670,6 +760,7 @@ class Table(NodeBase):
     type: Literal["table"] = "table"
     columns: list[TableColumn] = Field(min_length=1)
     rows: list[TableRow] = Field(default_factory=list)
+    layout: TableLayout = Field(default_factory=TableLayout)
 
 
 class PageBreak(NodeBase):
@@ -725,6 +816,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.5",
         "0.2-draft.6",
         "0.2-draft.7",
+        "0.2-draft.8",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

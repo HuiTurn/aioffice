@@ -74,7 +74,7 @@ overwrite unless the caller explicitly opts in.
 
 The current DOCX native layer lowers `text.replace`, `paragraph.format`,
 `text.format`, `node.remove`, `style.define`, `style.apply`, `style.format`,
-`section.format`, and `field.update`.
+`section.format`, `field.update`, `table.format`, and `table.column.format`.
 Text replacement can cross Word run boundaries while retaining run properties and
 unknown XML. Paragraph and text formatting mutate only selected supported
 `w:pPr` / `w:rPr` properties and preserve unrelated or unknown children. Character
@@ -98,6 +98,15 @@ values.
 Unrecognized attributes, children, header/footer relationships, and other section
 settings remain untouched.
 
+Body tables project explicit preferred width, alignment, layout algorithm, indent,
+cell spacing, cell margins, repeated-header behavior, row pagination/height, and
+grid-column widths. Table, column, and data-row identities survive generated DOCX
+reopen through the embedded manifest. `table.format` changes only selected
+`w:tblPr` properties. `table.column.format` changes one `w:gridCol` and matching
+one-to-one `w:tcW` values only after proving a regular, unmerged grid. Merged,
+vertically merged, horizontally spanned, or shifted grids reject column mutation
+atomically instead of guessing at physical cell ownership.
+
 Header/footer parts are separately mapped by part URI. Ordinary paragraph edits are
 lowered to the referenced `headerN.xml` or `footerN.xml`; `document.xml` and unrelated
 region parts remain byte-identical. Shared parts stay shared, while an absent section
@@ -110,5 +119,6 @@ and unknown elements remain opaque and cannot be selected for destructive text
 edits.
 
 Other operations are rejected before a new native revision is committed. Future
-iterations will add richer field families, tables, drawings, and further
-layout-aware operations behind the same capability and fidelity contracts.
+iterations will add richer field families, editable rich/merged table cells,
+drawings, and further layout-aware operations behind the same capability and
+fidelity contracts.

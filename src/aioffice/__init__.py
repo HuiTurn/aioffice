@@ -36,6 +36,11 @@ from .spec import (
     ParagraphStyle,
     SectionColumn,
     SectionLayout,
+    Table,
+    TableColumn,
+    TableLayout,
+    TableRow,
+    TableWidth,
     TextStyle,
 )
 from .styles import ResolvedNamedStyle, resolve_named_style
@@ -80,6 +85,11 @@ __all__ = [
     "SecurityError",
     "SecurityPolicy",
     "SpecValidationError",
+    "Table",
+    "TableColumn",
+    "TableLayout",
+    "TableRow",
+    "TableWidth",
     "TextMatch",
     "TextRange",
     "TextStyle",

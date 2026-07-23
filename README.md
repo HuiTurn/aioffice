@@ -16,12 +16,13 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev7`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev8`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
-parts, structured dynamic fields, semantic diffs, render contracts, and fidelity
-reports. Workbook, presentation, PDF, native visual rendering, and MCP remain planned.
+parts, structured dynamic fields, explicit table geometry, semantic diffs, render
+contracts, and fidelity reports. Workbook, presentation, PDF, native visual
+rendering, and MCP remain planned.
 
 ## Install
 
@@ -112,8 +113,8 @@ commit is refused when native identity is ambiguous. The detailed invariants are
 
 Native DOCX lowering in this development version supports `text.replace`,
 `paragraph.format`, `text.format`, `node.remove`, `style.define`, `style.apply`,
-`style.format`, `section.format`, and `field.update`. Ask the artifact before
-planning an edit:
+`style.format`, `section.format`, `field.update`, `table.format`, and
+`table.column.format`. Ask the artifact before planning an edit:
 
 ```python
 capabilities = doc.capabilities()
@@ -340,6 +341,61 @@ drawings, objects, tables, and malformed field structures remain opaque. See
 [the dynamic field contract](docs/dynamic-fields.md) and
 [the header/footer contract](docs/header-footer.md).
 
+Document tables keep semantic column keys and stable column/row IDs while exposing
+layout geometry in explicit units:
+
+```python
+table_doc = DocumentBuilder().table(
+    id="metrics",
+    columns=[
+        {
+            "id": "metric_column",
+            "key": "metric",
+            "title": "Metric",
+            "width": {"value": 120, "unit": "pt"},
+        },
+        {
+            "id": "value_column",
+            "key": "value",
+            "title": "Value",
+            "data_type": "number",
+            "width": {"value": 180, "unit": "pt"},
+        },
+    ],
+    rows=[
+        {
+            "id": "revenue_row",
+            "values": {"metric": "Revenue", "value": 42},
+            "allow_break_across_pages": False,
+        }
+    ],
+    layout={
+        "preferred_width": {"mode": "percent", "value": 90},
+        "alignment": "center",
+        "algorithm": "fixed",
+        "repeat_header": True,
+        "cell_margin_left": {"value": 6, "unit": "pt"},
+        "cell_margin_right": {"value": 6, "unit": "pt"},
+    },
+).build()
+
+result = table_doc.apply(
+    [
+        {
+            "op": "table.column.format",
+            "target": "#metrics",
+            "column": "#value_column",
+            "set": {"width": {"value": 200, "unit": "pt"}},
+        }
+    ]
+)
+```
+
+Imported regular DOCX grids support selective table and column formatting. Merged,
+shifted, or otherwise irregular grids remain readable but reject column-width
+mutation atomically; cell content is currently projected as plain text. See
+[the table layout contract](docs/table-layout.md).
+
 `doc.render()` currently returns a semantic HTML preview whose contract explicitly
 reports `fidelity="approximate"` and `verification_status="preview_only"`. It must
 not be treated as proof of Word pagination. See
@@ -385,9 +441,10 @@ preview = result.document
 
 Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `node.append`, `node.insert_after`, `node.remove`, `node.update`, `style.define`,
-`style.apply`, `style.format`, `section.format`, and `field.update`. Imported DOCX
-documents expose the native-safe subset reported by `capabilities()`. Selectors are
-stable content, section, header/footer block, or field IDs in this release.
+`style.apply`, `style.format`, `section.format`, `field.update`, `table.format`, and
+`table.column.format`. Imported DOCX documents expose the native-safe subset reported
+by `capabilities()`. Selectors use stable content, section, header/footer block,
+field, table, column, or row identities in this release.
 
 ## CLI
 
@@ -405,6 +462,9 @@ aioffice schema --kind section-layout --output section-layout.schema.json
 aioffice schema --kind document-section --output document-section.schema.json
 aioffice schema --kind document-settings --output document-settings.schema.json
 aioffice schema --kind document-field --output document-field.schema.json
+aioffice schema --kind table-width --output table-width.schema.json
+aioffice schema --kind table-layout --output table-layout.schema.json
+aioffice schema --kind table-column --output table-column.schema.json
 aioffice schema --kind header-footer-bindings --output header-footer-bindings.schema.json
 aioffice schema --kind header-footer-part --output header-footer-part.schema.json
 aioffice schema --kind text-range --output text-range.schema.json

@@ -40,6 +40,14 @@ from aioffice.formats.docx_section import (
     native_ref_for_section,
     read_section_layout,
 )
+from aioffice.formats.docx_tables import (
+    is_regular_table_grid,
+    native_ref_for_table_column,
+    native_ref_for_table_row,
+    read_table_column_widths,
+    read_table_layout,
+    read_table_row,
+)
 from aioffice.native import (
     FidelityPolicy,
     IdentityManifest,
@@ -562,13 +570,45 @@ def _table_projection(
     index: int,
     seen_ids: set[str],
 ) -> dict[str, Any]:
-    raw_rows: list[list[str]] = []
-    for row in element.findall(f"./{_q(W, 'tr')}"):
-        raw_rows.append([_paragraph_text(cell) for cell in row.findall(f"./{_q(W, 'tc')}")])
-    column_count = max((len(row) for row in raw_rows), default=1)
+    native_rows = element.findall(f"./{_q(W, 'tr')}")
+    raw_rows = [
+        [
+            _paragraph_text(cell)
+            for cell in row.findall(f"./{_q(W, 'tc')}")
+        ]
+        for row in native_rows
+    ]
+    grid_widths = read_table_column_widths(element)
+    column_count = max(
+        len(grid_widths),
+        max((len(row) for row in raw_rows), default=0),
+        1,
+    )
     header = raw_rows[0] if raw_rows else []
-    columns = [
-        {
+    fingerprint = hashlib.sha256(
+        ET.tostring(element, encoding="utf-8")
+    ).hexdigest()[:12]
+    table_id = _unique_id(
+        "table",
+        fingerprint,
+        index,
+        seen_ids,
+    )
+    columns: list[dict[str, Any]] = []
+    for column_index in range(column_count):
+        width = (
+            grid_widths[column_index]
+            if column_index < len(grid_widths)
+            else None
+        )
+        column: dict[str, Any] = {
+            "id": _unique_id(
+                "column",
+                f"{fingerprint}_{column_index}",
+                column_index,
+                seen_ids,
+            ),
+            "type": "table_column",
             "key": f"column_{column_index + 1}",
             "title": (
                 header[column_index]
@@ -576,32 +616,61 @@ def _table_projection(
                 else f"Column {column_index + 1}"
             ),
         }
-        for column_index in range(column_count)
-    ]
-    table_id = _unique_id(
-        "table",
-        hashlib.sha256(ET.tostring(element, encoding="utf-8")).hexdigest()[:12],
-        index,
-        seen_ids,
-    )
+        if width is not None:
+            column["width"] = width.model_dump(mode="json")
+        if column_index < len(grid_widths):
+            column["source_ref"] = native_ref_for_table_column(
+                element,
+                index,
+                column_index,
+            ).model_dump(mode="json", exclude_none=True)
+        columns.append(column)
     rows = []
     for row_index, values in enumerate(raw_rows[1:], start=1):
+        native_row = native_rows[row_index]
+        row_fingerprint = hashlib.sha256(
+            ET.tostring(native_row, encoding="utf-8")
+        ).hexdigest()[:12]
         rows.append(
             {
-                "id": _unique_id("row", f"{index}_{row_index}", row_index, seen_ids),
+                "id": _unique_id(
+                    "row",
+                    f"{index}_{row_index}_{row_fingerprint}",
+                    row_index,
+                    seen_ids,
+                ),
+                "type": "table_row",
                 "values": {
                     column["key"]: values[column_index] if column_index < len(values) else ""
                     for column_index, column in enumerate(columns)
                 },
+                "source_ref": native_ref_for_table_row(
+                    element,
+                    index,
+                    row_index,
+                ).model_dump(mode="json", exclude_none=True),
+                **read_table_row(native_row),
             }
         )
+    layout = read_table_layout(element)
+    regular_grid = is_regular_table_grid(element)
     return {
         "id": table_id,
         "type": "table",
         "columns": columns,
         "rows": rows,
+        "layout": layout.model_dump(mode="json", exclude_none=True),
         "source_ref": _source_ref([element], [index], "w:tbl"),
-        "metadata": {"projection": "heuristic", "header_row_assumed": bool(raw_rows)},
+        "metadata": {
+            "projection": (
+                "regular_grid"
+                if regular_grid
+                else "heuristic"
+            ),
+            "regular_grid": regular_grid,
+            "header_row_assumed": bool(raw_rows),
+            "cell_content_projection": "plain_text",
+        },
     }
 
 

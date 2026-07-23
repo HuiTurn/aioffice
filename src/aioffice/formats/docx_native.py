@@ -35,6 +35,12 @@ from aioffice.formats.docx_section import (
     native_ref_for_section,
     patch_section_layout,
 )
+from aioffice.formats.docx_tables import (
+    native_ref_for_table_column,
+    native_ref_for_table_row,
+    patch_table_column_width,
+    patch_table_layout,
+)
 from aioffice.native import (
     FidelityReport,
     MANIFEST_PART_URI,
@@ -54,6 +60,8 @@ from aioffice.spec.models import (
     Paragraph,
     ParagraphStyle,
     SectionLayout,
+    Table,
+    TableLayout,
     TextStyle,
 )
 
@@ -145,6 +153,55 @@ def _find_field(
             f"Field {target_id!r} has no editable DOCX inline source reference."
         )
     return document_field, source_ref
+
+
+def _find_table(
+    spec: AiOfficeDocumentSpec,
+    target: Any,
+) -> tuple[Table, NativeRef]:
+    target_id = _target_id(target)
+    matches = [
+        node
+        for node in spec.content
+        if isinstance(node, Table) and node.id == target_id
+    ]
+    if len(matches) != 1:
+        raise NativePackageError(
+            f"Native DOCX table target #{target_id} matched "
+            f"{len(matches)} tables."
+        )
+    table = matches[0]
+    source_ref = table.source_ref
+    if (
+        not isinstance(source_ref, NativeRef)
+        or source_ref.format != "docx"
+    ):
+        raise NativePackageError(
+            f"Table {target_id!r} has no editable DOCX source reference."
+        )
+    return table, source_ref
+
+
+def _find_table_column(
+    table: Table,
+    selector: Any,
+) -> tuple[int, str]:
+    if not isinstance(selector, str) or not selector:
+        raise NativePackageError(
+            "table.column.format requires a non-empty column ID or key."
+        )
+    normalized = selector[1:] if selector.startswith("#") else selector
+    matches = [
+        (index, column.id)
+        for index, column in enumerate(table.columns)
+        if column.id == normalized or column.key == normalized
+    ]
+    if len(matches) != 1:
+        raise NativePackageError(
+            f"Column selector {selector!r} matched {len(matches)} columns "
+            f"in table {table.id!r}."
+        )
+    return matches[0]
 
 
 def _find_section_source_ref(
@@ -427,6 +484,8 @@ def apply_docx_operations(
         "style.format",
         "section.format",
         "field.update",
+        "table.format",
+        "table.column.format",
     }
     unsupported = sorted({str(operation.get("op")) for operation in operations} - supported)
     if unsupported:
@@ -434,7 +493,7 @@ def apply_docx_operations(
             "Imported DOCX V0.2 currently supports native lowering for "
             "text.replace, paragraph.format, text.format, node.remove, "
             "style.apply, style.define, style.format, section.format, and "
-            "field.update; "
+            "field.update, table.format, and table.column.format; "
             f"unsupported: {', '.join(unsupported)}."
         )
 
@@ -518,6 +577,28 @@ def apply_docx_operations(
                 f"Field {document_field.id!r} is not mapped to one w:p element."
             )
         source_fields[document_field.id] = (
+            mapped_elements[0],
+            source_ref,
+        )
+    source_tables: dict[str, tuple[Table, ET.Element, NativeRef]] = {}
+    for table in (
+        node
+        for node in spec.content
+        if isinstance(node, Table)
+    ):
+        source_ref = table.source_ref
+        if not isinstance(source_ref, NativeRef):
+            continue
+        _, mapped_elements = elements_for_ref(source_ref)
+        if (
+            len(mapped_elements) != 1
+            or mapped_elements[0].tag != _q(W, "tbl")
+        ):
+            raise NativePackageError(
+                f"Table {table.id!r} is not mapped to one w:tbl element."
+            )
+        source_tables[table.id] = (
+            table,
             mapped_elements[0],
             source_ref,
         )
@@ -654,6 +735,105 @@ def apply_docx_operations(
             except FieldStructureError as error:
                 raise NativePackageError(
                     f"Could not patch field {source_field.id!r}: {error}"
+                ) from error
+            changed_xml_parts.add(source_ref.part_uri)
+            continue
+        if operation_name == "table.format":
+            source_table, source_ref = _find_table(
+                spec,
+                operation.get("target"),
+            )
+            _, mapped_elements = elements_for_ref(source_ref)
+            if (
+                len(mapped_elements) != 1
+                or mapped_elements[0].tag != _q(W, "tbl")
+            ):
+                raise NativePackageError(
+                    "table.format requires a native reference to one w:tbl."
+                )
+            result_table = next(
+                (
+                    candidate
+                    for candidate in result_spec.content
+                    if isinstance(candidate, Table)
+                    and candidate.id == source_table.id
+                ),
+                None,
+            )
+            if result_table is None:
+                raise NativePackageError(
+                    f"Patch result no longer contains table "
+                    f"{source_table.id!r}."
+                )
+            fields = set(operation.get("set", {})) | set(
+                operation.get("clear", [])
+            )
+            try:
+                TableLayout.model_validate(operation.get("set", {}))
+                patch_table_layout(
+                    mapped_elements[0],
+                    result_table.layout,
+                    fields,
+                )
+            except (ValidationError, ValueError) as error:
+                raise NativePackageError(
+                    f"Could not lower table.format values: {error}"
+                ) from error
+            changed_xml_parts.add(source_ref.part_uri)
+            continue
+        if operation_name == "table.column.format":
+            source_table, source_ref = _find_table(
+                spec,
+                operation.get("target"),
+            )
+            column_index, column_id = _find_table_column(
+                source_table,
+                operation.get("column"),
+            )
+            _, mapped_elements = elements_for_ref(source_ref)
+            if (
+                len(mapped_elements) != 1
+                or mapped_elements[0].tag != _q(W, "tbl")
+            ):
+                raise NativePackageError(
+                    "table.column.format requires a native reference "
+                    "to one w:tbl."
+                )
+            result_table = next(
+                (
+                    candidate
+                    for candidate in result_spec.content
+                    if isinstance(candidate, Table)
+                    and candidate.id == source_table.id
+                ),
+                None,
+            )
+            result_column = (
+                next(
+                    (
+                        column
+                        for column in result_table.columns
+                        if column.id == column_id
+                    ),
+                    None,
+                )
+                if result_table is not None
+                else None
+            )
+            if result_column is None:
+                raise NativePackageError(
+                    f"Patch result no longer contains table column "
+                    f"{column_id!r}."
+                )
+            try:
+                patch_table_column_width(
+                    mapped_elements[0],
+                    column_index,
+                    result_column.width,
+                )
+            except ValueError as error:
+                raise NativePackageError(
+                    f"Could not lower table.column.format: {error}"
                 ) from error
             changed_xml_parts.add(source_ref.part_uri)
             continue
@@ -820,6 +1000,65 @@ def apply_docx_operations(
             part_uri=original_ref.part_uri,
             root_path=root_path,
         )
+    for table_id, (source_table, table_element, source_ref) in (
+        source_tables.items()
+    ):
+        current_container = part_containers[source_ref.part_uri]
+        table_index = next(
+            (
+                index
+                for index, element in enumerate(list(current_container))
+                if element is table_element
+            ),
+            None,
+        )
+        if table_index is None:
+            continue
+        result_table = next(
+            (
+                candidate
+                for candidate in result_spec.content
+                if isinstance(candidate, Table)
+                and candidate.id == table_id
+            ),
+            None,
+        )
+        if result_table is None:
+            continue
+        result_column_ids = {
+            column.id for column in result_table.columns
+        }
+        for column_index, column in enumerate(source_table.columns):
+            if (
+                column.id not in result_column_ids
+                or not isinstance(column.source_ref, NativeRef)
+            ):
+                continue
+            try:
+                identity_updates[column.id] = (
+                    native_ref_for_table_column(
+                        table_element,
+                        table_index,
+                        column_index,
+                    )
+                )
+            except ValueError:
+                continue
+        result_row_ids = {row.id for row in result_table.rows}
+        for row_index, row in enumerate(source_table.rows, start=1):
+            if (
+                row.id not in result_row_ids
+                or not isinstance(row.source_ref, NativeRef)
+            ):
+                continue
+            try:
+                identity_updates[row.id] = native_ref_for_table_row(
+                    table_element,
+                    table_index,
+                    row_index,
+                )
+            except ValueError:
+                continue
     for section_id, (section, container, container_kind) in source_sections.items():
         index = current_indices.get(id(container))
         if index is None:
@@ -867,6 +1106,17 @@ def apply_docx_operations(
                 document_field.source_ref = identity_updates[
                     document_field.id
                 ]
+        for table in (
+            node
+            for node in manifest_spec.content
+            if isinstance(node, Table)
+        ):
+            for column in table.columns:
+                if column.id in identity_updates:
+                    column.source_ref = identity_updates[column.id]
+            for row in table.rows:
+                if row.id in identity_updates:
+                    row.source_ref = identity_updates[row.id]
         updated.set_part(
             MANIFEST_PART_URI,
             serialize_identity_manifest(build_identity_manifest(manifest_spec)),

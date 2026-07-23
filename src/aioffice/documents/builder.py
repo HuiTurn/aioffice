@@ -221,6 +221,7 @@ class DocumentBuilder:
         columns: Iterable[Mapping[str, Any]],
         rows: Iterable[Mapping[str, Any]],
         *,
+        layout: Mapping[str, Any] | None = None,
         id: str | None = None,
         tags: Iterable[str] = (),
     ) -> "DocumentBuilder":
@@ -234,6 +235,8 @@ class DocumentBuilder:
             "rows": normalized_rows,
             "tags": list(tags),
         }
+        if layout is not None:
+            node["layout"] = deepcopy(dict(layout))
         if id is not None:
             node["id"] = id
         self._content.append(node)

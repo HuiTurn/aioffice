@@ -27,6 +27,8 @@ from aioffice.spec.models import (
     NativeRef,
     NodeId,
     Paragraph,
+    Table,
+    TableColumn,
 )
 
 MANIFEST_VERSION = "0.1"
@@ -115,6 +117,8 @@ class IdentityNode(BaseModel):
     node_id: NodeId
     node_type: str
     source_ref: NativeRef
+    semantic_key: str | None = None
+    semantic_data_type: str | None = None
     previous_fingerprint: Annotated[
         str,
         StringConstraints(pattern=r"^sha256:[a-fA-F0-9]{64}$"),
@@ -169,6 +173,11 @@ def build_identity_manifest(
             if isinstance(block, Paragraph)
         ),
     ]
+    tables = [
+        node
+        for node in spec.content
+        if isinstance(node, Table)
+    ]
     node_groups = [
         list(spec.content),
         list(spec.sections),
@@ -182,6 +191,8 @@ def build_identity_manifest(
             ]
             for block in text_blocks
         ),
+        *(list(table.columns) for table in tables),
+        *(list(table.rows) for table in tables),
     ]
     for nodes in node_groups:
         group: list[IdentityNode] = []
@@ -194,6 +205,16 @@ def build_identity_manifest(
                     node_id=node.id,
                     node_type=node.type,
                     source_ref=source_ref,
+                    semantic_key=(
+                        node.key
+                        if isinstance(node, TableColumn)
+                        else None
+                    ),
+                    semantic_data_type=(
+                        node.data_type
+                        if isinstance(node, TableColumn)
+                        else None
+                    ),
                 )
             )
         for index, record in enumerate(group):
@@ -249,6 +270,10 @@ def serialize_identity_manifest(manifest: IdentityManifest) -> bytes:
             values["previousFingerprint"] = record.previous_fingerprint
         if record.next_fingerprint is not None:
             values["nextFingerprint"] = record.next_fingerprint
+        if record.semantic_key is not None:
+            values["semanticKey"] = record.semantic_key
+        if record.semantic_data_type is not None:
+            values["semanticDataType"] = record.semantic_data_type
         ET.SubElement(root, _q("node"), values)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -295,6 +320,10 @@ def parse_identity_manifest(payload: bytes) -> IdentityManifest:
                 },
                 "previous_fingerprint": element.attrib.get("previousFingerprint"),
                 "next_fingerprint": element.attrib.get("nextFingerprint"),
+                "semantic_key": element.attrib.get("semanticKey"),
+                "semantic_data_type": element.attrib.get(
+                    "semanticDataType"
+                ),
             }
         )
     try:
@@ -328,6 +357,14 @@ def _neighbor_candidate_ref(
     direction: int,
     source_ref: NativeRef,
 ) -> NativeRef | None:
+    def layer_key(reference: NativeRef) -> str:
+        if reference.native_kind in {
+            "w:complex-field",
+            "w:fldSimple",
+        }:
+            return "w:field"
+        return reference.native_kind
+
     candidate_index = index + direction
     while 0 <= candidate_index < len(candidates):
         candidate_ref = candidates[candidate_index][2]
@@ -338,6 +375,7 @@ def _neighbor_candidate_ref(
                 else (
                     candidate_ref.sub_index is not None
                     and candidate_ref.element_index == source_ref.element_index
+                    and layer_key(candidate_ref) == layer_key(source_ref)
                 )
             )
             if same_layer:
@@ -369,6 +407,25 @@ def apply_identity_manifest(
             and block.get("type") == "paragraph"
         ),
     ]
+    tables = [
+        node
+        for node in content
+        if node.get("type") == "table"
+    ]
+    table_key_states = [
+        (
+            table,
+            [
+                (
+                    column,
+                    column.get("key"),
+                )
+                for column in table.get("columns", [])
+                if isinstance(column, dict)
+            ],
+        )
+        for table in tables
+    ]
     projected = [
         *content,
         *(sections or []),
@@ -385,6 +442,18 @@ def apply_identity_manifest(
             for inline in block.get("content", [])
             if isinstance(inline, dict)
             and inline.get("type") == "field"
+        ),
+        *(
+            column
+            for table in tables
+            for column in table.get("columns", [])
+            if isinstance(column, dict)
+        ),
+        *(
+            row
+            for table in tables
+            for row in table.get("rows", [])
+            if isinstance(row, dict)
         ),
     ]
     candidates = [
@@ -430,7 +499,7 @@ def apply_identity_manifest(
                 and candidate_ref.sub_index == source_ref.sub_index
             ]
 
-        if not matches and source_ref.native_id:
+        if len(matches) != 1 and source_ref.native_id:
             matches = [
                 (index, candidate, candidate_ref)
                 for index, candidate, candidate_ref in candidates
@@ -441,7 +510,7 @@ def apply_identity_manifest(
                 and candidate_ref.native_id == source_ref.native_id
             ]
 
-        if not matches and source_ref.fingerprint:
+        if len(matches) != 1 and source_ref.fingerprint:
             matches = [
                 (index, candidate, candidate_ref)
                 for index, candidate, candidate_ref in candidates
@@ -452,7 +521,7 @@ def apply_identity_manifest(
                 and candidate_ref.fingerprint == source_ref.fingerprint
             ]
 
-        if not matches and source_ref.element_index is not None:
+        if len(matches) != 1 and source_ref.element_index is not None:
             path_candidates = [
                 (index, candidate, candidate_ref)
                 for index, candidate, candidate_ref in candidates
@@ -463,6 +532,9 @@ def apply_identity_manifest(
                 and candidate_ref.element_index == source_ref.element_index
                 and candidate_ref.sub_index == source_ref.sub_index
             ]
+            path_matches: list[
+                tuple[int, dict[str, Any], NativeRef]
+            ] = []
             for match in path_candidates:
                 index = match[0]
                 previous_ref = _neighbor_candidate_ref(
@@ -504,11 +576,20 @@ def apply_identity_manifest(
                     and next_matches
                 )
                 if neighbors_confirm:
-                    matches.append(match)
+                    path_matches.append(match)
+            matches = path_matches
 
         if len(matches) == 1:
             index, candidate, _ = matches[0]
             candidate["id"] = record.node_id
+            if (
+                candidate.get("type") == "table_column"
+                and record.node_type == "table_column"
+            ):
+                if record.semantic_key is not None:
+                    candidate["key"] = record.semantic_key
+                if record.semantic_data_type is not None:
+                    candidate["data_type"] = record.semantic_data_type
             used.add(index)
             bound_records[record_index] = index
             continue
@@ -569,8 +650,47 @@ def apply_identity_manifest(
         for index, candidate, _ in candidates:
             if index not in used and candidate.get("id") == record.node_id:
                 candidate["id"] = new_id(
-                    "section" if candidate.get("type") == "section" else "node"
+                    (
+                        "section"
+                        if candidate.get("type") == "section"
+                        else "column"
+                        if candidate.get("type") == "table_column"
+                        else "row"
+                        if candidate.get("type") == "table_row"
+                        else "field"
+                        if candidate.get("type") == "field"
+                        else "node"
+                    )
                 )
+
+    for table, columns in table_key_states:
+        old_keys = {
+            old_key
+            for _, old_key in columns
+            if isinstance(old_key, str)
+        }
+        for row in table.get("rows", []):
+            if not isinstance(row, dict):
+                continue
+            values = row.get("values")
+            if not isinstance(values, dict):
+                continue
+            remapped: dict[str, object] = {}
+            for column, old_key in columns:
+                current_key = column.get("key")
+                if (
+                    isinstance(old_key, str)
+                    and isinstance(current_key, str)
+                ):
+                    remapped[current_key] = values.get(old_key)
+            remapped.update(
+                {
+                    key: value
+                    for key, value in values.items()
+                    if key not in old_keys
+                }
+            )
+            row["values"] = remapped
 
     id_owners: dict[str, list[int]] = {}
     for index, candidate, _ in candidates:

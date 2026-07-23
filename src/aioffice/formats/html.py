@@ -118,6 +118,56 @@ def _text_css(style: TextStyle | None) -> str:
     return ";".join(values)
 
 
+def _table_css(table: Table) -> str:
+    layout = table.layout
+    values: list[str] = []
+    if layout.preferred_width is not None:
+        width = layout.preferred_width
+        if width.mode == "auto":
+            values.append("width:auto")
+        elif width.mode == "percent":
+            assert isinstance(width.value, float)
+            rendered = f"{width.value:.6f}".rstrip("0").rstrip(".")
+            values.append(f"width:{rendered}%")
+        else:
+            assert isinstance(width.value, Length)
+            values.append(f"width:{width.value.to_css()}")
+    if layout.algorithm is not None:
+        values.append(
+            "table-layout:"
+            f"{'fixed' if layout.algorithm == 'fixed' else 'auto'}"
+        )
+    if layout.cell_spacing is not None:
+        values.append("border-collapse:separate")
+        values.append(
+            f"border-spacing:{layout.cell_spacing.to_css()}"
+        )
+    if layout.alignment == "center":
+        values.extend(["margin-left:auto", "margin-right:auto"])
+    elif layout.alignment == "right":
+        values.extend(["margin-left:auto", "margin-right:0"])
+    elif layout.alignment == "left":
+        values.extend(["margin-left:0", "margin-right:auto"])
+    if layout.indent is not None:
+        values.append(f"margin-left:{layout.indent.to_css()}")
+    return ";".join(values)
+
+
+def _table_cell_css(table: Table) -> str:
+    layout = table.layout
+    values: list[str] = []
+    for property_name, field_name in (
+        ("padding-top", "cell_margin_top"),
+        ("padding-right", "cell_margin_right"),
+        ("padding-bottom", "cell_margin_bottom"),
+        ("padding-left", "cell_margin_left"),
+    ):
+        value = getattr(layout, field_name)
+        if value is not None:
+            values.append(f"{property_name}:{value.to_css()}")
+    return ";".join(values)
+
+
 def _style_attribute(css: str) -> str:
     return f' style="{escape(css, quote=True)}"' if css else ""
 
@@ -504,15 +554,66 @@ def export_html(
             lines.extend(f"<li>{escape(item)}</li>" for item in block.items)
             lines.append(f"</{tag}>")
         elif isinstance(block, Table):
-            lines.append(f'<table id="{block_id}">')
+            table_style = (
+                f' data-aioffice-table-style="'
+                f'{escape(block.layout.style_ref, quote=True)}"'
+                if block.layout.style_ref is not None
+                else ""
+            )
+            lines.append(
+                f'<table id="{block_id}"{table_style}'
+                f"{_style_attribute(_table_css(block))}>"
+            )
+            lines.append("<colgroup>")
+            for column in block.columns:
+                column_css = (
+                    f"width:{column.width.to_css()}"
+                    if column.width is not None
+                    else ""
+                )
+                lines.append(
+                    "<col "
+                    f'data-column-id="{escape(column.id, quote=True)}" '
+                    f'data-column-key="{escape(column.key, quote=True)}"'
+                    f"{_style_attribute(column_css)}>"
+                )
+            lines.append("</colgroup>")
             lines.append("<thead><tr>")
-            lines.extend(f"<th>{escape(column.title)}</th>" for column in block.columns)
+            cell_css = _table_cell_css(block)
+            lines.extend(
+                (
+                    f'<th data-column-id="{escape(column.id, quote=True)}"'
+                    f"{_style_attribute(cell_css)}>"
+                    f"{escape(column.title)}</th>"
+                )
+                for column in block.columns
+            )
             lines.append("</tr></thead>")
             lines.append("<tbody>")
             for row in block.rows:
-                lines.append(f'<tr data-row-id="{escape(row.id, quote=True)}">')
+                row_css: list[str] = []
+                if row.allow_break_across_pages is False:
+                    row_css.append("break-inside:avoid")
+                if row.height is not None:
+                    row_css.append(
+                        (
+                            "height:"
+                            if row.height_rule == "exact"
+                            else "min-height:"
+                        )
+                        + row.height.to_css()
+                    )
+                lines.append(
+                    f'<tr data-row-id="{escape(row.id, quote=True)}"'
+                    f"{_style_attribute(';'.join(row_css))}>"
+                )
                 lines.extend(
-                    f"<td>{escape(str(row.values.get(column.key, '')))}</td>"
+                    (
+                        f'<td data-column-id="'
+                        f'{escape(column.id, quote=True)}"'
+                        f"{_style_attribute(cell_css)}>"
+                        f"{escape(str(row.values.get(column.key, '')))}</td>"
+                    )
                     for column in block.columns
                 )
                 lines.append("</tr>")

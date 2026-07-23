@@ -45,6 +45,12 @@ from aioffice.formats.docx_section import (
     apply_section_layout,
     native_ref_for_section,
 )
+from aioffice.formats.docx_tables import (
+    apply_table_layout,
+    apply_table_row,
+    native_ref_for_table_column,
+    native_ref_for_table_row,
+)
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     BulletList,
@@ -58,6 +64,7 @@ from aioffice.spec.models import (
     Paragraph,
     ParagraphStyle,
     Table,
+    TableWidth,
     TextSpan,
     TextStyle,
     NativeRef,
@@ -295,29 +302,84 @@ def _register_field_refs(
 
 def _add_table(body: ET.Element, table: Table, context: _DocxContext) -> ET.Element:
     element = _child(body, "tbl")
-    properties = _child(element, "tblPr")
-    _child(properties, "tblStyle", val="TableGrid")
-    _child(properties, "tblW", w="0", type="auto")
     grid = _child(element, "tblGrid")
-    for _ in table.columns:
-        _child(grid, "gridCol", w="2400")
+    native_widths = [
+        (
+            str(round(column.width.to_points() * 20))
+            if column.width is not None
+            else "2400"
+        )
+        for column in table.columns
+    ]
+    for width in native_widths:
+        _child(grid, "gridCol", w=width)
 
-    def add_row(values: list[str], *, header: bool = False) -> None:
+    def add_row(
+        values: list[str],
+        *,
+        header: bool = False,
+        row_index: int | None = None,
+    ) -> None:
         row = _child(element, "tr")
-        if header:
-            row_properties = _child(row, "trPr")
-            _child(row_properties, "tblHeader")
-        for value in values:
+        if row_index is not None:
+            apply_table_row(row, table.rows[row_index])
+        for column_index, value in enumerate(values):
             cell = _child(row, "tc")
             cell_properties = _child(cell, "tcPr")
-            _child(cell_properties, "tcW", w="2400", type="dxa")
+            _child(
+                cell_properties,
+                "tcW",
+                w=native_widths[column_index],
+                type="dxa",
+            )
             span = TextSpan(text=value, marks=["strong"] if header else [])
             _add_paragraph(cell, [span], context)
 
     add_row([column.title for column in table.columns], header=True)
-    for row in table.rows:
-        add_row([_string_value(row.values.get(column.key)) for column in table.columns])
+    for row_index, row in enumerate(table.rows):
+        add_row(
+            [
+                _string_value(row.values.get(column.key))
+                for column in table.columns
+            ],
+            row_index=row_index,
+        )
+    effective_layout = table.layout.model_copy(
+        update={
+            "style_ref": table.layout.style_ref or "TableGrid",
+            "preferred_width": (
+                table.layout.preferred_width
+                or TableWidth(mode="auto")
+            ),
+            "repeat_header": (
+                True
+                if table.layout.repeat_header is None
+                else table.layout.repeat_header
+            ),
+        }
+    )
+    apply_table_layout(element, effective_layout)
     return element
+
+
+def _register_table_refs(
+    refs: dict[str, NativeRef],
+    element: ET.Element,
+    table_index: int,
+    table: Table,
+) -> None:
+    for column_index, column in enumerate(table.columns):
+        refs[column.id] = native_ref_for_table_column(
+            element,
+            table_index,
+            column_index,
+        )
+    for row_index, row in enumerate(table.rows, start=1):
+        refs[row.id] = native_ref_for_table_row(
+            element,
+            table_index,
+            row_index,
+        )
 
 
 def _document_xml(
@@ -458,6 +520,7 @@ def _document_xml(
                 [index],
                 native_kind="w:tbl",
             )
+            _register_table_refs(refs, element, index, block)
         elif isinstance(block, PageBreak):
             paragraph = ET.SubElement(
                 body,

@@ -64,11 +64,21 @@
   selective `w:pgNumType` projection and Patch.
 - Changed unknown native fields from lossy display-text projection to structured,
   read-only preservation; malformed field containment remains opaque.
+- Added explicit table width, alignment, layout algorithm, indent, cell spacing,
+  cell margins, repeated-header, row height, and row pagination contracts.
+- Added stable table-column and table-row identities, preserving semantic column
+  keys and data types through generated DOCX reopen and external reconciliation.
+- Added `table.format` and `table.column.format` native lowering with selective
+  `w:tblPr`, `w:tblGrid`, and one-to-one `w:tcW` mutation.
+- Added conservative regular-grid detection: table-wide formatting remains safe for
+  irregular tables, while column-width edits refuse merged or shifted grids.
+- Added table geometry to compact inspection, capabilities, semantic HTML, and
+  printable-width diagnostics.
 - Serialized OPC content-type and relationship control parts with default package
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.7`.
+- Advanced the AiOffice Document Spec to `0.2-draft.8`.
 
 ## 0.1.0
 

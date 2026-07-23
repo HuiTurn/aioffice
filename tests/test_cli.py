@@ -31,6 +31,30 @@ class CliTests(unittest.TestCase):
         self.assertIn("semantic_role", named_style_schema["properties"])
         self.assertIn("based_on", named_style_schema["properties"])
 
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(main(["schema", "--kind", "table-layout"]), 0)
+        table_layout_schema = json.loads(stdout.getvalue())
+        self.assertFalse(table_layout_schema["additionalProperties"])
+        self.assertIn("preferred_width", table_layout_schema["properties"])
+        self.assertIn("repeat_header", table_layout_schema["properties"])
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(main(["schema", "--kind", "table-column"]), 0)
+        table_column_schema = json.loads(stdout.getvalue())
+        self.assertFalse(table_column_schema["additionalProperties"])
+        self.assertIn("width", table_column_schema["properties"])
+        self.assertIn("data_type", table_column_schema["properties"])
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(main(["schema", "--kind", "table-width"]), 0)
+        table_width_schema = json.loads(stdout.getvalue())
+        self.assertFalse(table_width_schema["additionalProperties"])
+        self.assertIn("mode", table_width_schema["properties"])
+        self.assertIn("value", table_width_schema["properties"])
+
     def test_build_validate_inspect_and_apply(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -67,10 +91,12 @@ class CliTests(unittest.TestCase):
                     "node.remove",
                     "style.apply",
                     "style.define",
-                "style.format",
-                "section.format",
-                "field.update",
-            ],
+                    "style.format",
+                    "section.format",
+                    "field.update",
+                    "table.format",
+                    "table.column.format",
+                ],
             )
             self.assertEqual(
                 capabilities["formatting"]["text_scopes"],
