@@ -23,6 +23,8 @@ from .documents import Document, DocumentBuilder, PatchResult, open_artifact
 from .native import FidelityLevel, FidelityPolicy, FidelityReport
 from .operations import TextMatch, TextRange
 from .security import SecurityPolicy
+from .spec import DocumentDefaults, NamedStyle, ParagraphStyle, TextStyle
+from .styles import ResolvedNamedStyle, resolve_named_style
 from .rendering import (
     RenderOptions,
     RenderResult,
@@ -41,12 +43,15 @@ __all__ = [
     "DocumentDiff",
     "Document",
     "DocumentBuilder",
+    "DocumentDefaults",
     "ExportError",
     "FidelityLevel",
     "FidelityPolicy",
     "FidelityReport",
     "NativePackageError",
+    "NamedStyle",
     "PatchResult",
+    "ParagraphStyle",
     "RenderOptions",
     "RenderResult",
     "RenderingError",
@@ -56,6 +61,7 @@ __all__ = [
     "SpecValidationError",
     "TextMatch",
     "TextRange",
+    "TextStyle",
     "UnsupportedFormatError",
     "ValidationResult",
     "VisualComparison",
@@ -66,4 +72,6 @@ __all__ = [
     "new_id",
     "open",
     "open_artifact",
+    "resolve_named_style",
+    "ResolvedNamedStyle",
 ]

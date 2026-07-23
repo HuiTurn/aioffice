@@ -15,10 +15,20 @@ class DocumentBuilder:
         title: str | None = None,
         author: str | None = None,
         theme: str = "business-clean",
+        defaults: Mapping[str, Any] | None = None,
+        styles: Iterable[Mapping[str, Any]] = (),
     ) -> None:
         self._metadata: dict[str, Any] = {"title": title, "author": author}
         self._theme = theme
+        self._defaults = deepcopy(dict(defaults)) if defaults is not None else {}
+        self._styles = [deepcopy(dict(style)) for style in styles]
         self._content: list[dict[str, Any]] = []
+
+    def define_style(self, style: Mapping[str, Any]) -> "DocumentBuilder":
+        """Add a strict document-local named style definition."""
+
+        self._styles.append(deepcopy(dict(style)))
+        return self
 
     def heading(
         self,
@@ -27,6 +37,7 @@ class DocumentBuilder:
         level: int = 1,
         id: str | None = None,
         tags: Iterable[str] = (),
+        style_ref: str | None = None,
         paragraph_style: Mapping[str, Any] | None = None,
         text_style: Mapping[str, Any] | None = None,
     ) -> "DocumentBuilder":
@@ -38,6 +49,8 @@ class DocumentBuilder:
         }
         if paragraph_style is not None:
             node["paragraph_style"] = deepcopy(dict(paragraph_style))
+        if style_ref is not None:
+            node["style_ref"] = style_ref
         if text_style is not None:
             node["text_style"] = deepcopy(dict(text_style))
         if id is not None:
@@ -51,6 +64,7 @@ class DocumentBuilder:
         *,
         id: str | None = None,
         tags: Iterable[str] = (),
+        style_ref: str | None = None,
         paragraph_style: Mapping[str, Any] | None = None,
         text_style: Mapping[str, Any] | None = None,
     ) -> "DocumentBuilder":
@@ -61,6 +75,8 @@ class DocumentBuilder:
         }
         if paragraph_style is not None:
             node["paragraph_style"] = deepcopy(dict(paragraph_style))
+        if style_ref is not None:
+            node["style_ref"] = style_ref
         if text_style is not None:
             node["text_style"] = deepcopy(dict(text_style))
         if id is not None:
@@ -75,6 +91,7 @@ class DocumentBuilder:
         level: int = 1,
         id: str | None = None,
         tags: Iterable[str] = (),
+        style_ref: str | None = None,
         paragraph_style: Mapping[str, Any] | None = None,
         text_style: Mapping[str, Any] | None = None,
     ) -> "DocumentBuilder":
@@ -86,6 +103,8 @@ class DocumentBuilder:
         }
         if paragraph_style is not None:
             node["paragraph_style"] = deepcopy(dict(paragraph_style))
+        if style_ref is not None:
+            node["style_ref"] = style_ref
         if text_style is not None:
             node["text_style"] = deepcopy(dict(text_style))
         if id is not None:
@@ -99,6 +118,7 @@ class DocumentBuilder:
         *,
         id: str | None = None,
         tags: Iterable[str] = (),
+        style_ref: str | None = None,
         paragraph_style: Mapping[str, Any] | None = None,
         text_style: Mapping[str, Any] | None = None,
     ) -> "DocumentBuilder":
@@ -109,6 +129,8 @@ class DocumentBuilder:
         }
         if paragraph_style is not None:
             node["paragraph_style"] = deepcopy(dict(paragraph_style))
+        if style_ref is not None:
+            node["style_ref"] = style_ref
         if text_style is not None:
             node["text_style"] = deepcopy(dict(text_style))
         if id is not None:
@@ -186,6 +208,8 @@ class DocumentBuilder:
             {
                 "metadata": metadata,
                 "theme": {"ref": self._theme},
+                "defaults": deepcopy(self._defaults),
+                "styles": deepcopy(self._styles),
                 "content": deepcopy(self._content),
             }
         )

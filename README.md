@@ -16,11 +16,11 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev3`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev4`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
-workspaces, copy-on-write native parts, strict paragraph/text formatting, semantic
-diffs, render contracts, and fidelity reports. Workbook, presentation, PDF, native
-visual rendering, and MCP remain planned.
+workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
+named styles, document defaults, semantic diffs, render contracts, and fidelity
+reports. Workbook, presentation, PDF, native visual rendering, and MCP remain planned.
 
 ## Install
 
@@ -110,8 +110,8 @@ commit is refused when native identity is ambiguous. The detailed invariants are
 [the native round-trip architecture](docs/native-roundtrip.md).
 
 Native DOCX lowering in this development version supports `text.replace`,
-`paragraph.format`, `text.format`, and `node.remove`. Ask the artifact before
-planning an edit:
+`paragraph.format`, `text.format`, `node.remove`, `style.define`, `style.apply`,
+and `style.format`. Ask the artifact before planning an edit:
 
 ```python
 capabilities = doc.capabilities()
@@ -155,6 +155,52 @@ Unicode code-point range such as
 `{"range": {"start": 4, "end": 10, "unit": "unicode_codepoint"}}`. Imported
 mixed Word runs and hyperlinks are projected as rich `TextSpan` content, so an
 agent can inspect and edit local formatting without losing link targets.
+
+Named styles are stable, AI-addressable layout rules rather than copied formatting.
+The resolver applies document defaults, the complete `based_on` chain, node direct
+formatting, and finally span formatting:
+
+```python
+doc = (
+    DocumentBuilder()
+    .define_style({
+        "id": "Executive",
+        "name": "Executive",
+        "semantic_role": "custom",
+        "based_on": "Normal",
+        "paragraph_style": {
+            "spacing_after": {"value": 14, "unit": "pt"},
+            "keep_together": True,
+        },
+        "text_style": {
+            "font_size": {"value": 13, "unit": "pt"},
+            "color": "#7A1F5B",
+            "bold": True,
+        },
+    })
+    .paragraph("Board decision", id="decision", style_ref="Executive")
+    .build()
+)
+
+result = doc.apply([
+    {
+        "op": "style.format",
+        "target": "@Executive",
+        "paragraph": {
+            "set": {"spacing_after": {"value": 18, "unit": "pt"}}
+        },
+        "text": {
+            "set": {"color": "#1F4E78"},
+            "clear": ["bold"],
+        },
+    }
+])
+```
+
+Imported `w:style` definitions, `w:docDefaults`, inheritance links, quick-style
+metadata, and paragraph `w:pStyle` references are projected into the Spec. Native
+style patches update only supported properties in `word/styles.xml`; unknown style
+XML and every untouched package part remain byte-for-byte preserved.
 
 `doc.render()` currently returns a semantic HTML preview whose contract explicitly
 reports `fidelity="approximate"` and `verification_status="preview_only"`. It must
@@ -200,8 +246,9 @@ preview = result.document
 ```
 
 Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
-`node.append`, `node.insert_after`, `node.remove`, and `node.update`. Imported DOCX
-documents expose the smaller native-safe subset reported by `capabilities()`.
+`node.append`, `node.insert_after`, `node.remove`, `node.update`, `style.define`,
+`style.apply`, and `style.format`. Imported DOCX documents expose the native-safe
+subset reported by `capabilities()`.
 Selectors are stable node IDs in this release.
 
 ## CLI
@@ -213,6 +260,8 @@ aioffice validate examples/report.json
 aioffice build examples/report.json --output report.docx
 aioffice export examples/report.json --to report.html
 aioffice schema --output document.schema.json
+aioffice schema --kind named-style --output named-style.schema.json
+aioffice schema --kind document-defaults --output document-defaults.schema.json
 aioffice schema --kind text-range --output text-range.schema.json
 
 aioffice workspace init project

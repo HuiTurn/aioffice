@@ -17,6 +17,7 @@ from aioffice.spec.models import (
     TextSpan,
     TextStyle,
 )
+from aioffice.styles import resolve_node_styles
 from aioffice.themes import get_theme
 
 
@@ -230,35 +231,60 @@ def export_html(
     for block in spec.content:
         block_id = escape(block.id, quote=True)
         if isinstance(block, Heading):
-            paragraph_css = _paragraph_css(block.paragraph_style)
+            named_style_ref = block.style_ref or f"Heading{block.level}"
+            resolved_paragraph, resolved_text = resolve_node_styles(
+                spec,
+                style_ref=named_style_ref,
+                paragraph_style=block.paragraph_style,
+                text_style=block.text_style,
+            )
+            paragraph_css = _paragraph_css(resolved_paragraph)
             if block.text is not None:
                 heading_value = (
-                    f"<span{_style_attribute(_text_css(block.text_style))}>"
+                    f"<span{_style_attribute(_text_css(resolved_text))}>"
                     f"{escape(block.text)}</span>"
-                    if block.text_style is not None
+                    if resolved_text is not None
                     else escape(block.text)
                 )
             else:
                 heading_value = "".join(
-                    _span_html(span, block.text_style) for span in block.content
+                    _span_html(span, resolved_text) for span in block.content
                 )
+            style_data = (
+                f' data-aioffice-style="{escape(named_style_ref, quote=True)}"'
+            )
             lines.append(
-                f'<h{block.level} id="{block_id}"{_style_attribute(paragraph_css)}>'
+                f'<h{block.level} id="{block_id}"{style_data}'
+                f"{_style_attribute(paragraph_css)}>"
                 f"{heading_value}</h{block.level}>"
             )
         elif isinstance(block, Paragraph):
-            paragraph_css = _paragraph_css(block.paragraph_style)
+            resolved_paragraph, resolved_text = resolve_node_styles(
+                spec,
+                style_ref=block.style_ref,
+                paragraph_style=block.paragraph_style,
+                text_style=block.text_style,
+            )
+            paragraph_css = _paragraph_css(resolved_paragraph)
             value = (
                 (
-                    f"<span{_style_attribute(_text_css(block.text_style))}>"
+                    f"<span{_style_attribute(_text_css(resolved_text))}>"
                     f"{escape(block.text)}</span>"
-                    if block.text_style is not None
+                    if resolved_text is not None
                     else escape(block.text)
                 )
                 if block.text is not None
-                else "".join(_span_html(span, block.text_style) for span in block.content)
+                else "".join(_span_html(span, resolved_text) for span in block.content)
             )
-            lines.append(f'<p id="{block_id}"{_style_attribute(paragraph_css)}>{value}</p>')
+            style_data = (
+                f' data-aioffice-style="{escape(block.style_ref, quote=True)}"'
+                if block.style_ref is not None
+                else ""
+            )
+            lines.append(
+                f'<p id="{block_id}"{style_data}'
+                f"{_style_attribute(paragraph_css)}>{value}</p>"
+            )
         elif isinstance(block, (BulletList, OrderedList)):
             tag = "ul" if isinstance(block, BulletList) else "ol"
             lines.append(f'<{tag} id="{block_id}">')

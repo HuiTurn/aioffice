@@ -49,6 +49,7 @@ from aioffice.spec.models import (
     Heading,
     LEGACY_DOCUMENT_SCHEMA_URL,
     LEGACY_SPEC_VERSION,
+    NamedStyle,
     OpaqueBlock,
     OrderedList,
     Paragraph,
@@ -57,6 +58,7 @@ from aioffice.spec.models import (
     Table,
     TextStyle,
 )
+from aioffice.styles import style_catalog, theme_named_styles
 from aioffice.themes import get_theme
 
 
@@ -259,8 +261,10 @@ class Document:
             "node_count": len(self._spec.content),
             "node_types": counts,
             "diagnostic_count": len(self._import_diagnostics),
+            "style_count": len(style_catalog(self._spec)),
         }
         if response_format == "compact":
+            style_usage: dict[str, int] = {}
             nodes: list[dict[str, Any]] = []
             for node in self._spec.content:
                 compact: dict[str, Any] = {
@@ -284,8 +288,23 @@ class Document:
                         capabilities=node.capabilities,
                         editable=node.editable,
                     )
+                if isinstance(node, (Heading, Paragraph)) and node.style_ref is not None:
+                    compact["style_ref"] = node.style_ref
+                    style_usage[node.style_ref] = style_usage.get(node.style_ref, 0) + 1
                 nodes.append(compact)
             result["nodes"] = nodes
+            result["styles"] = [
+                {
+                    "id": style.id,
+                    "name": style.name,
+                    "semantic_role": style.semantic_role,
+                    "heading_level": style.heading_level,
+                    "based_on": style.based_on,
+                    "usage_count": style_usage.get(style.id, 0),
+                }
+                for style in style_catalog(self._spec).values()
+                if not style.hidden
+            ]
         elif response_format == "expanded":
             result["nodes"] = [
                 node.model_dump(mode="json", exclude_none=True) for node in self._spec.content
@@ -337,6 +356,9 @@ class Document:
             "node.insert_after",
             "node.remove",
             "node.update",
+            "style.apply",
+            "style.define",
+            "style.format",
         ]
         if self._native is not None:
             operations = [
@@ -344,6 +366,9 @@ class Document:
                 "paragraph.format",
                 "text.format",
                 "node.remove",
+                "style.apply",
+                "style.define",
+                "style.format",
             ]
         native_extension = self._spec.extensions.get("dev.aioffice.native", {})
         ambiguous_node_ids = sorted(
@@ -390,6 +415,17 @@ class Document:
                 "clear_semantics": (
                     "Remove direct formatting so named styles or document defaults can apply."
                 ),
+                "named_styles": [
+                    {
+                        "id": style.id,
+                        "name": style.name,
+                        "semantic_role": style.semantic_role,
+                        "heading_level": style.heading_level,
+                        "based_on": style.based_on,
+                    }
+                    for style in style_catalog(self._spec).values()
+                    if not style.hidden
+                ],
             },
             "identity": {
                 "source": native_extension.get(
@@ -416,6 +452,9 @@ class Document:
         diagnostics = self.import_diagnostics
         seen: dict[str, str] = {self.id: "artifact"}
         previous_heading_level: int | None = None
+        style_issue_severity = (
+            Severity.WARNING if self._native is not None else Severity.ERROR
+        )
 
         if not self._spec.content:
             diagnostics.append(
@@ -438,6 +477,59 @@ class Document:
                     suggested_actions=[{"action": "use_theme", "name": "business-clean"}],
                 )
             )
+
+        named_styles = style_catalog(self._spec)
+        for style in self._spec.styles:
+            for field_name, referenced_id in (
+                ("based_on", style.based_on),
+                ("next_style", style.next_style),
+            ):
+                if referenced_id is not None and referenced_id not in named_styles:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=style_issue_severity,
+                            code="STYLE_NOT_FOUND",
+                            message=(
+                                f"Named style {style.id!r} references missing "
+                                f"{field_name} style {referenced_id!r}."
+                            ),
+                            path=f"styles.{style.id}.{field_name}",
+                            recoverable=True,
+                            suggested_actions=[
+                                {"action": "define_style", "style_id": referenced_id}
+                            ],
+                        )
+                    )
+
+        reported_cycles: set[frozenset[str]] = set()
+        for style_id in named_styles:
+            visiting: list[str] = []
+            current_id: str | None = style_id
+            while current_id is not None and current_id in named_styles:
+                if current_id in visiting:
+                    cycle = frozenset(visiting[visiting.index(current_id) :])
+                    if cycle not in reported_cycles:
+                        reported_cycles.add(cycle)
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=style_issue_severity,
+                                code="STYLE_INHERITANCE_CYCLE",
+                                message=(
+                                    "Named style inheritance cycle detected: "
+                                    f"{' -> '.join(sorted(cycle))}."
+                                ),
+                                recoverable=True,
+                                suggested_actions=[
+                                    {
+                                        "action": "clear_style_base",
+                                        "style_id": current_id,
+                                    }
+                                ],
+                            )
+                        )
+                    break
+                visiting.append(current_id)
+                current_id = named_styles[current_id].based_on
 
         for index, node in enumerate(self._spec.content):
             if node.id in seen:
@@ -489,6 +581,104 @@ class Document:
                         )
                     )
                 previous_heading_level = node.level
+
+            if isinstance(node, (Heading, Paragraph)):
+                if node.style_ref is not None and node.style_ref not in named_styles:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=style_issue_severity,
+                            code="STYLE_NOT_FOUND",
+                            message=(
+                                f"Node {node.id!r} references missing named style "
+                                f"{node.style_ref!r}."
+                            ),
+                            node_ids=[node.id],
+                            path=f"content.{index}.style_ref",
+                            recoverable=True,
+                            suggested_actions=[
+                                {"action": "define_style", "style_id": node.style_ref},
+                                {"action": "clear_style_ref", "node_id": node.id},
+                            ],
+                        )
+                    )
+                elif node.style_ref is not None:
+                    referenced_style = named_styles[node.style_ref]
+                    style_is_heading = (
+                        referenced_style.semantic_role == "heading"
+                        and referenced_style.heading_level is not None
+                        and referenced_style.heading_level <= 6
+                    )
+                    if style_is_heading != isinstance(node, Heading):
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=style_issue_severity,
+                                code="STYLE_SEMANTIC_MISMATCH",
+                                message=(
+                                    f"Node {node.id!r} type {node.type!r} is incompatible "
+                                    f"with named style {node.style_ref!r} role "
+                                    f"{referenced_style.semantic_role!r}."
+                                ),
+                                node_ids=[node.id],
+                                path=f"content.{index}.style_ref",
+                                recoverable=True,
+                                suggested_actions=[
+                                    {
+                                        "action": "apply_compatible_style",
+                                        "style_id": node.style_ref,
+                                    }
+                                ],
+                            )
+                        )
+                    elif (
+                        isinstance(node, Heading)
+                        and referenced_style.heading_level != node.level
+                    ):
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=style_issue_severity,
+                                code="STYLE_SEMANTIC_MISMATCH",
+                                message=(
+                                    f"Heading {node.id!r} level {node.level} conflicts "
+                                    f"with named style {node.style_ref!r} level "
+                                    f"{referenced_style.heading_level}."
+                                ),
+                                node_ids=[node.id],
+                                path=f"content.{index}.level",
+                                recoverable=True,
+                                suggested_actions=[
+                                    {
+                                        "action": "set_heading_level",
+                                        "level": referenced_style.heading_level,
+                                    }
+                                ],
+                            )
+                        )
+                elif isinstance(node, Heading) and node.style_ref is None:
+                    implicit_style = named_styles.get(f"Heading{node.level}")
+                    if (
+                        implicit_style is None
+                        or implicit_style.semantic_role != "heading"
+                        or implicit_style.heading_level != node.level
+                    ):
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=style_issue_severity,
+                                code="STYLE_SEMANTIC_MISMATCH",
+                                message=(
+                                    f"Heading {node.id!r} has no compatible implicit "
+                                    f"Heading{node.level} named style."
+                                ),
+                                node_ids=[node.id],
+                                path=f"content.{index}.style_ref",
+                                recoverable=True,
+                                suggested_actions=[
+                                    {
+                                        "action": "apply_compatible_style",
+                                        "heading_level": node.level,
+                                    }
+                                ],
+                            )
+                        )
 
             if isinstance(node, Table):
                 keys = [column.key for column in node.columns]
@@ -809,6 +999,395 @@ class Document:
         payload: dict[str, Any], operation: dict[str, Any], next_revision: int
     ) -> dict[str, Any]:
         operation_name = operation.get("op")
+        if operation_name == "style.define":
+            unexpected = sorted(set(operation) - {"op", "style"})
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "style.define received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                    )
+                )
+            raw_style = operation.get("style")
+            if not isinstance(raw_style, dict):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="style.define requires a named style object in style.",
+                    )
+                )
+            try:
+                named_style = NamedStyle.model_validate(raw_style)
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="style.define contains an invalid named style.",
+                        suggested_actions=[
+                            {
+                                "action": "fix_style",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(error)
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            known_ids = {
+                style.id
+                for style in theme_named_styles(payload.get("theme", {}).get("ref", ""))
+            } | {str(style.get("id")) for style in payload.get("styles", [])}
+            if named_style.id in known_ids:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="STYLE_ALREADY_EXISTS",
+                        message=f"Named style {named_style.id!r} already exists.",
+                        suggested_actions=[
+                            {"action": "format_style", "style_id": named_style.id}
+                        ],
+                    )
+                )
+            payload.setdefault("styles", []).append(
+                named_style.model_dump(mode="json", exclude_none=True)
+            )
+            return {
+                "operation": "style.define",
+                "style_ids": [named_style.id],
+            }
+
+        if operation_name == "style.apply":
+            unexpected = sorted(set(operation) - {"op", "target", "style_ref"})
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"style.apply received unknown fields: {', '.join(unexpected)}."
+                        ),
+                    )
+                )
+            _, node = Document._find_node(payload, operation.get("target"))
+            if node["type"] not in {"heading", "paragraph"}:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=f"style.apply does not support node type {node['type']!r}.",
+                        node_ids=[node["id"]],
+                    )
+                )
+            if "style_ref" not in operation:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="style.apply requires style_ref; use null to clear it.",
+                        node_ids=[node["id"]],
+                    )
+                )
+            style_ref = operation["style_ref"]
+            if style_ref is not None and (not isinstance(style_ref, str) or not style_ref):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="style.apply style_ref must be a non-empty string or null.",
+                        node_ids=[node["id"]],
+                    )
+                )
+            named_style_catalog = {
+                style.id: style
+                for style in theme_named_styles(payload.get("theme", {}).get("ref", ""))
+            }
+            named_style_catalog.update(
+                {
+                    style.id: style
+                    for raw_style in payload.get("styles", [])
+                    for style in [NamedStyle.model_validate(raw_style)]
+                }
+            )
+            if style_ref is not None and style_ref not in named_style_catalog:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="STYLE_NOT_FOUND",
+                        message=f"Named style {style_ref!r} does not exist.",
+                        node_ids=[node["id"]],
+                        recoverable=True,
+                        suggested_actions=[
+                            {"action": "inspect_styles"},
+                            {"action": "define_style", "style_id": style_ref},
+                        ],
+                    )
+                )
+            before = node.get("style_ref")
+            before_type = node["type"]
+            before_level = node.get("level")
+            if style_ref is None:
+                node.pop("style_ref", None)
+            else:
+                node["style_ref"] = style_ref
+                selected_style = named_style_catalog[style_ref]
+                if (
+                    selected_style.semantic_role == "heading"
+                    and selected_style.heading_level is not None
+                    and selected_style.heading_level <= 6
+                ):
+                    node["type"] = "heading"
+                    node["level"] = selected_style.heading_level
+                    if style_ref.casefold() == (
+                        f"Heading{selected_style.heading_level}".casefold()
+                    ):
+                        node.pop("style_ref", None)
+                else:
+                    node["type"] = "paragraph"
+                    node.pop("level", None)
+            node["revision_updated"] = next_revision
+            property_changes = [
+                {
+                    "path": "style_ref",
+                    "before": before,
+                    "after": node.get("style_ref"),
+                }
+            ]
+            if before_type != node["type"]:
+                property_changes.append(
+                    {
+                        "path": "type",
+                        "before": before_type,
+                        "after": node["type"],
+                    }
+                )
+            if before_level != node.get("level"):
+                property_changes.append(
+                    {
+                        "path": "level",
+                        "before": before_level,
+                        "after": node.get("level"),
+                    }
+                )
+            return {
+                "operation": "style.apply",
+                "node_ids": [node["id"]],
+                "property_changes": property_changes,
+            }
+
+        if operation_name == "style.format":
+            unexpected = sorted(set(operation) - {"op", "target", "paragraph", "text"})
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"style.format received unknown fields: {', '.join(unexpected)}."
+                        ),
+                    )
+                )
+            raw_target = operation.get("target")
+            if not isinstance(raw_target, str) or not raw_target:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="style.format target must be a named style ID.",
+                    )
+                )
+            available_style_ids = {
+                str(style.get("id")) for style in payload.get("styles", [])
+            } | {
+                style.id
+                for style in theme_named_styles(payload.get("theme", {}).get("ref", ""))
+            }
+            style_id = (
+                raw_target[1:]
+                if raw_target.startswith("@")
+                and raw_target not in available_style_ids
+                else raw_target
+            )
+            style_index = next(
+                (
+                    index
+                    for index, style in enumerate(payload.get("styles", []))
+                    if style.get("id") == style_id
+                ),
+                None,
+            )
+            if style_index is None:
+                theme_style = next(
+                    (
+                        style
+                        for style in theme_named_styles(
+                            payload.get("theme", {}).get("ref", "")
+                        )
+                        if style.id == style_id
+                    ),
+                    None,
+                )
+                if theme_style is None:
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="STYLE_NOT_FOUND",
+                            message=f"Named style {style_id!r} does not exist.",
+                            recoverable=True,
+                            suggested_actions=[{"action": "inspect_styles"}],
+                        )
+                    )
+                payload.setdefault("styles", []).append(
+                    theme_style.model_dump(mode="json", exclude_none=True)
+                )
+                style_index = len(payload["styles"]) - 1
+
+            style_payload = deepcopy(payload["styles"][style_index])
+            property_changes: list[dict[str, Any]] = []
+            changed = False
+            for scope_name, model_type, field_name in (
+                ("paragraph", ParagraphStyle, "paragraph_style"),
+                ("text", TextStyle, "text_style"),
+            ):
+                scope = operation.get(scope_name)
+                if scope is None:
+                    continue
+                if not isinstance(scope, dict) or set(scope) - {"set", "clear"}:
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=(
+                                f"style.format {scope_name} must contain only set and clear."
+                            ),
+                        )
+                    )
+                set_values = scope.get("set", {})
+                clear_values = scope.get("clear", [])
+                if (
+                    not isinstance(set_values, dict)
+                    or not isinstance(clear_values, list)
+                    or any(not isinstance(value, str) for value in clear_values)
+                    or len(clear_values) != len(set(clear_values))
+                ):
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=(
+                                f"style.format {scope_name} requires an object set and "
+                                "a list of unique clear property names."
+                            ),
+                        )
+                    )
+                if not set_values and not clear_values:
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=(
+                                f"style.format {scope_name} requires at least one change."
+                            ),
+                        )
+                    )
+                known_fields = set(model_type.model_fields)
+                unknown = sorted((set(set_values) | set(clear_values)) - known_fields)
+                overlap = sorted(set(set_values) & set(clear_values))
+                if unknown or overlap or any(value is None for value in set_values.values()):
+                    detail = (
+                        f"unknown properties: {', '.join(unknown)}"
+                        if unknown
+                        else f"properties both set and cleared: {', '.join(overlap)}"
+                        if overlap
+                        else "set values cannot be null"
+                    )
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=f"Invalid style.format {scope_name}: {detail}.",
+                            suggested_actions=[
+                                {
+                                    "action": "inspect_style_schema",
+                                    "properties": sorted(known_fields),
+                                }
+                            ],
+                        )
+                    )
+                before_values = deepcopy(style_payload.get(field_name, {}))
+                candidate = {**before_values, **deepcopy(set_values)}
+                for property_name in clear_values:
+                    candidate.pop(property_name, None)
+                try:
+                    normalized = model_type.model_validate(candidate).model_dump(
+                        mode="json",
+                        exclude_none=True,
+                    )
+                except ValidationError as error:
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=f"style.format {scope_name} has invalid values.",
+                            suggested_actions=[
+                                {
+                                    "action": "fix_style",
+                                    "diagnostics": [
+                                        item.model_dump(mode="json")
+                                        for item in _validation_error_diagnostics(error)
+                                    ],
+                                }
+                            ],
+                        )
+                    ) from error
+                if normalized:
+                    style_payload[field_name] = normalized
+                else:
+                    style_payload.pop(field_name, None)
+                for property_name in sorted(set(set_values) | set(clear_values)):
+                    if before_values.get(property_name) != normalized.get(property_name):
+                        property_changes.append(
+                            {
+                                "path": f"{field_name}.{property_name}",
+                                "before": before_values.get(property_name),
+                                "after": normalized.get(property_name),
+                            }
+                        )
+                changed = True
+            if not changed:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="style.format requires paragraph or text changes.",
+                    )
+                )
+            try:
+                normalized_style = NamedStyle.model_validate(style_payload)
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="style.format produced an invalid named style.",
+                    )
+                ) from error
+            payload["styles"][style_index] = normalized_style.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+            return {
+                "operation": "style.format",
+                "style_ids": [style_id],
+                "property_changes": property_changes,
+            }
+
         if operation_name == "text.replace":
             _, node = Document._find_node(payload, operation.get("target"))
             unexpected = sorted(
@@ -1174,7 +1753,8 @@ class Document:
                 message=(
                     f"Unsupported operation {operation_name!r}; AiOffice supports "
                     "text.replace, paragraph.format, text.format, node.append, "
-                    "node.insert_after, node.remove, and node.update."
+                    "node.insert_after, node.remove, node.update, style.apply, "
+                    "style.define, and style.format."
                 ),
                 suggested_actions=[{"action": "use_supported_operation"}],
             )

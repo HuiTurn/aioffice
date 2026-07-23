@@ -9,12 +9,16 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from aioffice.core.diagnostics import Diagnostic
+from aioffice.core.diagnostics import Diagnostic, Severity
 from aioffice.core.errors import NativePackageError
 from aioffice.formats.docx_style import (
     common_text_style,
     read_paragraph_style,
     read_text_style,
+)
+from aioffice.formats.docx_named_styles import (
+    read_document_defaults,
+    read_named_styles,
 )
 from aioffice.native import (
     FidelityPolicy,
@@ -28,7 +32,7 @@ from aioffice.native import (
 )
 from aioffice.native.xml import parse_xml
 from aioffice.security import SecurityPolicy
-from aioffice.spec.models import AiOfficeDocumentSpec
+from aioffice.spec.models import AiOfficeDocumentSpec, NamedStyle
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
@@ -174,6 +178,7 @@ def _paragraph_projection(
     index: int,
     seen_ids: set[str],
     hyperlink_targets: dict[str, str],
+    named_styles: dict[str, NamedStyle],
 ) -> dict[str, Any]:
     text_projection, text_style = _text_projection(element, hyperlink_targets)
     text = _paragraph_text(element)
@@ -181,7 +186,15 @@ def _paragraph_projection(
     node_id = _unique_id("para", para_id, index, seen_ids)
     style = element.find(f"./{_q(W, 'pPr')}/{_q(W, 'pStyle')}")
     style_id = style.attrib.get(_q(W, "val"), "") if style is not None else ""
-    heading_match = re.fullmatch(r"Heading([1-6])", style_id, flags=re.IGNORECASE)
+    named_style = named_styles.get(style_id)
+    heading_level = (
+        named_style.heading_level
+        if named_style is not None
+        and named_style.semantic_role == "heading"
+        and named_style.heading_level is not None
+        and named_style.heading_level <= 6
+        else None
+    )
     native_features: list[str] = []
     if element.find(f".//{_q(W, 'drawing')}") is not None:
         native_features.append("drawing")
@@ -200,6 +213,12 @@ def _paragraph_projection(
             "native_features": native_features,
         },
     }
+    implicit_heading_style = (
+        heading_level is not None
+        and style_id.casefold() == f"Heading{heading_level}".casefold()
+    )
+    if style_id and not implicit_heading_style:
+        common["style_ref"] = style_id
     paragraph_style = read_paragraph_style(element)
     if paragraph_style is not None:
         common["paragraph_style"] = paragraph_style.model_dump(
@@ -208,11 +227,11 @@ def _paragraph_projection(
         )
     if text_style is not None:
         common["text_style"] = text_style
-    if heading_match:
+    if heading_level is not None:
         return {
             **common,
             "type": "heading",
-            "level": int(heading_match.group(1)),
+            "level": heading_level,
             **text_projection,
         }
     if not text and native_features:
@@ -461,6 +480,26 @@ def import_docx(
     body_elements = list(body)
     numbering_formats = _numbering_formats(package)
     hyperlink_targets = _hyperlink_targets(package)
+    try:
+        styles_root = parse_xml(package.get_part("/word/styles.xml"))
+    except NativePackageError:
+        styles_root = None
+    raw_projected_styles = (
+        read_named_styles(styles_root) if styles_root is not None else []
+    )
+    projected_styles: list[NamedStyle] = []
+    projected_style_ids: set[str] = set()
+    duplicate_style_ids: set[str] = set()
+    for style in raw_projected_styles:
+        if style.id in projected_style_ids:
+            duplicate_style_ids.add(style.id)
+            continue
+        projected_style_ids.add(style.id)
+        projected_styles.append(style)
+    named_styles = {style.id: style for style in projected_styles}
+    document_defaults = (
+        read_document_defaults(styles_root) if styles_root is not None else None
+    )
     index = 0
     while index < len(body_elements):
         element = body_elements[index]
@@ -498,6 +537,7 @@ def import_docx(
                         index,
                         seen_ids,
                         hyperlink_targets,
+                        named_styles,
                     )
                 )
         elif element.tag == _q(W, "tbl"):
@@ -525,7 +565,21 @@ def import_docx(
         active_identity_manifest = _embedded_identity_manifest(package)
         if active_identity_manifest is not None:
             identity_source = "embedded"
-    diagnostics: list[Diagnostic] = []
+    diagnostics: list[Diagnostic] = [
+        Diagnostic(
+            severity=Severity.WARNING,
+            code="STYLE_PROJECTION_AMBIGUOUS",
+            message=(
+                f"Native DOCX contains duplicate paragraph style ID {style_id!r}; "
+                "the first definition is projected and all native definitions are preserved."
+            ),
+            recoverable=True,
+            suggested_actions=[
+                {"action": "repair_duplicate_native_style", "style_id": style_id}
+            ],
+        )
+        for style_id in sorted(duplicate_style_ids)
+    ]
     if active_identity_manifest is not None:
         if active_identity_manifest.format != "docx":
             raise NativePackageError("Identity manifest format does not match DOCX input.")
@@ -551,7 +605,16 @@ def import_docx(
                 ),
             },
             "metadata": _core_metadata(package),
-            "theme": {"ref": "business-clean"},
+            "theme": {"ref": "native-docx"},
+            "defaults": (
+                document_defaults.model_dump(mode="json", exclude_none=True)
+                if document_defaults is not None
+                else {}
+            ),
+            "styles": [
+                style.model_dump(mode="json", exclude_none=True)
+                for style in projected_styles
+            ],
             "content": content,
             "extensions": {
                 "dev.aioffice.native": {

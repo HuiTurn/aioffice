@@ -34,6 +34,39 @@ and conflicting first-line/hanging indents fail validation. `set` changes select
 properties; `clear` removes direct formatting so the native named style or document
 default can take effect again.
 
+## Named styles and inheritance
+
+`defaults` and `styles` are first-class Spec fields. A paragraph or heading uses
+`style_ref` to address a reusable definition by stable style ID. The effective
+formatting order is deterministic:
+
+```text
+theme defaults
+  → document defaults
+  → named style based_on chain
+  → node paragraph_style / text_style
+  → TextSpan style
+```
+
+A `NamedStyle` declares a human name, semantic role, optional heading level,
+`based_on`, `next_style`, paragraph properties, text properties, and UI visibility
+hints. Missing references, inheritance cycles, and a heading style applied to an
+incompatible semantic node produce stable validation diagnostics.
+
+Three atomic Patch operations are available:
+
+- `style.define` creates a complete style definition;
+- `style.apply` applies or clears a node style reference and keeps heading
+  role/level consistent;
+- `style.format` sets or clears selected paragraph/text properties on a style
+  without replacing the rest of its definition.
+
+For generated DOCX, the theme and local catalog compile into `word/styles.xml`.
+For imported DOCX, AiOffice projects paragraph styles and `w:docDefaults` while the
+native style part remains authoritative. A native `style.format` patch changes only
+the selected supported `w:pPr` / `w:rPr` properties. Unknown attributes, extension
+elements, table/character styles, and untouched package parts remain preserved.
+
 `text.format` supports three explicit scopes:
 
 - no selector: all text runs and the paragraph mark;
@@ -53,6 +86,7 @@ imported DOCX, AiOffice projects supported direct properties into the semantic
 model. A format patch updates only the requested native properties:
 
 - paragraph alignment, spacing, line spacing, indentation, pagination controls;
+- paragraph outline level used by heading/navigation semantics;
 - font families, size, foreground/background color;
 - bold, italic, underline, strike, small/all caps;
 - character spacing and baseline.

@@ -23,6 +23,7 @@ from aioffice.formats.docx_style import (
     apply_paragraph_style,
     apply_text_style,
 )
+from aioffice.formats.docx_named_styles import upsert_named_style
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     BulletList,
@@ -36,7 +37,11 @@ from aioffice.spec.models import (
     TextStyle,
     NativeRef,
 )
-from aioffice.themes import get_theme
+from aioffice.styles import (
+    resolve_document_defaults,
+    style_catalog,
+    theme_named_styles,
+)
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
@@ -244,7 +249,7 @@ def _document_xml(
                 body,
                 spans,
                 context,
-                style=f"Heading{block.level}",
+                style=block.style_ref or f"Heading{block.level}",
                 native_anchor=_native_anchor(block.id),
                 paragraph_style=block.paragraph_style,
                 text_style=block.text_style,
@@ -262,6 +267,7 @@ def _document_xml(
                 body,
                 spans,
                 context,
+                style=block.style_ref,
                 native_anchor=_native_anchor(block.id),
                 paragraph_style=block.paragraph_style,
                 text_style=block.text_style,
@@ -340,58 +346,23 @@ def _document_xml(
 
 
 def _styles_xml(spec: AiOfficeDocumentSpec) -> bytes:
-    theme = get_theme(spec.theme.ref) or get_theme("business-clean") or {}
-    tokens = theme.get("tokens", {})
-    body_latin = tokens.get("font.body.latin", "Aptos")
-    body_east_asia = tokens.get("font.body.east_asia", "Microsoft YaHei")
-    heading_latin = tokens.get("font.heading.latin", "Aptos Display")
-    heading_east_asia = tokens.get("font.heading.east_asia", body_east_asia)
-    primary = tokens.get("color.primary", "#1F4E78").lstrip("#")
-
     root = ET.Element(_q(W, "styles"))
     defaults = _child(root, "docDefaults")
     run_default = _child(defaults, "rPrDefault")
-    run_properties = _child(run_default, "rPr")
-    _child(
-        run_properties,
-        "rFonts",
-        ascii=body_latin,
-        hAnsi=body_latin,
-        eastAsia=body_east_asia,
-    )
-    _child(run_properties, "sz", val="22")
-    _child(run_properties, "szCs", val="22")
     paragraph_default = _child(defaults, "pPrDefault")
-    paragraph_properties = _child(paragraph_default, "pPr")
-    _child(paragraph_properties, "spacing", after="160", line="276", lineRule="auto")
+    resolved_defaults = resolve_document_defaults(spec)
+    apply_text_style(run_default, resolved_defaults.text_style)
+    apply_paragraph_style(paragraph_default, resolved_defaults.paragraph_style)
 
-    normal = _child(root, "style", type="paragraph", default="1", styleId="Normal")
-    _child(normal, "name", val="Normal")
-    _child(normal, "qFormat")
-
-    sizes = {1: 36, 2: 32, 3: 28, 4: 24, 5: 22, 6: 20}
-    for level in range(1, 7):
-        style = _child(root, "style", type="paragraph", styleId=f"Heading{level}")
-        _child(style, "name", val=f"heading {level}")
-        _child(style, "basedOn", val="Normal")
-        _child(style, "next", val="Normal")
-        _child(style, "qFormat")
-        properties = _child(style, "pPr")
-        _child(properties, "keepNext")
-        _child(properties, "spacing", before=str(240 if level <= 2 else 160), after="120")
-        _child(properties, "outlineLvl", val=str(level - 1))
-        run_properties = _child(style, "rPr")
-        _child(
-            run_properties,
-            "rFonts",
-            ascii=heading_latin,
-            hAnsi=heading_latin,
-            eastAsia=heading_east_asia,
+    theme_style_ids = {style.id for style in theme_named_styles(spec.theme.ref)}
+    for named_style in style_catalog(spec).values():
+        element = upsert_named_style(
+            root,
+            named_style,
+            custom_style=named_style.id not in theme_style_ids,
         )
-        _child(run_properties, "b")
-        _child(run_properties, "color", val=primary)
-        _child(run_properties, "sz", val=str(sizes[level]))
-        _child(run_properties, "szCs", val=str(sizes[level]))
+        if named_style.id == "Normal":
+            element.set(_q(W, "default"), "1")
 
     hyperlink = _child(root, "style", type="character", styleId="Hyperlink")
     _child(hyperlink, "name", val="Hyperlink")

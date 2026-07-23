@@ -13,7 +13,13 @@ from aioffice.core.errors import NativePackageError
 from aioffice.formats.docx_style import (
     patch_paragraph_mark_text_style,
     patch_paragraph_style,
+    patch_paragraph_style_ref,
     patch_text_style,
+)
+from aioffice.formats.docx_named_styles import (
+    find_named_style,
+    format_named_style,
+    upsert_named_style,
 )
 from aioffice.native import (
     FidelityReport,
@@ -25,7 +31,14 @@ from aioffice.native import (
 )
 from aioffice.native.xml import parse_xml, serialize_xml
 from aioffice.operations.text import resolve_text_selection
-from aioffice.spec.models import AiOfficeDocumentSpec, NativeRef, ParagraphStyle, TextStyle
+from aioffice.spec.models import (
+    AiOfficeDocumentSpec,
+    Heading,
+    NamedStyle,
+    NativeRef,
+    ParagraphStyle,
+    TextStyle,
+)
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 XML = "http://www.w3.org/XML/1998/namespace"
@@ -290,12 +303,16 @@ def apply_docx_operations(
         "paragraph.format",
         "text.format",
         "node.remove",
+        "style.apply",
+        "style.define",
+        "style.format",
     }
     unsupported = sorted({str(operation.get("op")) for operation in operations} - supported)
     if unsupported:
         raise NativePackageError(
             "Imported DOCX V0.2 currently supports native lowering for "
-            "text.replace, paragraph.format, text.format, and node.remove; "
+            "text.replace, paragraph.format, text.format, node.remove, "
+            "style.apply, style.define, and style.format; "
             f"unsupported: {', '.join(unsupported)}."
         )
 
@@ -304,6 +321,20 @@ def apply_docx_operations(
     body = root.find(_q(W, "body"))
     if body is None:
         raise NativePackageError("DOCX main document part has no w:body.")
+    style_operations = {
+        "style.apply",
+        "style.define",
+        "style.format",
+    }.intersection(str(operation.get("op")) for operation in operations)
+    styles_root: ET.Element | None = None
+    styles_changed = False
+    document_changed = False
+    if style_operations:
+        if not updated.has_part("/word/styles.xml"):
+            raise NativePackageError(
+                "Native DOCX has no /word/styles.xml part for named-style editing."
+            )
+        styles_root = parse_xml(updated.get_part("/word/styles.xml"))
     original_elements = list(body)
     source_elements: dict[str, list[ET.Element]] = {}
     for node in spec.content:
@@ -319,13 +350,92 @@ def apply_docx_operations(
             source_elements[node.id] = [original_elements[index] for index in indices]
 
     for operation in operations:
+        operation_name = operation.get("op")
+        if operation_name == "style.define":
+            assert styles_root is not None
+            try:
+                named_style = NamedStyle.model_validate(operation.get("style"))
+            except ValidationError as error:
+                raise NativePackageError(
+                    f"Could not lower style.define values: {error}"
+                ) from error
+            if find_named_style(styles_root, named_style.id) is not None:
+                raise NativePackageError(
+                    f"Native DOCX paragraph style {named_style.id!r} already exists."
+                )
+            upsert_named_style(styles_root, named_style, custom_style=True)
+            styles_changed = True
+            continue
+        if operation_name == "style.format":
+            assert styles_root is not None
+            paragraph_scope = operation.get("paragraph", {})
+            text_scope = operation.get("text", {})
+            paragraph_set = paragraph_scope.get("set", {})
+            paragraph_fields = set(paragraph_set) | set(
+                paragraph_scope.get("clear", [])
+            )
+            text_set = text_scope.get("set", {})
+            text_fields = set(text_set) | set(text_scope.get("clear", []))
+            try:
+                paragraph_style = ParagraphStyle.model_validate(paragraph_set)
+                text_style = TextStyle.model_validate(text_set)
+            except ValidationError as error:
+                raise NativePackageError(
+                    f"Could not lower style.format values: {error}"
+                ) from error
+            raw_target = operation.get("target")
+            if not isinstance(raw_target, str) or not raw_target:
+                raise NativePackageError("style.format requires a named style ID.")
+            style_id = raw_target
+            if (
+                find_named_style(styles_root, style_id) is None
+                and raw_target.startswith("@")
+            ):
+                style_id = raw_target[1:]
+            format_named_style(
+                styles_root,
+                style_id,
+                paragraph_style=paragraph_style,
+                paragraph_fields=paragraph_fields,
+                text_style=text_style,
+                text_fields=text_fields,
+            )
+            styles_changed = True
+            continue
+
         source_ref = _find_source_ref(spec, operation.get("target"))
         indices = _source_indices(source_ref)
         if any(index >= len(original_elements) for index in indices):
             raise NativePackageError("DOCX source reference points outside w:body.")
         elements = [original_elements[index] for index in indices]
-        operation_name = operation.get("op")
-        if operation_name == "text.replace":
+        if operation_name == "style.apply":
+            if len(elements) != 1 or elements[0].tag != _q(W, "p"):
+                raise NativePackageError(
+                    "style.apply requires a native reference to one w:p element."
+                )
+            style_ref = operation.get("style_ref")
+            native_style_ref = style_ref
+            if native_style_ref is None:
+                target_id = _target_id(operation.get("target"))
+                result_node = next(
+                    (node for node in result_spec.content if node.id == target_id),
+                    None,
+                )
+                if isinstance(result_node, Heading):
+                    native_style_ref = f"Heading{result_node.level}"
+            if native_style_ref is not None:
+                if not isinstance(native_style_ref, str) or not native_style_ref:
+                    raise NativePackageError(
+                        "style.apply style_ref must be a non-empty string or null."
+                    )
+                assert styles_root is not None
+                if find_named_style(styles_root, native_style_ref) is None:
+                    raise NativePackageError(
+                        f"Native DOCX has no paragraph style {native_style_ref!r}."
+                    )
+            patch_paragraph_style_ref(elements[0], native_style_ref)
+            document_changed = True
+        elif operation_name == "text.replace":
             if len(elements) != 1:
                 raise NativePackageError(
                     "text.replace requires a native reference to exactly one element."
@@ -342,6 +452,7 @@ def apply_docx_operations(
                 replacement,
                 replace_all=bool(operation.get("replace_all", False)),
             )
+            document_changed = True
         elif operation_name == "paragraph.format":
             if len(elements) != 1 or elements[0].tag != _q(W, "p"):
                 raise NativePackageError(
@@ -355,6 +466,7 @@ def apply_docx_operations(
                     f"Could not lower paragraph.format values: {error}"
                 ) from error
             patch_paragraph_style(elements[0], style, fields)
+            document_changed = True
         elif operation_name == "text.format":
             if len(elements) != 1 or elements[0].tag != _q(W, "p"):
                 raise NativePackageError(
@@ -389,11 +501,13 @@ def apply_docx_operations(
                     style=style,
                     fields=fields,
                 )
+            document_changed = True
         elif operation_name == "node.remove":
             for element in elements:
                 if element not in list(body):
                     raise NativePackageError("DOCX node has already been removed by this patch.")
                 body.remove(element)
+            document_changed = True
 
     current_indices = {id(element): index for index, element in enumerate(list(body))}
     identity_updates: dict[str, NativeRef] = {}
@@ -415,7 +529,11 @@ def apply_docx_operations(
             native_id=original_ref.native_id,
         )
 
-    updated.set_part("/word/document.xml", serialize_xml(root))
+    if document_changed:
+        updated.set_part("/word/document.xml", serialize_xml(root))
+    if styles_changed:
+        assert styles_root is not None
+        updated.set_part("/word/styles.xml", serialize_xml(styles_root))
     if updated.has_part(MANIFEST_PART_URI):
         manifest_spec = result_spec.model_copy(deep=True)
         for node in manifest_spec.content:

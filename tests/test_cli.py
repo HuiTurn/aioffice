@@ -23,6 +23,14 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(schema["properties"]["start"]["minimum"], 0)
 
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(main(["schema", "--kind", "named-style"]), 0)
+        named_style_schema = json.loads(stdout.getvalue())
+        self.assertFalse(named_style_schema["additionalProperties"])
+        self.assertIn("semantic_role", named_style_schema["properties"])
+        self.assertIn("based_on", named_style_schema["properties"])
+
     def test_build_validate_inspect_and_apply(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -57,6 +65,9 @@ class CliTests(unittest.TestCase):
                     "paragraph.format",
                     "text.format",
                     "node.remove",
+                    "style.apply",
+                    "style.define",
+                    "style.format",
                 ],
             )
             self.assertEqual(

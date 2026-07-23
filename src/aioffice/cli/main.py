@@ -12,7 +12,7 @@ from aioffice._version import __version__
 from aioffice.core.errors import AiOfficeError
 from aioffice.documents import DocumentBuilder, open_artifact
 from aioffice.operations import TextMatch, TextRange
-from aioffice.spec.models import AiOfficeDocumentSpec
+from aioffice.spec.models import AiOfficeDocumentSpec, DocumentDefaults, NamedStyle
 from aioffice.workspace import Workspace
 
 
@@ -72,7 +72,13 @@ def _build_parser() -> argparse.ArgumentParser:
     schema.add_argument("-o", "--output", type=Path)
     schema.add_argument(
         "--kind",
-        choices=("document", "text-range", "text-match"),
+        choices=(
+            "document",
+            "document-defaults",
+            "named-style",
+            "text-range",
+            "text-match",
+        ),
         default="document",
         help="Select the strict model whose JSON Schema is printed.",
     )
@@ -315,6 +321,8 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "schema":
         schema_models = {
             "document": AiOfficeDocumentSpec,
+            "document-defaults": DocumentDefaults,
+            "named-style": NamedStyle,
             "text-range": TextRange,
             "text-match": TextMatch,
         }

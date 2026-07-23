@@ -16,7 +16,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.3"
+SPEC_VERSION = "0.2-draft.4"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -97,6 +97,25 @@ class LineSpacing(StrictModel):
 
 
 HexColor = Annotated[str, StringConstraints(pattern=r"^#[0-9A-Fa-f]{6}$")]
+StyleId = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=255,
+        pattern=r"^[^\x00-\x1F\x7F]+$",
+    ),
+]
+SemanticStyleRole = Literal[
+    "body",
+    "title",
+    "subtitle",
+    "heading",
+    "quote",
+    "caption",
+    "code",
+    "list",
+    "custom",
+]
 
 
 class ParagraphStyle(StrictModel):
@@ -114,6 +133,7 @@ class ParagraphStyle(StrictModel):
     keep_together: bool | None = None
     page_break_before: bool | None = None
     widow_control: bool | None = None
+    outline_level: int | None = Field(default=None, ge=1, le=9, strict=True)
 
     @model_validator(mode="after")
     def validate_indentation(self) -> "ParagraphStyle":
@@ -163,6 +183,51 @@ class TextStyle(StrictModel):
         if value is not None and value.to_points() <= 0:
             raise ValueError("font_size must be greater than zero.")
         return value
+
+
+class DocumentDefaults(StrictModel):
+    """Formatting inherited before named styles and direct node formatting."""
+
+    paragraph_style: ParagraphStyle | None = None
+    text_style: TextStyle | None = None
+
+
+class NamedStyle(StrictModel):
+    """An AI-addressable paragraph style with an explicit inheritance contract."""
+
+    id: StyleId
+    name: str = Field(min_length=1, max_length=255)
+    kind: Literal["paragraph"] = "paragraph"
+    semantic_role: SemanticStyleRole = "custom"
+    heading_level: int | None = Field(default=None, ge=1, le=9, strict=True)
+    based_on: StyleId | None = None
+    next_style: StyleId | None = None
+    paragraph_style: ParagraphStyle | None = None
+    text_style: TextStyle | None = None
+    quick_style: bool | None = None
+    hidden: bool | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_semantic_role(self) -> "NamedStyle":
+        if self.semantic_role == "heading" and self.heading_level is None:
+            raise ValueError("A heading named style must include heading_level.")
+        if self.semantic_role != "heading" and self.heading_level is not None:
+            raise ValueError("heading_level is only valid for semantic_role='heading'.")
+        outline_level = (
+            self.paragraph_style.outline_level
+            if self.paragraph_style is not None
+            else None
+        )
+        if outline_level is not None and (
+            self.semantic_role != "heading" or self.heading_level != outline_level
+        ):
+            raise ValueError(
+                "A named style outline_level must match its semantic heading_level."
+            )
+        if self.based_on == self.id:
+            raise ValueError("A named style cannot be based on itself.")
+        return self
 
 
 class ArtifactDescriptor(StrictModel):
@@ -255,6 +320,7 @@ class Heading(NodeBase):
     level: int = Field(default=1, ge=1, le=6)
     text: str | None = None
     content: list[TextSpan] = Field(default_factory=list)
+    style_ref: StyleId | None = None
     paragraph_style: ParagraphStyle | None = None
     text_style: TextStyle | None = None
 
@@ -278,6 +344,7 @@ class Paragraph(NodeBase):
     type: Literal["paragraph"] = "paragraph"
     text: str | None = None
     content: list[TextSpan] = Field(default_factory=list)
+    style_ref: StyleId | None = None
     paragraph_style: ParagraphStyle | None = None
     text_style: TextStyle | None = None
 
@@ -365,11 +432,14 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.1",
         "0.2-draft.2",
         "0.2-draft.3",
+        "0.2-draft.4",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)
     metadata: DocumentMetadata = Field(default_factory=DocumentMetadata)
     theme: ThemeRef = Field(default_factory=ThemeRef)
+    defaults: DocumentDefaults = Field(default_factory=DocumentDefaults)
+    styles: list[NamedStyle] = Field(default_factory=list)
     content: list[Block] = Field(default_factory=list)
     assets: list[AssetRef] = Field(default_factory=list)
     extensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -385,3 +455,10 @@ class AiOfficeDocumentSpec(StrictModel):
                     f"Extension namespace {namespace!r} must be a reverse-domain name."
                 )
         return value
+
+    @model_validator(mode="after")
+    def validate_named_styles(self) -> "AiOfficeDocumentSpec":
+        style_ids = [style.id for style in self.styles]
+        if len(style_ids) != len(set(style_ids)):
+            raise ValueError("Named style IDs must be unique.")
+        return self

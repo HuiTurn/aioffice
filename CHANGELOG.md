@@ -22,12 +22,20 @@
   atomic refusal when a partial selection crosses unsupported inline content.
 - Added rich run-style and hyperlink projection for imported paragraphs and headings.
 - Added cross-span semantic text replacement and rich heading content.
+- Added document defaults and AI-addressable named paragraph styles with explicit
+  semantic roles, inheritance, heading levels, and stable references.
+- Added `style.define`, `style.apply`, and selective `style.format` operations for
+  semantic and native DOCX documents.
+- Added native `w:docDefaults` / `w:style` projection and minimal `styles.xml`
+  mutation that preserves unknown style XML.
+- Added inherited named-style rendering in semantic HTML and compact style discovery
+  through inspect/capabilities.
 - Added stable semantic document diffs and per-property format Patch results.
 - Added render contracts that distinguish approximate previews from native evidence.
 - Added optional PNG visual-regression metrics for future native render providers.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.3`.
+- Advanced the AiOffice Document Spec to `0.2-draft.4`.
 
 ## 0.1.0
 

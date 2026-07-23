@@ -197,6 +197,14 @@ def read_paragraph_style(paragraph: ET.Element) -> ParagraphStyle | None:
         value = _bool_property(properties, native_name)
         if value is not None:
             values[field_name] = value
+    outline = properties.find(_q("outlineLvl"))
+    if outline is not None:
+        try:
+            native_level = int(outline.attrib[_q("val")])
+        except (KeyError, ValueError):
+            native_level = -1
+        if 0 <= native_level <= 8:
+            values["outline_level"] = native_level + 1
     return ParagraphStyle.model_validate(values) if values else None
 
 
@@ -375,6 +383,33 @@ def patch_paragraph_style(
                 getattr(values, field_name),
                 _PPR_ORDER,
             )
+    if "outline_level" in selected:
+        value = values.outline_level
+        if value is None:
+            _remove_child(properties, "outlineLvl")
+        else:
+            child = _ensure_ordered_child(properties, "outlineLvl", _PPR_ORDER)
+            child.set(_q("val"), str(value - 1))
+    _remove_if_empty(paragraph, properties)
+
+
+def patch_paragraph_style_ref(
+    paragraph: ET.Element,
+    style_id: str | None,
+) -> None:
+    """Set or clear exactly the native ``w:pStyle`` reference."""
+
+    properties = paragraph.find(_q("pPr"))
+    if properties is None:
+        if style_id is None:
+            return
+        properties = ET.Element(_q("pPr"))
+        paragraph.insert(0, properties)
+    if style_id is None:
+        _remove_child(properties, "pStyle")
+    else:
+        child = _ensure_ordered_child(properties, "pStyle", _PPR_ORDER)
+        child.set(_q("val"), style_id)
     _remove_if_empty(paragraph, properties)
 
 
@@ -526,6 +561,7 @@ __all__ = [
     "common_text_style",
     "patch_paragraph_mark_text_style",
     "patch_paragraph_style",
+    "patch_paragraph_style_ref",
     "patch_text_style",
     "read_paragraph_style",
     "read_text_style",

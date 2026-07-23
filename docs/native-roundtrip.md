@@ -68,16 +68,23 @@ overwrite unless the caller explicitly opts in.
 ## Current native lowering boundary
 
 The current DOCX native layer lowers `text.replace`, `paragraph.format`,
-`text.format`, and `node.remove`. Text replacement can cross Word run boundaries
-while retaining run properties and unknown XML. Paragraph and text formatting
-mutate only selected supported `w:pPr` / `w:rPr` properties and preserve unrelated
-or unknown children. Character ranges can cross multiple runs and hyperlinks;
-boundary runs are split only around selected `w:t` content. If a partial boundary
-run contains unsupported inline children, the complete Patch is refused rather
-than duplicating or dropping them. List nodes may reference multiple native
-paragraphs, and removing a list removes that complete native range atomically.
+`text.format`, `node.remove`, `style.define`, `style.apply`, and `style.format`.
+Text replacement can cross Word run boundaries while retaining run properties and
+unknown XML. Paragraph and text formatting mutate only selected supported
+`w:pPr` / `w:rPr` properties and preserve unrelated or unknown children. Character
+ranges can cross multiple runs and hyperlinks; boundary runs are split only around
+selected `w:t` content. If a partial boundary run contains unsupported inline
+children, the complete Patch is refused rather than duplicating or dropping them.
+List nodes may reference multiple native paragraphs, and removing a list removes
+that complete native range atomically.
+
+Paragraph `w:pStyle` references, supported paragraph style definitions,
+`basedOn`/`next` links, `w:docDefaults`, and heading outline semantics are projected
+into strict Spec models. Imported documents use the empty `native-docx` theme so
+AiOffice never overlays `business-clean` defaults on an existing template. Style
+edits mutate only `word/styles.xml` and, when a node reference changes, its single
+`w:pStyle`. Unknown style XML remains in place.
 
 Other operations are rejected before a new native revision is committed. Future
-iterations will add named-style editing, tables, sections, headers/footers,
-drawings, and layout-aware operations behind the same capability and fidelity
-contracts.
+iterations will add tables, sections, headers/footers, drawings, and layout-aware
+operations behind the same capability and fidelity contracts.
