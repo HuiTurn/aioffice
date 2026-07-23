@@ -672,6 +672,7 @@ def apply_docx_operations(
         "image.replace",
         "image.update",
         "node.move_after",
+        "node.move_before",
         "table.format",
         "table.column.format",
         "table.cell.format",
@@ -681,7 +682,7 @@ def apply_docx_operations(
         raise NativePackageError(
             "Imported DOCX V0.2 currently supports native lowering for "
             "text.replace, paragraph.format, text.format, node.move_after, "
-            "node.remove, "
+            "node.move_before, node.remove, "
             "style.apply, style.define, style.format, section.format, and "
             "field.update, image.insert_after, image.replace, image.update, "
             "table.format, "
@@ -1293,12 +1294,17 @@ def apply_docx_operations(
         else:
             elements, source_ref = mapped_source
             container = part_containers[source_ref.part_uri]
-        if operation_name == "node.move_after":
-            after_id = _target_id(operation.get("after"))
-            anchor_source = source_elements.get(after_id)
+        if operation_name in {"node.move_after", "node.move_before"}:
+            anchor_field = (
+                "after"
+                if operation_name == "node.move_after"
+                else "before"
+            )
+            anchor_id = _target_id(operation.get(anchor_field))
+            anchor_source = source_elements.get(anchor_id)
             if anchor_source is None:
                 raise NativePackageError(
-                    "node.move_after anchor has no mapped native elements."
+                    f"{operation_name} anchor has no mapped native elements."
                 )
             anchor_elements, anchor_ref = anchor_source
             if (
@@ -1308,7 +1314,7 @@ def apply_docx_operations(
                 or part_containers[anchor_ref.part_uri] is not body
             ):
                 raise NativePackageError(
-                    "node.move_after requires target and anchor to be "
+                    f"{operation_name} requires target and anchor to be "
                     "top-level document body nodes."
                 )
             current_elements = list(body)
@@ -1321,14 +1327,14 @@ def apply_docx_operations(
                 )
             ):
                 raise NativePackageError(
-                    "node.move_after target or anchor is no longer in "
+                    f"{operation_name} target or anchor is no longer in "
                     "the document body."
                 )
             if set(map(id, elements)).intersection(
                 map(id, anchor_elements)
             ):
                 raise NativePackageError(
-                    "node.move_after target and anchor native ranges overlap."
+                    f"{operation_name} target and anchor native ranges overlap."
                 )
 
             def contiguous_indices(
@@ -1342,7 +1348,7 @@ def apply_docx_operations(
                     range(indices[0], indices[0] + len(indices))
                 ):
                     raise NativePackageError(
-                        "node.move_after requires each mapped native range "
+                        f"{operation_name} requires each mapped native range "
                         "to remain contiguous."
                     )
                 return indices
@@ -1355,7 +1361,7 @@ def apply_docx_operations(
                 for element in [*elements, *anchor_elements]
             ):
                 raise NativePackageError(
-                    "node.move_after refuses target or anchor elements "
+                    f"{operation_name} refuses target or anchor elements "
                     "that carry a native section boundary."
                 )
             for element in elements:
@@ -1365,7 +1371,11 @@ def apply_docx_operations(
                 remaining.index(element)
                 for element in anchor_elements
             ]
-            insert_index = max(anchor_indices) + 1
+            insert_index = (
+                max(anchor_indices) + 1
+                if anchor_field == "after"
+                else min(anchor_indices)
+            )
             for offset, element in enumerate(elements):
                 body.insert(insert_index + offset, element)
             moved_nodes.add(target_id)

@@ -969,6 +969,7 @@ class Document:
             "node.append",
             "node.insert_after",
             "node.move_after",
+            "node.move_before",
             "node.remove",
             "node.update",
             "style.apply",
@@ -986,6 +987,7 @@ class Document:
                 "paragraph.format",
                 "text.format",
                 "node.move_after",
+                "node.move_before",
                 "node.remove",
                 "style.apply",
                 "style.define",
@@ -1005,6 +1007,7 @@ class Document:
                 operations.append("image.update")
         elif detached_native_projection:
             operations.remove("node.move_after")
+            operations.remove("node.move_before")
         ambiguous_node_ids = sorted(
             {
                 node_id
@@ -1329,12 +1332,21 @@ class Document:
             "structural_editing": {
                 "available": not detached_native_projection,
                 "move_operation": "node.move_after",
+                "move_operations": {
+                    "after": "node.move_after",
+                    "before": "node.move_before",
+                },
                 "selectors": "stable_top_level_content_ids",
                 "position": "after_complete_anchor_range",
+                "positions": [
+                    "after_complete_anchor_range",
+                    "before_complete_anchor_range",
+                ],
                 "native_scope": "word_document_body_top_level",
                 "multi_element_nodes": "move_as_one_contiguous_group",
                 "section_policy": "same_section_only",
                 "section_start_anchor_movable": False,
+                "prepend_to_section": "rebind_section_start_at",
                 "native_section_carrier_movable": False,
                 "third_party_identity_manifest": (
                     "attach_on_first_successful_structural_edit"
@@ -2763,7 +2775,8 @@ class Document:
             )
             == "native"
             and any(
-                operation.get("op") == "node.move_after"
+                operation.get("op")
+                in {"node.move_after", "node.move_before"}
                 for operation in operations
             )
         )
@@ -2772,9 +2785,10 @@ class Document:
                 severity=Severity.ERROR,
                 code="UNSUPPORTED_FEATURE",
                 message=(
-                    "node.move_after requires the attached native DOCX package "
-                    "for a native-authority projection; detached JSON cannot "
-                    "prove or relocate the complete XML element range."
+                    "node.move_after and node.move_before require the attached "
+                    "native DOCX package for a native-authority projection; "
+                    "detached JSON cannot prove or relocate the complete XML "
+                    "element range."
                 ),
                 node_ids=[self.id],
                 suggested_actions=[
@@ -5242,17 +5256,22 @@ class Document:
                 "created_nodes": [candidate["id"]],
             }
 
-        if operation_name == "node.move_after":
+        if operation_name in {"node.move_after", "node.move_before"}:
+            anchor_field = (
+                "after"
+                if operation_name == "node.move_after"
+                else "before"
+            )
             unexpected = sorted(
-                set(operation) - {"op", "target", "after"}
+                set(operation) - {"op", "target", anchor_field}
             )
             target_index, target_node = Document._find_content_node(
                 payload,
                 operation.get("target"),
             )
-            after_index, after_node = Document._find_content_node(
+            anchor_index, anchor_node = Document._find_content_node(
                 payload,
-                operation.get("after"),
+                operation.get(anchor_field),
             )
             if unexpected:
                 raise _PatchFailure(
@@ -5260,36 +5279,41 @@ class Document:
                         severity=Severity.ERROR,
                         code="INVALID_SPEC",
                         message=(
-                            "node.move_after received unknown fields: "
+                            f"{operation_name} received unknown fields: "
                             f"{', '.join(unexpected)}."
                         ),
                         node_ids=[target_node["id"]],
                     )
                 )
-            if target_node["id"] == after_node["id"]:
+            if target_node["id"] == anchor_node["id"]:
                 raise _PatchFailure(
                     Diagnostic(
                         severity=Severity.ERROR,
                         code="INVALID_SPEC",
                         message=(
-                            "node.move_after target and after must be "
-                            "different nodes."
+                            f"{operation_name} target and {anchor_field} "
+                            "must be different nodes."
                         ),
                         node_ids=[target_node["id"]],
                     )
                 )
-            if target_index == after_index + 1:
+            already_positioned = (
+                target_index == anchor_index + 1
+                if anchor_field == "after"
+                else target_index + 1 == anchor_index
+            )
+            if already_positioned:
                 raise _PatchFailure(
                     Diagnostic(
                         severity=Severity.ERROR,
                         code="NO_CHANGES",
                         message=(
                             f"Node {target_node['id']!r} is already immediately "
-                            f"after {after_node['id']!r}."
+                            f"{anchor_field} {anchor_node['id']!r}."
                         ),
                         node_ids=[
                             target_node["id"],
-                            after_node["id"],
+                            anchor_node["id"],
                         ],
                         suggested_actions=[
                             {"action": "choose_different_anchor"}
@@ -5334,7 +5358,7 @@ class Document:
                         severity=Severity.ERROR,
                         code="UNSUPPORTED_FEATURE",
                         message=(
-                            "node.move_after cannot move a node that anchors "
+                            f"{operation_name} cannot move a node that anchors "
                             "the start of a document section."
                         ),
                         node_ids=[target_node["id"]],
@@ -5344,20 +5368,20 @@ class Document:
                     )
                 )
             target_section = section_for(target_index)
-            after_section = section_for(after_index)
-            if target_section != after_section:
+            anchor_section = section_for(anchor_index)
+            if target_section != anchor_section:
                 raise _PatchFailure(
                     Diagnostic(
                         severity=Severity.ERROR,
                         code="CROSS_SECTION_MOVE_UNSUPPORTED",
                         message=(
-                            "node.move_after currently preserves section "
+                            f"{operation_name} currently preserves section "
                             "semantics by requiring target and anchor to be "
                             "in the same section."
                         ),
                         node_ids=[
                             target_node["id"],
-                            after_node["id"],
+                            anchor_node["id"],
                         ],
                         suggested_actions=[
                             {
@@ -5367,6 +5391,10 @@ class Document:
                         ],
                     )
                 )
+            rebind_section_start = (
+                anchor_field == "before"
+                and anchor_node["id"] in section_anchor_ids
+            )
 
             previous_after = (
                 payload["content"][target_index - 1]["id"]
@@ -5374,19 +5402,37 @@ class Document:
                 else None
             )
             moved = payload["content"].pop(target_index)
-            new_after_index, _ = Document._find_content_node(
+            new_anchor_index, _ = Document._find_content_node(
                 payload,
-                after_node["id"],
+                anchor_node["id"],
             )
             moved["revision_updated"] = next_revision
-            payload["content"].insert(new_after_index + 1, moved)
-            return {
-                "operation": "node.move_after",
+            insert_index = (
+                new_anchor_index + 1
+                if anchor_field == "after"
+                else new_anchor_index
+            )
+            payload["content"].insert(insert_index, moved)
+            section_start_change: dict[str, Any] | None = None
+            if rebind_section_start:
+                section = payload["sections"][anchor_section]
+                section_start_change = {
+                    "section_id": section["id"],
+                    "from": anchor_node["id"],
+                    "to": target_node["id"],
+                }
+                section["start_at"] = target_node["id"]
+                section["revision_updated"] = next_revision
+            change = {
+                "operation": operation_name,
                 "moved_nodes": [target_node["id"]],
                 "from_after": previous_after,
-                "after": after_node["id"],
                 "section_index": target_section,
             }
+            change[anchor_field] = anchor_node["id"]
+            if section_start_change is not None:
+                change["section_start_updated"] = section_start_change
+            return change
 
         if operation_name == "node.remove":
             index, node = Document._find_content_node(
@@ -5436,7 +5482,8 @@ class Document:
                 message=(
                     f"Unsupported operation {operation_name!r}; AiOffice supports "
                     "text.replace, paragraph.format, text.format, node.append, "
-                    "node.insert_after, node.move_after, node.remove, "
+                    "node.insert_after, node.move_after, node.move_before, "
+                    "node.remove, "
                     "node.update, style.apply, "
                     "style.define, style.format, section.format, field.update, "
                     "image.insert_after, image.replace, image.update, "

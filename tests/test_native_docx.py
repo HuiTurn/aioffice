@@ -221,15 +221,19 @@ class NativeDocxTests(unittest.TestCase):
             "node.move_after",
             detached.capabilities()["operations"],
         )
+        self.assertNotIn(
+            "node.move_before",
+            detached.capabilities()["operations"],
+        )
         self.assertFalse(
             detached.capabilities()["structural_editing"]["available"]
         )
         detached_move = detached.apply(
             [
                 {
-                    "op": "node.move_after",
-                    "target": "#a",
-                    "after": "#c",
+                    "op": "node.move_before",
+                    "target": "#c",
+                    "before": "#a",
                 }
             ]
         )
@@ -264,9 +268,9 @@ class NativeDocxTests(unittest.TestCase):
                     "after": "#c",
                 },
                 {
-                    "op": "node.move_after",
+                    "op": "node.move_before",
                     "target": "#d",
-                    "after": "#b",
+                    "before": "#b",
                 },
             ]
         )
@@ -282,7 +286,7 @@ class NativeDocxTests(unittest.TestCase):
                 node["id"]
                 for node in result.document.to_spec()["content"]
             ],
-            ["b", "d", "c", "a"],
+            ["d", "b", "c", "a"],
         )
         output = result.document.to_bytes("docx")
         with (
@@ -314,7 +318,7 @@ class NativeDocxTests(unittest.TestCase):
         reopened_spec = reopened.to_spec()
         self.assertEqual(
             [node["id"] for node in reopened_spec["content"]],
-            ["b", "d", "c", "a"],
+            ["d", "b", "c", "a"],
         )
         self.assertEqual(
             [
@@ -324,7 +328,7 @@ class NativeDocxTests(unittest.TestCase):
             [0, 1, 2, 3],
         )
 
-    def test_native_move_after_keeps_multi_paragraph_list_contiguous(
+    def test_native_move_keeps_multi_paragraph_list_contiguous(
         self,
     ) -> None:
         source = (
@@ -355,9 +359,9 @@ class NativeDocxTests(unittest.TestCase):
         result = document.apply(
             [
                 {
-                    "op": "node.move_after",
+                    "op": "node.move_before",
                     "target": "#steps",
-                    "after": "#after",
+                    "before": "#before",
                 }
             ]
         )
@@ -368,7 +372,7 @@ class NativeDocxTests(unittest.TestCase):
                 node["id"]
                 for node in result.document.to_spec()["content"]
             ],
-            ["before", "middle", "after", "steps"],
+            ["steps", "before", "middle", "after"],
         )
         moved_steps = next(
             node
@@ -377,7 +381,7 @@ class NativeDocxTests(unittest.TestCase):
         )
         self.assertEqual(
             moved_steps["source_ref"]["element_indices"],
-            [3, 4],
+            [0, 1],
         )
         output = result.document.to_bytes("docx")
         output_root = parse_xml(
@@ -398,12 +402,12 @@ class NativeDocxTests(unittest.TestCase):
                 node["id"]
                 for node in reopened.to_spec()["content"]
             ],
-            ["before", "middle", "after", "steps"],
+            ["steps", "before", "middle", "after"],
         )
-        reopened_steps = reopened.to_spec()["content"][-1]
+        reopened_steps = reopened.to_spec()["content"][0]
         self.assertEqual(
             reopened_steps["source_ref"]["element_indices"],
-            [3, 4],
+            [0, 1],
         )
 
     def test_native_move_after_protects_section_carriers(self) -> None:
@@ -531,9 +535,9 @@ class NativeDocxTests(unittest.TestCase):
         successful = document.apply(
             [
                 {
-                    "op": "node.move_after",
+                    "op": "node.move_before",
                     "target": ids["Conclusion"],
-                    "after": ids["Body"],
+                    "before": ids["Body"],
                 }
             ]
         )
@@ -547,8 +551,8 @@ class NativeDocxTests(unittest.TestCase):
             [
                 ids["Cover"],
                 ids["Front end"],
-                ids["Body"],
                 ids["Conclusion"],
+                ids["Body"],
                 ids["Analysis"],
             ],
         )
@@ -557,7 +561,7 @@ class NativeDocxTests(unittest.TestCase):
                 section.get("start_at")
                 for section in successful.document.to_spec()["sections"]
             ],
-            [None, ids["Body"]],
+            [None, ids["Conclusion"]],
         )
 
     def test_native_format_patch_changes_only_known_properties(self) -> None:

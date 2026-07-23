@@ -208,6 +208,7 @@ class CliTests(unittest.TestCase):
                     "paragraph.format",
                     "text.format",
                     "node.move_after",
+                    "node.move_before",
                     "node.remove",
                     "style.apply",
                     "style.define",
@@ -390,9 +391,9 @@ class CliTests(unittest.TestCase):
                 json.dumps(
                     [
                         {
-                            "op": "node.move_after",
-                            "target": "#a",
-                            "after": "#c",
+                            "op": "node.move_before",
+                            "target": "#c",
+                            "before": "#a",
                         }
                     ]
                 ),
@@ -416,7 +417,7 @@ class CliTests(unittest.TestCase):
             self.assertTrue(report["success"])
             self.assertEqual(
                 report["changes"][0]["operation"],
-                "node.move_after",
+                "node.move_before",
             )
             reopened = Document.from_docx(output)
             self.assertEqual(
@@ -424,7 +425,7 @@ class CliTests(unittest.TestCase):
                     node["id"]
                     for node in reopened.to_spec()["content"]
                 ],
-                ["b", "c", "a"],
+                ["c", "a", "b"],
             )
 
 

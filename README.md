@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev19`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev20`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -737,9 +737,9 @@ an array index:
 ```python
 result = doc.apply([
     {
-        "op": "node.move_after",
+        "op": "node.move_before",
         "target": "#risk_table",
-        "after": "#executive_summary",
+        "before": "#executive_summary",
     }
 ])
 assert result.success
@@ -747,14 +747,17 @@ assert result.success
 
 For imported DOCX, AiOffice moves the target's complete mapped XML range. A
 multi-paragraph list remains one contiguous unit, DrawingML and unknown XML stay in
-their original elements, and every native reference is reindexed. The conservative
-dev19 boundary permits moves only within one semantic section and refuses section
-start anchors or native elements carrying `w:sectPr`. See
+their original elements, and every native reference is reindexed. `node.move_after`
+and `node.move_before` cover every relative position without array indexes. The
+conservative dev20 boundary permits moves only within one semantic section, refuses
+moving a section start anchor, and rebinds `section.start_at` when prepending within
+a later section. Native elements carrying `w:sectPr` remain immovable. See
 [the structural editing contract](docs/structural-editing.md).
 
 Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
-`node.append`, `node.insert_after`, `node.move_after`, `node.remove`, `node.update`,
-`style.define`, `style.apply`, `style.format`, `section.format`, `field.update`,
+`node.append`, `node.insert_after`, `node.move_after`, `node.move_before`,
+`node.remove`, `node.update`, `style.define`, `style.apply`, `style.format`,
+`section.format`, `field.update`,
 `table.format`, `table.column.format`, and `table.cell.format`. Imported DOCX
 documents additionally expose safe native image operations reported by
 `capabilities()`. Selectors use stable content, section, header/footer block, field,

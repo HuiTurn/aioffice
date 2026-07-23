@@ -358,9 +358,9 @@ class WorkspaceTests(unittest.TestCase):
             workspace = Workspace.init(root / "project")
             document = workspace.import_document(source)
             operation = {
-                "op": "node.move_after",
-                "target": "#a",
-                "after": "#c",
+                "op": "node.move_before",
+                "target": "#c",
+                "before": "#a",
             }
             result = workspace.apply(
                 document.id,
@@ -374,10 +374,10 @@ class WorkspaceTests(unittest.TestCase):
                     node["id"]
                     for node in reopened.to_spec()["content"]
                 ],
-                ["b", "c", "a"],
+                ["c", "a", "b"],
             )
             self.assertIn(
-                "node.move_after",
+                "node.move_before",
                 workspace.capabilities(document.id)[
                     "patch_operations"
                 ],
@@ -397,7 +397,7 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(patch["operations"], [operation])
             self.assertEqual(
                 patch["changes"][0]["moved_nodes"],
-                ["a"],
+                ["c"],
             )
 
 

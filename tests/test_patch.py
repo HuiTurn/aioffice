@@ -102,6 +102,21 @@ class PatchTests(unittest.TestCase):
             .paragraph("F", id="f")
             .build()
         )
+        structural_capabilities = document.capabilities()[
+            "structural_editing"
+        ]
+        self.assertTrue(structural_capabilities["available"])
+        self.assertEqual(
+            structural_capabilities["move_operations"],
+            {
+                "after": "node.move_after",
+                "before": "node.move_before",
+            },
+        )
+        self.assertEqual(
+            structural_capabilities["prepend_to_section"],
+            "rebind_section_start_at",
+        )
         result = document.apply(
             [
                 {
@@ -155,6 +170,51 @@ class PatchTests(unittest.TestCase):
             ],
             [None, "c"],
         )
+        before_result = document.apply(
+            [
+                {
+                    "op": "node.move_before",
+                    "target": "#f",
+                    "before": "#c",
+                }
+            ]
+        )
+        self.assertTrue(
+            before_result.success,
+            before_result.model_dump(),
+        )
+        assert before_result.document is not None
+        self.assertEqual(
+            [
+                node["id"]
+                for node in before_result.document.to_spec()["content"]
+            ],
+            ["a", "b", "f", "c", "d", "e"],
+        )
+        self.assertEqual(
+            [
+                section.get("start_at")
+                for section in before_result.document.to_spec()["sections"]
+            ],
+            [None, "f"],
+        )
+        self.assertEqual(
+            before_result.changes,
+            [
+                {
+                    "operation": "node.move_before",
+                    "moved_nodes": ["f"],
+                    "from_after": "e",
+                    "section_index": 1,
+                    "before": "c",
+                    "section_start_updated": {
+                        "section_id": "body_section",
+                        "from": "c",
+                        "to": "f",
+                    },
+                }
+            ],
+        )
 
         invalid_operations = [
             {
@@ -183,8 +243,39 @@ class PatchTests(unittest.TestCase):
                 "after": "#f",
                 "index": 2,
             },
+            {
+                "op": "node.move_before",
+                "target": "#a",
+                "before": "#c",
+            },
+            {
+                "op": "node.move_before",
+                "target": "#c",
+                "before": "#e",
+            },
+            {
+                "op": "node.move_before",
+                "target": "#a",
+                "before": "#b",
+            },
+            {
+                "op": "node.move_before",
+                "target": "#d",
+                "before": "#d",
+            },
+            {
+                "op": "node.move_before",
+                "target": "#d",
+                "before": "#f",
+                "index": 2,
+            },
         ]
         expected_codes = [
+            "CROSS_SECTION_MOVE_UNSUPPORTED",
+            "UNSUPPORTED_FEATURE",
+            "NO_CHANGES",
+            "INVALID_SPEC",
+            "INVALID_SPEC",
             "CROSS_SECTION_MOVE_UNSUPPORTED",
             "UNSUPPORTED_FEATURE",
             "NO_CHANGES",

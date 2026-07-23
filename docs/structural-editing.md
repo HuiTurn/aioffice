@@ -1,7 +1,7 @@
 # Stable-ID structural editing
 
-AiOffice structural edits address semantic nodes, not array positions. The dev19
-contract introduces one deliberately narrow operation:
+AiOffice structural edits address semantic nodes, not array positions. The dev20
+contract exposes a deliberately narrow pair of relative operations:
 
 ```json
 {
@@ -11,23 +11,32 @@ contract introduces one deliberately narrow operation:
 }
 ```
 
-`target` and `after` must resolve to different top-level content IDs. On success, the
-target becomes the immediate semantic successor of the anchor and receives the new
-document revision. The source `Document` remains immutable; dry run, diff, optimistic
-revision checks, idempotency, CLI application, and Workspace persistence use the
-ordinary Patch transaction.
+```json
+{
+  "op": "node.move_before",
+  "target": "#executive_summary",
+  "before": "#report_title"
+}
+```
+
+The target and relative anchor must resolve to different top-level content IDs. On
+success, the target becomes the immediate semantic predecessor or successor of the
+anchor and receives the new document revision. Together the operations can reach the
+first and last position without exposing an array index. The source `Document`
+remains immutable; dry run, diff, optimistic revision checks, idempotency, CLI
+application, and Workspace persistence use the ordinary Patch transaction.
 
 ## Why movement is distinct from insertion
 
 `node.insert_after` creates a new semantic node. Reconstructing an existing imported
 DOCX block from its JSON projection would lose unsupported native detail.
-`node.move_after` instead relocates the existing native XML objects:
+The move operations instead relocate the existing native XML objects:
 
 1. resolve the target and anchor through their trusted stable identities;
 2. resolve every native element belonging to each semantic node;
 3. prove that both ranges are present, top-level, disjoint, and contiguous;
 4. remove the complete target range from `w:body`;
-5. insert those same element objects after the complete anchor range;
+5. insert those same element objects before or after the complete anchor range;
 6. recompute all affected `NativeRef` indices and fingerprints;
 7. serialize the changed document part and refreshed identity manifest atomically.
 
@@ -44,18 +53,19 @@ move has already invalidated.
 
 Word section semantics depend on the position of `w:sectPr`. A move that casually
 crosses one of those boundaries can silently change page size, margins, columns,
-headers, footers, numbering, or vertical alignment. Dev19 therefore requires:
+headers, footers, numbering, or vertical alignment. Dev20 therefore requires:
 
 - target and anchor belong to the same semantic section;
 - the target is not the `start_at` node of a later section;
 - neither native range contains a `w:sectPr`;
 - both ranges belong directly to `/word/document.xml`'s `w:body`.
 
-An empty section-carrier paragraph that lies after an anchor remains in place, so a
-safe move before that carrier can still succeed. A text-bearing paragraph that
-itself carries `w:sectPr` is refused. Cross-section movement will require an explicit
-future operation that updates section ownership and proves header/footer semantics
-together; dev19 does not approximate it.
+When `node.move_before` prepends a node within a later section, the native section
+carrier remains in place and the semantic section's `start_at` is rebound to the
+moved node. The change evidence records the section ID and old/new anchors. A
+text-bearing paragraph that itself carries `w:sectPr` is refused. Cross-section
+movement will require an explicit future operation that updates section ownership
+and proves header/footer semantics together; dev20 does not approximate it.
 
 ## Identity and third-party packages
 
@@ -71,7 +81,7 @@ written alongside each revision.
 
 ## Diagnostics
 
-The operation fails atomically with actionable diagnostics for:
+The operations fail atomically with actionable diagnostics for:
 
 - missing, ambiguous, identical, or already-adjacent target/anchor IDs;
 - unknown operation fields;
@@ -82,9 +92,9 @@ The operation fails atomically with actionable diagnostics for:
 - target or anchor elements carrying a native section boundary;
 - any result that fails semantic validation or native identity refresh.
 
-The machine-readable `structural_editing` capability reports the operation name,
-selector type, placement rule, native scope, multi-element behavior, section policy,
-identity behavior, source immutability, and dry-run support.
+The machine-readable `structural_editing` capability reports both operation names,
+placement rules, selector type, native scope, multi-element behavior, section policy,
+section-prepend behavior, identity behavior, source immutability, and dry-run support.
 
 ## CLI and Workspace
 
@@ -107,12 +117,29 @@ Workspace patch records store only the stable IDs and structured change evidence
 }
 ```
 
+A section-prepend move additionally reports:
+
+```json
+{
+  "operation": "node.move_before",
+  "moved_nodes": ["recommendations"],
+  "from_after": "appendix",
+  "before": "section_heading",
+  "section_index": 2,
+  "section_start_updated": {
+    "section_id": "recommendations_section",
+    "from": "section_heading",
+    "to": "recommendations"
+  }
+}
+```
+
 `from_after` is the previous stable predecessor, or `null` when the target was first.
 It is audit evidence, not a selector to be cached for later edits.
 
 For a document whose JSON extension declares native authority, keep the native DOCX
-package attached while applying this operation. AiOffice refuses a move against a
+package attached while applying either operation. AiOffice refuses a move against a
 detached native projection because JSON alone cannot prove the complete XML range.
-Its capability response reports structural editing as unavailable and omits the
-operation from the executable operation list. Documents created as semantic AiOffice
-specs do not have this restriction.
+Its capability response reports structural editing as unavailable and omits both
+operations from the executable operation list. Documents created as semantic
+AiOffice specs do not have this restriction.

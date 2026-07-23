@@ -275,7 +275,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.19")
+        self.assertEqual(spec["spec_version"], "0.2-draft.20")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -1779,9 +1779,9 @@ class DocxImageTests(unittest.TestCase):
         result = document.apply(
             [
                 {
-                    "op": "node.move_after",
-                    "target": paragraph["id"],
-                    "after": image["id"],
+                    "op": "node.move_before",
+                    "target": image["id"],
+                    "before": paragraph["id"],
                 }
             ]
         )

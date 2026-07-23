@@ -73,8 +73,8 @@ overwrite unless the caller explicitly opts in.
 ## Current native lowering boundary
 
 The current DOCX native layer lowers `text.replace`, `paragraph.format`,
-`text.format`, `node.move_after`, `node.remove`, `style.define`, `style.apply`,
-`style.format`,
+`text.format`, `node.move_after`, `node.move_before`, `node.remove`,
+`style.define`, `style.apply`, `style.format`,
 `section.format`, `field.update`, `image.insert_after`, `image.replace`,
 `image.update`, `table.format`, `table.column.format`, and `table.cell.format`.
 Text replacement can cross Word run boundaries while retaining run properties and
@@ -86,13 +86,15 @@ children, the complete Patch is refused rather than duplicating or dropping them
 List nodes may reference multiple native paragraphs, and removing a list removes
 that complete native range atomically.
 
-`node.move_after` reorders an existing top-level semantic node by stable ID. The
-native layer moves the exact mapped element objects after the anchor's complete
-range, so multi-paragraph lists stay contiguous and tables, images, unknown children,
-relationships, and binary parts are not reconstructed. Sequential moves in one Patch
-resolve the original element objects rather than stale pre-move indices. Moves are
-limited to one semantic section and refuse section-start nodes or any target/anchor
-range carrying `w:sectPr`. See
+`node.move_after` and `node.move_before` reorder an existing top-level semantic node
+by stable ID. The native layer moves the exact mapped element objects after or before
+the anchor's complete range, so multi-paragraph lists stay contiguous and tables,
+images, unknown children, relationships, and binary parts are not reconstructed.
+Sequential moves in one Patch resolve the original element objects rather than stale
+pre-move indices. Moves are limited to one semantic section and refuse moving
+section-start nodes or any target/anchor range carrying `w:sectPr`. Prepending within
+a later section rebinds its semantic `start_at` to the moved node while leaving the
+native section carrier in place. See
 [the structural editing contract](structural-editing.md).
 
 Conservatively projected inline images reuse `paragraph.format` through their stable

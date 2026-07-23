@@ -204,6 +204,14 @@
 - Exposed machine-readable structural-editing capabilities and added CLI, Workspace,
   list-range, image, third-party, multi-operation, section-boundary, package
   minimality, and reopen tests.
+- Added the symmetric stable-ID `node.move_before` operation so AI callers can reach
+  the first or last position without computing array indices.
+- Preserved exact native target and anchor ranges for before/after placement across
+  sequential mixed-direction moves, multi-paragraph lists, tables, and images.
+- Added safe section-prepend semantics: the native section carrier stays fixed while
+  `section.start_at` is rebound to the moved node with explicit change evidence.
+- Kept detached native projections fail-closed and made capabilities omit both
+  structural operations when their XML authority package is unavailable.
 - Changed mixed text/drawing paragraphs and complex image cases to explicit opaque
   projections so the semantic layer can no longer hide a picture inside an ordinary
   text node.
@@ -216,7 +224,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.19`.
+- Advanced the AiOffice Document Spec to `0.2-draft.20`.
 
 ## 0.1.0
 
