@@ -46,8 +46,11 @@ from aioffice.formats.docx_section import (
     native_ref_for_section,
 )
 from aioffice.formats.docx_tables import (
+    apply_table_cell_format,
     apply_table_layout,
     apply_table_row,
+    native_ref_for_table_cell,
+    native_ref_for_table_cell_paragraph,
     native_ref_for_table_column,
     native_ref_for_table_row,
 )
@@ -64,6 +67,7 @@ from aioffice.spec.models import (
     Paragraph,
     ParagraphStyle,
     Table,
+    TableCell,
     TableWidth,
     TextSpan,
     TextStyle,
@@ -314,16 +318,14 @@ def _add_table(body: ET.Element, table: Table, context: _DocxContext) -> ET.Elem
     for width in native_widths:
         _child(grid, "gridCol", w=width)
 
-    def add_row(
-        values: list[str],
-        *,
-        header: bool = False,
-        row_index: int | None = None,
-    ) -> None:
+    column_indices = {
+        column.key: index
+        for index, column in enumerate(table.columns)
+    }
+
+    def add_header_row() -> None:
         row = _child(element, "tr")
-        if row_index is not None:
-            apply_table_row(row, table.rows[row_index])
-        for column_index, value in enumerate(values):
+        for column_index, column in enumerate(table.columns):
             cell = _child(row, "tc")
             cell_properties = _child(cell, "tcPr")
             _child(
@@ -332,18 +334,66 @@ def _add_table(body: ET.Element, table: Table, context: _DocxContext) -> ET.Elem
                 w=native_widths[column_index],
                 type="dxa",
             )
-            span = TextSpan(text=value, marks=["strong"] if header else [])
+            span = TextSpan(text=column.title, marks=["strong"])
             _add_paragraph(cell, [span], context)
 
-    add_row([column.title for column in table.columns], header=True)
-    for row_index, row in enumerate(table.rows):
-        add_row(
-            [
-                _string_value(row.values.get(column.key))
-                for column in table.columns
-            ],
-            row_index=row_index,
-        )
+    placements = _semantic_table_cell_placements(table)
+    add_header_row()
+    for row_index, row_placements in enumerate(placements):
+        row = _child(element, "tr")
+        apply_table_row(row, table.rows[row_index])
+        for table_cell, continuation in row_placements:
+            start_column = column_indices[table_cell.column_key]
+            cell = _child(row, "tc")
+            cell_properties = _child(cell, "tcPr")
+            cell_width = sum(
+                int(native_widths[index])
+                for index in range(
+                    start_column,
+                    start_column + table_cell.column_span,
+                )
+            )
+            _child(
+                cell_properties,
+                "tcW",
+                w=str(cell_width),
+                type="dxa",
+            )
+            if table_cell.column_span > 1:
+                _child(
+                    cell_properties,
+                    "gridSpan",
+                    val=str(table_cell.column_span),
+                )
+            if continuation:
+                _child(cell_properties, "vMerge", val="continue")
+                _add_paragraph(cell, [], context)
+                continue
+            if table_cell.row_span > 1:
+                _child(cell_properties, "vMerge", val="restart")
+            apply_table_cell_format(cell, table_cell.format)
+            if table_cell.content:
+                for paragraph in table_cell.content:
+                    spans = (
+                        paragraph.content
+                        if paragraph.text is None
+                        else [TextSpan(text=paragraph.text)]
+                    )
+                    _add_paragraph(
+                        cell,
+                        spans,
+                        context,
+                        style=paragraph.style_ref,
+                        native_anchor=_native_anchor(paragraph.id),
+                        paragraph_style=paragraph.paragraph_style,
+                        text_style=paragraph.text_style,
+                    )
+            else:
+                _add_paragraph(
+                    cell,
+                    [TextSpan(text=table_cell.plain_text)],
+                    context,
+                )
     effective_layout = table.layout.model_copy(
         update={
             "style_ref": table.layout.style_ref or "TableGrid",
@@ -360,6 +410,83 @@ def _add_table(body: ET.Element, table: Table, context: _DocxContext) -> ET.Elem
     )
     apply_table_layout(element, effective_layout)
     return element
+
+
+def _semantic_table_cell_placements(
+    table: Table,
+) -> list[list[tuple[TableCell, bool]]]:
+    column_indices = {
+        column.key: index
+        for index, column in enumerate(table.columns)
+    }
+    active: dict[int, tuple[TableCell, int]] = {}
+    result: list[list[tuple[TableCell, bool]]] = []
+    for row_index, row in enumerate(table.rows):
+        anchors: dict[int, TableCell] = {}
+        for cell in row.cells:
+            try:
+                start_column = column_indices[cell.column_key]
+            except KeyError as error:
+                raise ValueError(
+                    f"Table cell {cell.id!r} references unknown column "
+                    f"{cell.column_key!r}."
+                ) from error
+            if start_column in anchors:
+                raise ValueError(
+                    f"Table row {row.id!r} contains multiple cells anchored "
+                    f"to {cell.column_key!r}."
+                )
+            anchors[start_column] = cell
+
+        row_result: list[tuple[TableCell, bool]] = []
+        next_active: dict[int, tuple[TableCell, int]] = {}
+        column_index = 0
+        while column_index < len(table.columns):
+            if column_index in active:
+                cell, remaining = active[column_index]
+                if column_index in anchors:
+                    raise ValueError(
+                        f"Table row {row.id!r} overlaps row-spanning cell "
+                        f"{cell.id!r}."
+                    )
+                row_result.append((cell, True))
+                if remaining > 1:
+                    next_active[column_index] = (cell, remaining - 1)
+                column_index += cell.column_span
+                continue
+            cell = anchors.get(column_index)
+            if cell is None:
+                raise ValueError(
+                    f"Table row {row.id!r} leaves logical column "
+                    f"{table.columns[column_index].key!r} uncovered."
+                )
+            if column_index + cell.column_span > len(table.columns):
+                raise ValueError(
+                    f"Table cell {cell.id!r} spans beyond the table grid."
+                )
+            row_result.append((cell, False))
+            if cell.row_span > 1:
+                if row_index + cell.row_span > len(table.rows):
+                    raise ValueError(
+                        f"Table cell {cell.id!r} spans beyond the final row."
+                    )
+                next_active[column_index] = (
+                    cell,
+                    cell.row_span - 1,
+                )
+            column_index += cell.column_span
+        unexpected = sorted(set(anchors) - {
+            column_indices[cell.column_key]
+            for cell, continuation in row_result
+            if not continuation
+        })
+        if unexpected:
+            raise ValueError(
+                f"Table row {row.id!r} contains overlapping cell anchors."
+            )
+        result.append(row_result)
+        active = next_active
+    return result
 
 
 def _register_table_refs(
@@ -380,6 +507,31 @@ def _register_table_refs(
             table_index,
             row_index,
         )
+    placements = _semantic_table_cell_placements(table)
+    for semantic_row_index, row_placements in enumerate(placements):
+        physical_row_index = semantic_row_index + 1
+        physical_cell_index = 0
+        for table_cell, continuation in row_placements:
+            if not continuation:
+                refs[table_cell.id] = native_ref_for_table_cell(
+                    element,
+                    table_index,
+                    physical_row_index,
+                    physical_cell_index,
+                )
+                for paragraph_index, paragraph in enumerate(
+                    table_cell.content
+                ):
+                    refs[paragraph.id] = (
+                        native_ref_for_table_cell_paragraph(
+                            element,
+                            table_index,
+                            physical_row_index,
+                            physical_cell_index,
+                            paragraph_index,
+                        )
+                    )
+            physical_cell_index += 1
 
 
 def _document_xml(

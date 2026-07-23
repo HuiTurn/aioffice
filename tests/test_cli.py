@@ -55,6 +55,34 @@ class CliTests(unittest.TestCase):
         self.assertIn("mode", table_width_schema["properties"])
         self.assertIn("value", table_width_schema["properties"])
 
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(
+                main(["schema", "--kind", "table-cell-format"]),
+                0,
+            )
+        table_cell_format_schema = json.loads(stdout.getvalue())
+        self.assertFalse(
+            table_cell_format_schema["additionalProperties"]
+        )
+        self.assertIn(
+            "vertical_alignment",
+            table_cell_format_schema["properties"],
+        )
+        self.assertIn(
+            "background_color",
+            table_cell_format_schema["properties"],
+        )
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            self.assertEqual(main(["schema", "--kind", "table-cell"]), 0)
+        table_cell_schema = json.loads(stdout.getvalue())
+        self.assertFalse(table_cell_schema["additionalProperties"])
+        self.assertIn("column_span", table_cell_schema["properties"])
+        self.assertIn("row_span", table_cell_schema["properties"])
+        self.assertIn("content", table_cell_schema["properties"])
+
     def test_build_validate_inspect_and_apply(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -96,6 +124,7 @@ class CliTests(unittest.TestCase):
                     "field.update",
                     "table.format",
                     "table.column.format",
+                    "table.cell.format",
                 ],
             )
             self.assertEqual(

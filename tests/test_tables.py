@@ -215,7 +215,14 @@ class TableGeometryTests(unittest.TestCase):
             [
                 (
                     row["id"],
-                    row["values"],
+                    {
+                        cell["column_key"]: (
+                            cell["content"][0].get("text", "")
+                            if cell.get("content")
+                            else cell.get("value", "")
+                        )
+                        for cell in row["cells"]
+                    },
                     row["source_ref"]["sub_index"],
                 )
                 for row in table_spec["rows"]

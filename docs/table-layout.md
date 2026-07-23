@@ -8,7 +8,7 @@ remains the source of truth for lossless persistence.
 
 A table contains:
 
-- stable table, column, and data-row IDs;
+- stable table, column, data-row, logical-cell, and rich cell-paragraph IDs;
 - semantic column keys, titles, and data-type hints;
 - explicit column widths;
 - preferred table width (`auto`, percent, or exact);
@@ -16,8 +16,9 @@ A table contains:
 - independent top/right/bottom/left cell margins;
 - repeated-header behavior;
 - per-row page-break permission, height, and height rule.
+- logical row/column spans and cell-local presentation.
 
-All physical lengths use explicit `pt`, `in`, `cm`, `mm`, `px`, or `emu` units.
+All physical lengths use explicit `pt`, `in`, `cm`, `mm`, or `px` units.
 Percent widths use ordinary percentages in the Spec rather than Word's internal
 fiftieths-of-a-percent representation.
 
@@ -63,23 +64,27 @@ revision is emitted. This is deliberately conservative because a logical column 
 an irregular Word table may correspond to different physical cells in different
 rows.
 
+`table.cell.format` addresses one stable anchor cell and changes only selected
+`w:tcPr` properties. It does not depend on a one-to-one column mapping, so it remains
+safe for a mapped merged cell. See [the table cell contract](table-cells.md).
+
 ## Projection boundary
 
 The first physical row is currently treated as the semantic header. Remaining rows
-become data rows. Cell content is projected as plain display text, so rich cell
-paragraphs, nested tables, drawings, content controls, and cell-level native
-formatting are not yet editable through the semantic table API. They remain intact
-in the native package during table-wide and regular-grid column formatting.
+become data rows. Proven `gridSpan`/`vMerge` structures become logical cells with
+column and row spans. Supported paragraph sequences become editable rich content.
+Nested tables, drawings, objects, fields, and malformed content fall back to
+read-only display text; they remain intact during table, column, and cell formatting.
 
 Tables in header/footer parts remain opaque. Irregular body tables expose their
-table-wide layout and `regular_grid=false`, but do not expose a writable column
-geometry contract.
+table-wide layout, `logical_grid=false`, grid diagnostics, and a heuristic inspection
+view, but do not expose a writable column geometry contract.
 
 ## Preview and validation
 
-Semantic HTML renders widths, alignment, layout algorithm, cell spacing/margins,
-row height, and page-break hints for planning. It is approximate and is not evidence
-of Word pagination.
+Semantic HTML renders widths, spans, alignment, layout algorithm, table/cell
+spacing and margins, fill, rich paragraph content, row height, and page-break hints
+for planning. It is approximate and is not evidence of Word pagination.
 
 Validation warns when explicit column widths or an exact preferred width exceed the
 active section's printable width. Fixed-layout tables also warn when a column width

@@ -74,11 +74,24 @@
   irregular tables, while column-width edits refuse merged or shifted grids.
 - Added table geometry to compact inspection, capabilities, semantic HTML, and
   printable-width diagnostics.
+- Added normalized logical `TableCell` objects with stable IDs, semantic column
+  anchors, rich paragraph content, and backward migration from compact row values.
+- Added horizontal `gridSpan` and vertical `vMerge` generation/projection with
+  rectangular-grid proof, overlap diagnostics, and atomic refusal for invalid spans.
+- Added stable native identities for table cells and editable cell paragraphs.
+- Added cell-local vertical alignment, no-wrap, fit-text, fill color, and independent
+  margins through strict `TableCellFormat` models.
+- Added `table.cell.format` native lowering that mutates one mapped `w:tcPr` while
+  preserving cell content and unknown OOXML.
+- Extended text, paragraph, and style operations to supported rich paragraphs inside
+  body-table cells.
+- Added conservative read-only fallback for cells containing drawings, nested tables,
+  dynamic fields, malformed content, or an unprovable logical grid.
 - Serialized OPC content-type and relationship control parts with default package
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.8`.
+- Advanced the AiOffice Document Spec to `0.2-draft.9`.
 
 ## 0.1.0
 

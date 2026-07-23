@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal, cast
 from xml.etree import ElementTree as ET
 
@@ -9,6 +10,7 @@ from aioffice.native.identity import fingerprint_elements
 from aioffice.spec.models import (
     Length,
     NativeRef,
+    TableCellFormat,
     TableLayout,
     TableRow,
     TableWidth,
@@ -72,6 +74,32 @@ _CELL_MARGIN_ORDER = [
     "right",
     "end",
 ]
+
+
+@dataclass(slots=True)
+class NativeTableCellPlacement:
+    """One physical ``w:tc`` mapped onto the logical table grid."""
+
+    element: ET.Element
+    row_index: int
+    cell_index: int
+    start_column: int
+    column_span: int
+    row_span: int = 1
+    continuation: bool = False
+    anchor_row_index: int | None = None
+    anchor_cell_index: int | None = None
+
+
+@dataclass(slots=True)
+class TableGridAnalysis:
+    """Conservative proof result for a rectangular Word table grid."""
+
+    column_count: int
+    placements: list[NativeTableCellPlacement]
+    logical_grid: bool
+    regular_grid: bool
+    reasons: list[str]
 
 
 def _q(local: str) -> str:
@@ -298,6 +326,188 @@ def _patch_cell_margin(
         element.set(_q("type"), "dxa")
         element.set(_q("w"), _twips(value))
     _remove_if_empty(properties, margins)
+
+
+def _patch_direct_cell_margin(
+    properties: ET.Element,
+    side: str,
+    value: Length | None,
+) -> None:
+    margins = properties.find(_q("tcMar"))
+    if margins is None and value is not None:
+        margins = _ensure_property(
+            properties,
+            "tcMar",
+            _CELL_PROPERTY_ORDER,
+        )
+    if margins is None:
+        return
+    existing = margins.find(_q(side))
+    if value is None:
+        if existing is not None:
+            existing.attrib.pop(_q("type"), None)
+            existing.attrib.pop(_q("w"), None)
+            _remove_if_empty(margins, existing)
+    else:
+        element = (
+            existing
+            if existing is not None
+            else _insert_ordered(
+                margins,
+                ET.Element(_q(side)),
+                _CELL_MARGIN_ORDER,
+            )
+        )
+        element.set(_q("type"), "dxa")
+        element.set(_q("w"), _twips(value))
+    _remove_if_empty(properties, margins)
+
+
+def read_table_cell_format(cell: ET.Element) -> TableCellFormat:
+    """Project cell-local properties that can be selectively patched."""
+
+    properties = cell.find(_q("tcPr"))
+    if properties is None:
+        return TableCellFormat()
+    alignment = properties.find(_q("vAlign"))
+    raw_alignment = (
+        alignment.get(_q("val"))
+        if alignment is not None
+        else None
+    )
+    shading = properties.find(_q("shd"))
+    raw_fill = (
+        shading.get(_q("fill"))
+        if shading is not None
+        else None
+    )
+    background_color = (
+        f"#{raw_fill.upper()}"
+        if raw_fill is not None
+        and len(raw_fill) == 6
+        and all(character in "0123456789ABCDEFabcdef" for character in raw_fill)
+        else None
+    )
+    margins = properties.find(_q("tcMar"))
+    return TableCellFormat(
+        vertical_alignment=(
+            cast(
+                Literal["top", "center", "bottom"],
+                raw_alignment,
+            )
+            if raw_alignment in {"top", "center", "bottom"}
+            else None
+        ),
+        no_wrap=_on_off(properties.find(_q("noWrap"))),
+        fit_text=_on_off(properties.find(_q("tcFitText"))),
+        background_color=background_color,
+        margin_top=_read_margin(margins, "top"),
+        margin_right=_read_margin(margins, "right", "end"),
+        margin_bottom=_read_margin(margins, "bottom"),
+        margin_left=_read_margin(margins, "left", "start"),
+    )
+
+
+def patch_table_cell_format(
+    cell: ET.Element,
+    cell_format: TableCellFormat,
+    fields: set[str],
+) -> None:
+    """Patch selected cell properties while preserving content and unknown XML."""
+
+    properties = cell.find(_q("tcPr"))
+    if properties is None and fields:
+        properties = _ensure_properties(cell, "tcPr")
+    if properties is None:
+        return
+    if "vertical_alignment" in fields:
+        existing = properties.find(_q("vAlign"))
+        if cell_format.vertical_alignment is None:
+            if existing is not None:
+                existing.attrib.pop(_q("val"), None)
+                _remove_if_empty(properties, existing)
+        else:
+            element = (
+                existing
+                if existing is not None
+                else _ensure_property(
+                    properties,
+                    "vAlign",
+                    _CELL_PROPERTY_ORDER,
+                )
+            )
+            element.set(_q("val"), cell_format.vertical_alignment)
+    for field_name, local_name in (
+        ("no_wrap", "noWrap"),
+        ("fit_text", "tcFitText"),
+    ):
+        if field_name not in fields:
+            continue
+        value = getattr(cell_format, field_name)
+        existing = properties.find(_q(local_name))
+        if value is None:
+            if existing is not None:
+                existing.attrib.pop(_q("val"), None)
+                _remove_if_empty(properties, existing)
+        else:
+            element = (
+                existing
+                if existing is not None
+                else _ensure_property(
+                    properties,
+                    local_name,
+                    _CELL_PROPERTY_ORDER,
+                )
+            )
+            element.set(_q("val"), "1" if value else "0")
+    if "background_color" in fields:
+        existing = properties.find(_q("shd"))
+        if cell_format.background_color is None:
+            if existing is not None:
+                for attribute in ("val", "color", "fill"):
+                    existing.attrib.pop(_q(attribute), None)
+                _remove_if_empty(properties, existing)
+        else:
+            element = (
+                existing
+                if existing is not None
+                else _ensure_property(
+                    properties,
+                    "shd",
+                    _CELL_PROPERTY_ORDER,
+                )
+            )
+            element.set(_q("val"), "clear")
+            element.set(_q("color"), "auto")
+            element.set(
+                _q("fill"),
+                cell_format.background_color.removeprefix("#"),
+            )
+    for field_name, side in (
+        ("margin_top", "top"),
+        ("margin_right", "right"),
+        ("margin_bottom", "bottom"),
+        ("margin_left", "left"),
+    ):
+        if field_name in fields:
+            _patch_direct_cell_margin(
+                properties,
+                side,
+                getattr(cell_format, field_name),
+            )
+    _remove_if_empty(cell, properties)
+
+
+def apply_table_cell_format(
+    cell: ET.Element,
+    cell_format: TableCellFormat,
+) -> None:
+    fields = {
+        field_name
+        for field_name in TableCellFormat.model_fields
+        if getattr(cell_format, field_name) is not None
+    }
+    patch_table_cell_format(cell, cell_format, fields)
 
 
 def read_table_layout(table: ET.Element) -> TableLayout:
@@ -597,33 +807,175 @@ def apply_table_row(row: ET.Element, table_row: TableRow) -> None:
 def is_regular_table_grid(table: ET.Element) -> bool:
     """Whether each native row maps one-to-one onto the declared table grid."""
 
+    return analyze_table_grid(table, start_row=0).regular_grid
+
+
+def _positive_span(cell: ET.Element) -> int | None:
+    properties = cell.find(_q("tcPr"))
+    span = (
+        properties.find(_q("gridSpan"))
+        if properties is not None
+        else None
+    )
+    raw_value = span.get(_q("val")) if span is not None else "1"
+    if raw_value is None:
+        return None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def analyze_table_grid(
+    table: ET.Element,
+    *,
+    start_row: int = 1,
+) -> TableGridAnalysis:
+    """Prove a logical rectangular grid with ``gridSpan``/``vMerge`` support."""
+
     grid = table.find(_q("tblGrid"))
-    if grid is None:
-        return False
-    column_count = len(grid.findall(_q("gridCol")))
+    column_count = (
+        len(grid.findall(_q("gridCol")))
+        if grid is not None
+        else 0
+    )
+    reasons: list[str] = []
+    placements: list[NativeTableCellPlacement] = []
     if column_count == 0:
-        return False
+        return TableGridAnalysis(
+            column_count=0,
+            placements=[],
+            logical_grid=False,
+            regular_grid=False,
+            reasons=["missing_table_grid"],
+        )
     rows = table.findall(_q("tr"))
-    if not rows:
-        return False
-    for row in rows:
-        properties = row.find(_q("trPr"))
-        if properties is not None and (
-            properties.find(_q("gridBefore")) is not None
-            or properties.find(_q("gridAfter")) is not None
+    if start_row >= len(rows):
+        return TableGridAnalysis(
+            column_count=column_count,
+            placements=[],
+            logical_grid=True,
+            regular_grid=True,
+            reasons=[],
+        )
+
+    active: dict[
+        tuple[int, int],
+        NativeTableCellPlacement,
+    ] = {}
+    for row_index in range(start_row, len(rows)):
+        row = rows[row_index]
+        row_properties = row.find(_q("trPr"))
+        if row_properties is not None and (
+            row_properties.find(_q("gridBefore")) is not None
+            or row_properties.find(_q("gridAfter")) is not None
         ):
-            return False
-        cells = row.findall(_q("tc"))
-        if len(cells) != column_count:
-            return False
-        for cell in cells:
+            reasons.append(f"row_{row_index}_shifted_grid")
+        cursor = 0
+        next_active: dict[
+            tuple[int, int],
+            NativeTableCellPlacement,
+        ] = {}
+        for cell_index, cell in enumerate(row.findall(_q("tc"))):
             cell_properties = cell.find(_q("tcPr"))
-            if cell_properties is not None and any(
-                cell_properties.find(_q(name)) is not None
-                for name in ("gridSpan", "hMerge", "vMerge")
+            if (
+                cell_properties is not None
+                and cell_properties.find(_q("hMerge")) is not None
             ):
-                return False
-    return True
+                reasons.append(
+                    f"row_{row_index}_cell_{cell_index}_legacy_hmerge"
+                )
+            column_span = _positive_span(cell)
+            if column_span is None:
+                reasons.append(
+                    f"row_{row_index}_cell_{cell_index}_invalid_grid_span"
+                )
+                column_span = 1
+            if cursor + column_span > column_count:
+                reasons.append(
+                    f"row_{row_index}_cell_{cell_index}_outside_grid"
+                )
+            merge = (
+                cell_properties.find(_q("vMerge"))
+                if cell_properties is not None
+                else None
+            )
+            raw_merge = (
+                merge.get(_q("val"))
+                if merge is not None
+                else None
+            )
+            if merge is not None and raw_merge not in {
+                None,
+                "continue",
+                "restart",
+            }:
+                reasons.append(
+                    f"row_{row_index}_cell_{cell_index}_invalid_vmerge"
+                )
+            continuation = (
+                merge is not None
+                and raw_merge in {None, "continue"}
+            )
+            key = (cursor, column_span)
+            if continuation:
+                anchor = active.get(key)
+                if anchor is None:
+                    reasons.append(
+                        f"row_{row_index}_cell_{cell_index}_orphan_vmerge"
+                    )
+                    placement = NativeTableCellPlacement(
+                        element=cell,
+                        row_index=row_index,
+                        cell_index=cell_index,
+                        start_column=cursor,
+                        column_span=column_span,
+                        continuation=True,
+                    )
+                else:
+                    anchor.row_span += 1
+                    placement = NativeTableCellPlacement(
+                        element=cell,
+                        row_index=row_index,
+                        cell_index=cell_index,
+                        start_column=cursor,
+                        column_span=column_span,
+                        continuation=True,
+                        anchor_row_index=anchor.row_index,
+                        anchor_cell_index=anchor.cell_index,
+                    )
+                    next_active[key] = anchor
+            else:
+                placement = NativeTableCellPlacement(
+                    element=cell,
+                    row_index=row_index,
+                    cell_index=cell_index,
+                    start_column=cursor,
+                    column_span=column_span,
+                )
+                if merge is not None and raw_merge == "restart":
+                    next_active[key] = placement
+            placements.append(placement)
+            cursor += column_span
+        if cursor != column_count:
+            reasons.append(f"row_{row_index}_does_not_cover_grid")
+        active = next_active
+
+    logical_grid = not reasons
+    regular_grid = logical_grid and all(
+        not placement.continuation
+        and placement.column_span == 1
+        and placement.row_span == 1
+        for placement in placements
+    )
+    return TableGridAnalysis(
+        column_count=column_count,
+        placements=placements,
+        logical_grid=logical_grid,
+        regular_grid=regular_grid,
+        reasons=reasons,
+    )
 
 
 def patch_table_column_width(
@@ -725,15 +1077,144 @@ def native_ref_for_table_row(
     )
 
 
+def _flatten_table_cells(table: ET.Element) -> list[ET.Element]:
+    return [
+        cell
+        for row in table.findall(_q("tr"))
+        for cell in row.findall(_q("tc"))
+    ]
+
+
+def _flatten_table_cell_paragraphs(
+    table: ET.Element,
+) -> list[ET.Element]:
+    return [
+        paragraph
+        for cell in _flatten_table_cells(table)
+        for paragraph in cell.findall(_q("p"))
+    ]
+
+
+def native_ref_for_table_cell(
+    table: ET.Element,
+    table_index: int,
+    row_index: int,
+    cell_index: int,
+) -> NativeRef:
+    rows = table.findall(_q("tr"))
+    if row_index >= len(rows):
+        raise ValueError("Table cell row points outside the native table.")
+    cells = rows[row_index].findall(_q("tc"))
+    if cell_index >= len(cells):
+        raise ValueError("Table cell points outside the native row.")
+    cell = cells[cell_index]
+    flattened = _flatten_table_cells(table)
+    return NativeRef(
+        format="docx",
+        part_uri="/word/document.xml",
+        native_kind="w:tc",
+        element_index=table_index,
+        element_indices=[table_index],
+        sub_index=flattened.index(cell),
+        path_hint=(
+            f"/w:document/w:body/*[{table_index + 1}]"
+            f"/w:tr[{row_index + 1}]/w:tc[{cell_index + 1}]"
+        ),
+        fingerprint=fingerprint_elements([cell]),
+    )
+
+
+def native_ref_for_table_cell_paragraph(
+    table: ET.Element,
+    table_index: int,
+    row_index: int,
+    cell_index: int,
+    paragraph_index: int,
+) -> NativeRef:
+    rows = table.findall(_q("tr"))
+    if row_index >= len(rows):
+        raise ValueError("Table-cell paragraph row points outside the table.")
+    cells = rows[row_index].findall(_q("tc"))
+    if cell_index >= len(cells):
+        raise ValueError("Table-cell paragraph cell points outside the row.")
+    paragraphs = cells[cell_index].findall(_q("p"))
+    if paragraph_index >= len(paragraphs):
+        raise ValueError("Table-cell paragraph points outside the cell.")
+    paragraph = paragraphs[paragraph_index]
+    flattened = _flatten_table_cell_paragraphs(table)
+    return NativeRef(
+        format="docx",
+        part_uri="/word/document.xml",
+        native_kind="w:tc/w:p",
+        element_index=table_index,
+        element_indices=[table_index],
+        sub_index=flattened.index(paragraph),
+        path_hint=(
+            f"/w:document/w:body/*[{table_index + 1}]"
+            f"/w:tr[{row_index + 1}]/w:tc[{cell_index + 1}]"
+            f"/w:p[{paragraph_index + 1}]"
+        ),
+        native_id=paragraph.get(
+            "{http://schemas.microsoft.com/office/word/2010/wordml}paraId"
+        ),
+        fingerprint=fingerprint_elements([paragraph]),
+    )
+
+
+def table_cell_from_ref(
+    table: ET.Element,
+    source_ref: NativeRef,
+) -> ET.Element:
+    if source_ref.native_kind != "w:tc" or source_ref.sub_index is None:
+        raise ValueError("Native reference does not identify a table cell.")
+    cells = _flatten_table_cells(table)
+    if source_ref.sub_index >= len(cells):
+        raise ValueError("Table cell source reference points outside the table.")
+    return cells[source_ref.sub_index]
+
+
+def table_cell_paragraph_from_ref(
+    table: ET.Element,
+    source_ref: NativeRef,
+) -> tuple[ET.Element, ET.Element]:
+    if (
+        source_ref.native_kind != "w:tc/w:p"
+        or source_ref.sub_index is None
+    ):
+        raise ValueError(
+            "Native reference does not identify a table-cell paragraph."
+        )
+    paragraphs = _flatten_table_cell_paragraphs(table)
+    if source_ref.sub_index >= len(paragraphs):
+        raise ValueError(
+            "Table-cell paragraph source reference points outside the table."
+        )
+    paragraph = paragraphs[source_ref.sub_index]
+    for cell in _flatten_table_cells(table):
+        if paragraph in cell.findall(_q("p")):
+            return cell, paragraph
+    raise ValueError("Could not find the table-cell paragraph parent.")
+
+
 __all__ = [
+    "NativeTableCellPlacement",
+    "TableGridAnalysis",
+    "analyze_table_grid",
+    "apply_table_cell_format",
     "apply_table_layout",
     "apply_table_row",
     "is_regular_table_grid",
+    "native_ref_for_table_cell",
+    "native_ref_for_table_cell_paragraph",
     "native_ref_for_table_column",
     "native_ref_for_table_row",
+    "patch_table_cell_format",
     "patch_table_column_width",
     "patch_table_layout",
+    "read_table_cell_format",
     "read_table_column_widths",
     "read_table_layout",
     "read_table_row",
+    "table_cell_from_ref",
+    "table_cell_paragraph_from_ref",
 ]

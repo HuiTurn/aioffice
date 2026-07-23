@@ -228,7 +228,11 @@ class DocumentBuilder:
         normalized_rows: list[dict[str, Any]] = []
         for row in rows:
             value = deepcopy(dict(row))
-            normalized_rows.append(value if "values" in value else {"values": value})
+            normalized_rows.append(
+                value
+                if "values" in value or "cells" in value
+                else {"values": value}
+            )
         node: dict[str, Any] = {
             "type": "table",
             "columns": [deepcopy(dict(column)) for column in columns],

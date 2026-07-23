@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -16,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.8"
+SPEC_VERSION = "0.2-draft.9"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -735,16 +736,126 @@ class TableColumn(StrictModel):
         return value
 
 
+class TableCellFormat(StrictModel):
+    """Cell-local presentation that can be patched without rebuilding content."""
+
+    vertical_alignment: Literal["top", "center", "bottom"] | None = None
+    no_wrap: bool | None = None
+    fit_text: bool | None = None
+    background_color: HexColor | None = None
+    margin_top: Length | None = None
+    margin_right: Length | None = None
+    margin_bottom: Length | None = None
+    margin_left: Length | None = None
+
+    @field_validator("background_color")
+    @classmethod
+    def normalize_color(cls, value: str | None) -> str | None:
+        return value.upper() if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_margins(self) -> "TableCellFormat":
+        for field_name in (
+            "margin_top",
+            "margin_right",
+            "margin_bottom",
+            "margin_left",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and value.to_points() < 0:
+                raise ValueError(f"{field_name} cannot be negative.")
+        return self
+
+
+class TableCell(StrictModel):
+    """One logical cell anchored to a semantic column key."""
+
+    id: NodeId = Field(default_factory=lambda: new_id("cell"))
+    type: Literal["table_cell"] = "table_cell"
+    column_key: Annotated[
+        str,
+        StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_.-]*$"),
+    ]
+    value: Any = None
+    content: list[Paragraph] = Field(default_factory=list)
+    column_span: int = Field(default=1, ge=1, le=63, strict=True)
+    row_span: int = Field(default=1, ge=1, le=32767, strict=True)
+    format: TableCellFormat = Field(default_factory=TableCellFormat)
+    source_ref: NativeRef | str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    revision_added: int = Field(default=1, ge=1)
+    revision_updated: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_content(self) -> "TableCell":
+        if self.content and self.value is not None:
+            raise ValueError(
+                "A table cell cannot include both scalar value and rich content."
+            )
+        if any(
+            isinstance(inline, DocumentField)
+            for paragraph in self.content
+            for inline in paragraph.content
+        ):
+            raise ValueError(
+                "Dynamic fields inside table cells are not supported yet."
+            )
+        return self
+
+    @property
+    def plain_text(self) -> str:
+        if self.content:
+            return "\n".join(paragraph.plain_text for paragraph in self.content)
+        if self.value is None:
+            return ""
+        if isinstance(self.value, bool):
+            return "true" if self.value else "false"
+        return str(self.value)
+
+
 class TableRow(StrictModel):
     id: NodeId = Field(default_factory=lambda: new_id("row"))
     type: Literal["table_row"] = "table_row"
-    values: dict[str, Any]
+    cells: list[TableCell] = Field(default_factory=list)
     allow_break_across_pages: bool | None = None
     height: Length | None = None
     height_rule: Literal["at_least", "exact"] | None = None
     source_ref: NativeRef | str | None = None
     revision_added: int = Field(default=1, ge=1)
     revision_updated: int = Field(default=1, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_values(cls, value: object) -> object:
+        if not isinstance(value, dict) or "values" not in value:
+            return value
+        payload = dict(value)
+        values = payload.pop("values")
+        if "cells" in payload:
+            raise ValueError(
+                "A table row cannot include both legacy values and cells."
+            )
+        if not isinstance(values, dict):
+            raise ValueError("Legacy table row values must be an object.")
+        row_id = payload.get("id")
+        if not isinstance(row_id, str):
+            row_id = new_id("row")
+            payload["id"] = row_id
+        payload["cells"] = [
+            {
+                "id": (
+                    "cell_"
+                    + hashlib.sha256(
+                        f"{row_id}:{key}".encode()
+                    ).hexdigest()[:24]
+                ),
+                "type": "table_cell",
+                "column_key": key,
+                "value": cell_value,
+            }
+            for key, cell_value in values.items()
+        ]
+        return payload
 
     @model_validator(mode="after")
     def validate_height(self) -> "TableRow":
@@ -817,6 +928,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.6",
         "0.2-draft.7",
         "0.2-draft.8",
+        "0.2-draft.9",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

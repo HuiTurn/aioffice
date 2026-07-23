@@ -28,6 +28,7 @@ from aioffice.spec.models import (
     NodeId,
     Paragraph,
     Table,
+    TableCell,
     TableColumn,
 )
 
@@ -172,6 +173,14 @@ def build_identity_manifest(
             for block in part.content
             if isinstance(block, Paragraph)
         ),
+        *(
+            paragraph
+            for table in spec.content
+            if isinstance(table, Table)
+            for row in table.rows
+            for cell in row.cells
+            for paragraph in cell.content
+        ),
     ]
     tables = [
         node
@@ -193,6 +202,17 @@ def build_identity_manifest(
         ),
         *(list(table.columns) for table in tables),
         *(list(table.rows) for table in tables),
+        *(
+            list(row.cells)
+            for table in tables
+            for row in table.rows
+        ),
+        *(
+            list(cell.content)
+            for table in tables
+            for row in table.rows
+            for cell in row.cells
+        ),
     ]
     for nodes in node_groups:
         group: list[IdentityNode] = []
@@ -208,6 +228,8 @@ def build_identity_manifest(
                     semantic_key=(
                         node.key
                         if isinstance(node, TableColumn)
+                        else node.column_key
+                        if isinstance(node, TableCell)
                         else None
                     ),
                     semantic_data_type=(
@@ -406,6 +428,18 @@ def apply_identity_manifest(
             if isinstance(block, dict)
             and block.get("type") == "paragraph"
         ),
+        *(
+            paragraph
+            for table in content
+            if table.get("type") == "table"
+            for row in table.get("rows", [])
+            if isinstance(row, dict)
+            for cell in row.get("cells", [])
+            if isinstance(cell, dict)
+            for paragraph in cell.get("content", [])
+            if isinstance(paragraph, dict)
+            and paragraph.get("type") == "paragraph"
+        ),
     ]
     tables = [
         node
@@ -454,6 +488,24 @@ def apply_identity_manifest(
             for table in tables
             for row in table.get("rows", [])
             if isinstance(row, dict)
+        ),
+        *(
+            cell
+            for table in tables
+            for row in table.get("rows", [])
+            if isinstance(row, dict)
+            for cell in row.get("cells", [])
+            if isinstance(cell, dict)
+        ),
+        *(
+            paragraph
+            for table in tables
+            for row in table.get("rows", [])
+            if isinstance(row, dict)
+            for cell in row.get("cells", [])
+            if isinstance(cell, dict)
+            for paragraph in cell.get("content", [])
+            if isinstance(paragraph, dict)
         ),
     ]
     candidates = [
@@ -590,6 +642,12 @@ def apply_identity_manifest(
                     candidate["key"] = record.semantic_key
                 if record.semantic_data_type is not None:
                     candidate["data_type"] = record.semantic_data_type
+            elif (
+                candidate.get("type") == "table_cell"
+                and record.node_type == "table_cell"
+                and record.semantic_key is not None
+            ):
+                candidate["column_key"] = record.semantic_key
             used.add(index)
             bound_records[record_index] = index
             continue
@@ -657,6 +715,8 @@ def apply_identity_manifest(
                         if candidate.get("type") == "table_column"
                         else "row"
                         if candidate.get("type") == "table_row"
+                        else "cell"
+                        if candidate.get("type") == "table_cell"
                         else "field"
                         if candidate.get("type") == "field"
                         else "node"
@@ -664,33 +724,24 @@ def apply_identity_manifest(
                 )
 
     for table, columns in table_key_states:
-        old_keys = {
-            old_key
-            for _, old_key in columns
+        key_mapping = {
+            old_key: column.get("key")
+            for column, old_key in columns
             if isinstance(old_key, str)
+            and isinstance(column.get("key"), str)
         }
         for row in table.get("rows", []):
             if not isinstance(row, dict):
                 continue
-            values = row.get("values")
-            if not isinstance(values, dict):
-                continue
-            remapped: dict[str, object] = {}
-            for column, old_key in columns:
-                current_key = column.get("key")
+            for cell in row.get("cells", []):
+                if not isinstance(cell, dict):
+                    continue
+                old_key = cell.get("column_key")
                 if (
                     isinstance(old_key, str)
-                    and isinstance(current_key, str)
+                    and isinstance(key_mapping.get(old_key), str)
                 ):
-                    remapped[current_key] = values.get(old_key)
-            remapped.update(
-                {
-                    key: value
-                    for key, value in values.items()
-                    if key not in old_keys
-                }
-            )
-            row["values"] = remapped
+                    cell["column_key"] = key_mapping[old_key]
 
     id_owners: dict[str, list[int]] = {}
     for index, candidate, _ in candidates:

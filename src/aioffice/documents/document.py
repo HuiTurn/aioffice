@@ -59,6 +59,7 @@ from aioffice.spec.models import (
     SectionLayout,
     SPEC_VERSION,
     Table,
+    TableCellFormat,
     TableColumn,
     TableLayout,
     TextStyle,
@@ -313,6 +314,15 @@ class Document:
                         row_count=len(node.rows),
                         regular_grid=node.metadata.get(
                             "regular_grid",
+                            all(
+                                cell.column_span == 1
+                                and cell.row_span == 1
+                                for row in node.rows
+                                for cell in row.cells
+                            ),
+                        ),
+                        logical_grid=node.metadata.get(
+                            "logical_grid",
                             True,
                         ),
                         layout=node.layout.model_dump(
@@ -336,7 +346,24 @@ class Document:
                         rows=[
                             {
                                 "id": row.id,
-                                "values": row.values,
+                                "cells": [
+                                    {
+                                        "id": cell.id,
+                                        "column_key": cell.column_key,
+                                        "text": cell.plain_text,
+                                        "column_span": cell.column_span,
+                                        "row_span": cell.row_span,
+                                        "format": cell.format.model_dump(
+                                            mode="json",
+                                            exclude_none=True,
+                                        ),
+                                        "content_ids": [
+                                            paragraph.id
+                                            for paragraph in cell.content
+                                        ],
+                                    }
+                                    for cell in row.cells
+                                ],
                                 "allow_break_across_pages": (
                                     row.allow_break_across_pages
                                 ),
@@ -517,6 +544,7 @@ class Document:
             "field.update",
             "table.format",
             "table.column.format",
+            "table.cell.format",
         ]
         if self._native is not None:
             operations = [
@@ -531,6 +559,7 @@ class Document:
                 "field.update",
                 "table.format",
                 "table.column.format",
+                "table.cell.format",
             ]
         native_extension = self._spec.extensions.get("dev.aioffice.native", {})
         ambiguous_node_ids = sorted(
@@ -566,6 +595,7 @@ class Document:
                 "#header_footer_block_id",
                 "#field_id",
                 "#table_id + column id/key",
+                "#table_id + cell_id",
             ],
             "formatting": {
                 "length_units": ["pt", "in", "cm", "mm", "px"],
@@ -626,18 +656,35 @@ class Document:
                     "native_patch_scope": "one field instruction",
                 },
                 "table_contract": {
-                    "model": "semantic_columns_and_stable_rows",
+                    "model": (
+                        "semantic_columns_rows_cells_and_logical_spans"
+                    ),
                     "table_properties": sorted(TableLayout.model_fields),
                     "column_properties": ["width"],
+                    "cell_properties": sorted(
+                        TableCellFormat.model_fields
+                    ),
                     "native_table_patch_scope": "one w:tbl",
                     "native_column_patch_scope": (
                         "one regular w:gridCol and its one-to-one cells"
+                    ),
+                    "native_cell_patch_scope": (
+                        "one mapped anchor w:tc properties element"
                     ),
                     "tables": [
                         {
                             "id": node.id,
                             "regular_grid": node.metadata.get(
                                 "regular_grid",
+                                all(
+                                    cell.column_span == 1
+                                    and cell.row_span == 1
+                                    for row in node.rows
+                                    for cell in row.cells
+                                ),
+                            ),
+                            "logical_grid": node.metadata.get(
+                                "logical_grid",
                                 True,
                             ),
                             "column_ids": [
@@ -645,6 +692,26 @@ class Document:
                             ],
                             "column_keys": [
                                 column.key for column in node.columns
+                            ],
+                            "cell_ids": [
+                                cell.id
+                                for row in node.rows
+                                for cell in row.cells
+                            ],
+                            "rich_cell_paragraph_ids": [
+                                paragraph.id
+                                for row in node.rows
+                                for cell in row.cells
+                                for paragraph in cell.content
+                            ],
+                            "read_only_cell_ids": [
+                                cell.id
+                                for row in node.rows
+                                for cell in row.cells
+                                if cell.metadata.get(
+                                    "content_editable"
+                                )
+                                is False
                             ],
                         }
                         for node in self._spec.content
@@ -1407,6 +1474,11 @@ class Document:
                                 ),
                             )
                         )
+                grid_owners: dict[tuple[int, int], str] = {}
+                column_positions = {
+                    column.key: position
+                    for position, column in enumerate(node.columns)
+                }
                 for row_index, row in enumerate(node.rows):
                     if row.id in seen:
                         diagnostics.append(
@@ -1436,7 +1508,11 @@ class Document:
                                 path=f"content.{index}.rows.{row_index}",
                             )
                         )
-                    unknown = sorted(set(row.values) - known_keys)
+                    cell_keys = [
+                        cell.column_key
+                        for cell in row.cells
+                    ]
+                    unknown = sorted(set(cell_keys) - known_keys)
                     if unknown:
                         diagnostics.append(
                             Diagnostic(
@@ -1447,25 +1523,275 @@ class Document:
                                     f"{', '.join(unknown)}."
                                 ),
                                 node_ids=[node.id, row.id],
-                                path=f"content.{index}.rows.{row_index}.values",
+                                path=f"content.{index}.rows.{row_index}.cells",
                             )
                         )
-                    missing = sorted(known_keys - set(row.values))
-                    if missing:
-                        diagnostics.append(
-                            Diagnostic(
-                                severity=Severity.WARNING,
-                                code="TABLE_VALUE_MISSING",
-                                message=(
-                                    f"Table row {row.id!r} has no values for: {', '.join(missing)}."
-                                ),
-                                node_ids=[node.id, row.id],
-                                path=f"content.{index}.rows.{row_index}.values",
-                                suggested_actions=[
-                                    {"action": "fill_table_values", "keys": missing}
-                                ],
-                            )
+                    for cell_index, cell in enumerate(row.cells):
+                        cell_path = (
+                            f"content.{index}.rows.{row_index}."
+                            f"cells.{cell_index}"
                         )
+                        if cell.id in seen:
+                            diagnostics.append(
+                                Diagnostic(
+                                    severity=Severity.ERROR,
+                                    code="INVALID_SPEC",
+                                    message=(
+                                        f"Duplicate node ID {cell.id!r}."
+                                    ),
+                                    node_ids=[node.id, row.id, cell.id],
+                                    path=f"{cell_path}.id",
+                                    suggested_actions=[
+                                        {"action": "assign_unique_id"}
+                                    ],
+                                )
+                            )
+                        else:
+                            seen[cell.id] = cell_path
+                        if (
+                            cell.revision_added > self.revision
+                            or cell.revision_updated > self.revision
+                        ):
+                            diagnostics.append(
+                                Diagnostic(
+                                    severity=Severity.ERROR,
+                                    code="INVALID_SPEC",
+                                    message=(
+                                        f"Table cell {cell.id!r} references "
+                                        "a revision newer than the artifact."
+                                    ),
+                                    node_ids=[node.id, row.id, cell.id],
+                                    path=cell_path,
+                                )
+                            )
+                        start_column = column_positions.get(
+                            cell.column_key
+                        )
+                        if start_column is not None:
+                            end_column = (
+                                start_column + cell.column_span
+                            )
+                            end_row = row_index + cell.row_span
+                            if (
+                                end_column > len(node.columns)
+                                or end_row > len(node.rows)
+                            ):
+                                diagnostics.append(
+                                    Diagnostic(
+                                        severity=Severity.ERROR,
+                                        code="TABLE_CELL_SPAN_INVALID",
+                                        message=(
+                                            f"Table cell {cell.id!r} spans "
+                                            "outside the logical grid."
+                                        ),
+                                        node_ids=[
+                                            node.id,
+                                            row.id,
+                                            cell.id,
+                                        ],
+                                        path=cell_path,
+                                        suggested_actions=[
+                                            {
+                                                "action": (
+                                                    "reduce_table_cell_span"
+                                                )
+                                            }
+                                        ],
+                                    )
+                                )
+                            else:
+                                for covered_row in range(
+                                    row_index,
+                                    end_row,
+                                ):
+                                    for covered_column in range(
+                                        start_column,
+                                        end_column,
+                                    ):
+                                        coordinate = (
+                                            covered_row,
+                                            covered_column,
+                                        )
+                                        owner = grid_owners.get(
+                                            coordinate
+                                        )
+                                        if owner is not None:
+                                            diagnostics.append(
+                                                Diagnostic(
+                                                    severity=Severity.ERROR,
+                                                    code=(
+                                                        "TABLE_CELL_OVERLAP"
+                                                    ),
+                                                    message=(
+                                                        f"Table cell "
+                                                        f"{cell.id!r} overlaps "
+                                                        f"{owner!r}."
+                                                    ),
+                                                    node_ids=[
+                                                        node.id,
+                                                        cell.id,
+                                                        owner,
+                                                    ],
+                                                    path=cell_path,
+                                                )
+                                            )
+                                        else:
+                                            grid_owners[
+                                                coordinate
+                                            ] = cell.id
+                        for paragraph_index, paragraph in enumerate(
+                            cell.content
+                        ):
+                            paragraph_path = (
+                                f"{cell_path}.content."
+                                f"{paragraph_index}"
+                            )
+                            if paragraph.id in seen:
+                                diagnostics.append(
+                                    Diagnostic(
+                                        severity=Severity.ERROR,
+                                        code="INVALID_SPEC",
+                                        message=(
+                                            f"Duplicate node ID "
+                                            f"{paragraph.id!r}."
+                                        ),
+                                        node_ids=[
+                                            node.id,
+                                            cell.id,
+                                            paragraph.id,
+                                        ],
+                                        path=f"{paragraph_path}.id",
+                                    )
+                                )
+                            else:
+                                seen[paragraph.id] = paragraph_path
+                            if (
+                                paragraph.revision_added
+                                > self.revision
+                                or paragraph.revision_updated
+                                > self.revision
+                            ):
+                                diagnostics.append(
+                                    Diagnostic(
+                                        severity=Severity.ERROR,
+                                        code="INVALID_SPEC",
+                                        message=(
+                                            f"Cell paragraph "
+                                            f"{paragraph.id!r} references "
+                                            "a revision newer than the "
+                                            "artifact."
+                                        ),
+                                        node_ids=[
+                                            node.id,
+                                            cell.id,
+                                            paragraph.id,
+                                        ],
+                                        path=paragraph_path,
+                                    )
+                                )
+                            if (
+                                paragraph.style_ref is not None
+                                and paragraph.style_ref
+                                not in named_styles
+                            ):
+                                diagnostics.append(
+                                    Diagnostic(
+                                        severity=style_issue_severity,
+                                        code="STYLE_NOT_FOUND",
+                                        message=(
+                                            f"Table-cell paragraph "
+                                            f"{paragraph.id!r} references "
+                                            f"missing named style "
+                                            f"{paragraph.style_ref!r}."
+                                        ),
+                                        node_ids=[
+                                            node.id,
+                                            cell.id,
+                                            paragraph.id,
+                                        ],
+                                        path=(
+                                            f"{paragraph_path}."
+                                            "style_ref"
+                                        ),
+                                        recoverable=True,
+                                    )
+                                )
+                            elif paragraph.style_ref is not None:
+                                referenced_style = named_styles[
+                                    paragraph.style_ref
+                                ]
+                                if (
+                                    referenced_style.semantic_role
+                                    == "heading"
+                                ):
+                                    diagnostics.append(
+                                        Diagnostic(
+                                            severity=(
+                                                style_issue_severity
+                                            ),
+                                            code=(
+                                                "STYLE_SEMANTIC_MISMATCH"
+                                            ),
+                                            message=(
+                                                f"Table-cell paragraph "
+                                                f"{paragraph.id!r} cannot "
+                                                "use a semantic heading "
+                                                f"style "
+                                                f"{paragraph.style_ref!r}."
+                                            ),
+                                            node_ids=[
+                                                node.id,
+                                                cell.id,
+                                                paragraph.id,
+                                            ],
+                                            path=(
+                                                f"{paragraph_path}."
+                                                "style_ref"
+                                            ),
+                                            recoverable=True,
+                                        )
+                                    )
+                uncovered = [
+                    (
+                        row_position,
+                        node.columns[column_position].key,
+                    )
+                    for row_position in range(len(node.rows))
+                    for column_position in range(len(node.columns))
+                    if (
+                        row_position,
+                        column_position,
+                    )
+                    not in grid_owners
+                ]
+                if uncovered:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="TABLE_GRID_INCOMPLETE",
+                            message=(
+                                f"Table {node.id!r} leaves "
+                                f"{len(uncovered)} logical grid positions "
+                                "uncovered."
+                            ),
+                            node_ids=[node.id],
+                            path=f"content.{index}.rows",
+                            suggested_actions=[
+                                {
+                                    "action": "fill_table_cells",
+                                    "positions": [
+                                        {
+                                            "row": row_position,
+                                            "column_key": column_key,
+                                        }
+                                        for row_position, column_key in (
+                                            uncovered[:20]
+                                        )
+                                    ],
+                                }
+                            ],
+                        )
+                    )
 
         for field_index, document_field in enumerate(
             _document_fields(self._spec)
@@ -1697,6 +2023,14 @@ class Document:
                     for row in table.rows:
                         if row.id in identity_updates:
                             row.source_ref = identity_updates[row.id]
+                        for cell in row.cells:
+                            if cell.id in identity_updates:
+                                cell.source_ref = identity_updates[cell.id]
+                            for paragraph in cell.content:
+                                if paragraph.id in identity_updates:
+                                    paragraph.source_ref = (
+                                        identity_updates[paragraph.id]
+                                    )
                 updated._native = native
                 updated._import_diagnostics = self.import_diagnostics
         except _PatchFailure as error:
@@ -1797,6 +2131,14 @@ class Document:
                 block
                 for part in payload.get("header_footers", [])
                 for block in part.get("content", [])
+            ),
+            *(
+                paragraph
+                for table in payload.get("content", [])
+                if table.get("type") == "table"
+                for row in table.get("rows", [])
+                for cell in row.get("cells", [])
+                for paragraph in cell.get("content", [])
             ),
         ]
         matches = [
@@ -1984,6 +2326,61 @@ class Document:
                     node_ids=[
                         table["id"],
                         *[column["id"] for column in matches],
+                    ],
+                )
+            )
+        return matches[0]
+
+    @staticmethod
+    def _find_table_cell(
+        table: dict[str, Any],
+        selector: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not isinstance(selector, str) or not selector:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="INVALID_SPEC",
+                    message=(
+                        "table.cell.format requires a non-empty cell ID."
+                    ),
+                    node_ids=[table["id"]],
+                )
+            )
+        normalized = selector[1:] if selector.startswith("#") else selector
+        matches = [
+            (row, cell)
+            for row in table.get("rows", [])
+            for cell in row.get("cells", [])
+            if cell.get("id") == normalized
+        ]
+        if not matches:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="TARGET_NOT_FOUND",
+                    message=(
+                        f"No cell matched {selector!r} in table "
+                        f"{table['id']!r}."
+                    ),
+                    node_ids=[table["id"]],
+                    suggested_actions=[
+                        {"action": "inspect_table_cells"}
+                    ],
+                )
+            )
+        if len(matches) > 1:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="AMBIGUOUS_SELECTOR",
+                    message=(
+                        f"Cell selector {selector!r} is ambiguous in "
+                        f"table {table['id']!r}."
+                    ),
+                    node_ids=[
+                        table["id"],
+                        *[cell["id"] for _, cell in matches],
                     ],
                 )
             )
@@ -2276,6 +2673,149 @@ class Document:
                 ]
                 if before.get("width") != normalized.get("width")
                 else [],
+            }
+
+        if operation_name == "table.cell.format":
+            unexpected = sorted(
+                set(operation)
+                - {"op", "target", "cell", "set", "clear"}
+            )
+            table = Document._find_table(
+                payload,
+                operation.get("target"),
+            )
+            row, cell = Document._find_table_cell(
+                table,
+                operation.get("cell"),
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "table.cell.format received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[table["id"], row["id"], cell["id"]],
+                    )
+                )
+            set_values = operation.get("set", {})
+            clear_values = operation.get("clear", [])
+            valid_shape = (
+                isinstance(set_values, dict)
+                and isinstance(clear_values, list)
+                and all(
+                    isinstance(value, str)
+                    for value in clear_values
+                )
+                and len(clear_values) == len(set(clear_values))
+            )
+            known_fields = set(TableCellFormat.model_fields)
+            unknown = (
+                sorted(
+                    (set(set_values) | set(clear_values))
+                    - known_fields
+                )
+                if valid_shape
+                else []
+            )
+            overlap = (
+                sorted(set(set_values) & set(clear_values))
+                if valid_shape
+                else []
+            )
+            has_null = (
+                any(value is None for value in set_values.values())
+                if isinstance(set_values, dict)
+                else False
+            )
+            if (
+                not valid_shape
+                or not set_values
+                and not clear_values
+                or unknown
+                or overlap
+                or has_null
+            ):
+                detail = (
+                    "set must be an object and clear a unique string list"
+                    if not valid_shape
+                    else "at least one change is required"
+                    if not set_values and not clear_values
+                    else f"unknown properties: {', '.join(unknown)}"
+                    if unknown
+                    else (
+                        "properties both set and cleared: "
+                        f"{', '.join(overlap)}"
+                    )
+                    if overlap
+                    else "set values cannot be null"
+                )
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"Invalid table.cell.format: {detail}."
+                        ),
+                        node_ids=[table["id"], row["id"], cell["id"]],
+                    )
+                )
+            before = deepcopy(cell.get("format", {}))
+            candidate = {**before, **deepcopy(set_values)}
+            for field_name in clear_values:
+                candidate.pop(field_name, None)
+            try:
+                normalized = TableCellFormat.model_validate(
+                    candidate
+                ).model_dump(mode="json", exclude_none=True)
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="table.cell.format has invalid values.",
+                        node_ids=[table["id"], row["id"], cell["id"]],
+                        suggested_actions=[
+                            {
+                                "action": (
+                                    "inspect_table_cell_format_schema"
+                                ),
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in (
+                                        _validation_error_diagnostics(
+                                            error
+                                        )
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            cell["format"] = normalized
+            cell["revision_updated"] = next_revision
+            row["revision_updated"] = next_revision
+            table["revision_updated"] = next_revision
+            changed_fields = sorted(
+                set(set_values) | set(clear_values)
+            )
+            return {
+                "operation": "table.cell.format",
+                "table_ids": [table["id"]],
+                "row_ids": [row["id"]],
+                "cell_ids": [cell["id"]],
+                "property_changes": [
+                    {
+                        "path": f"format.{field_name}",
+                        "before": before.get(field_name),
+                        "after": normalized.get(field_name),
+                    }
+                    for field_name in changed_fields
+                    if before.get(field_name)
+                    != normalized.get(field_name)
+                ],
             }
 
         if operation_name == "field.update":
@@ -2658,8 +3198,19 @@ class Document:
                 for part in payload.get("header_footers", [])
                 for candidate in part.get("content", [])
             )
+            is_table_cell_paragraph = any(
+                candidate.get("id") == node["id"]
+                for table in payload.get("content", [])
+                if table.get("type") == "table"
+                for row in table.get("rows", [])
+                for cell in row.get("cells", [])
+                for candidate in cell.get("content", [])
+            )
             if (
-                is_header_footer_block
+                (
+                    is_header_footer_block
+                    or is_table_cell_paragraph
+                )
                 and style_ref is not None
                 and named_style_catalog[style_ref].semantic_role == "heading"
             ):
@@ -2668,8 +3219,8 @@ class Document:
                         severity=Severity.ERROR,
                         code="UNSUPPORTED_FEATURE",
                         message=(
-                            "Header/footer paragraphs cannot be promoted to "
-                            "semantic headings."
+                            "Header/footer and table-cell paragraphs cannot "
+                            "be promoted to semantic headings."
                         ),
                         node_ids=[node["id"]],
                         suggested_actions=[

@@ -18,6 +18,7 @@ from aioffice.spec.models import (
     Paragraph,
     ParagraphStyle,
     Table,
+    TableCell,
     TextSpan,
     TextStyle,
 )
@@ -153,7 +154,10 @@ def _table_css(table: Table) -> str:
     return ";".join(values)
 
 
-def _table_cell_css(table: Table) -> str:
+def _table_cell_css(
+    table: Table,
+    cell: TableCell | None = None,
+) -> str:
     layout = table.layout
     values: list[str] = []
     for property_name, field_name in (
@@ -162,9 +166,32 @@ def _table_cell_css(table: Table) -> str:
         ("padding-bottom", "cell_margin_bottom"),
         ("padding-left", "cell_margin_left"),
     ):
-        value = getattr(layout, field_name)
+        cell_value = (
+            getattr(cell.format, field_name.removeprefix("cell_"))
+            if cell is not None
+            else None
+        )
+        value = (
+            cell_value
+            if cell_value is not None
+            else getattr(layout, field_name)
+        )
         if value is not None:
             values.append(f"{property_name}:{value.to_css()}")
+    if cell is not None:
+        if cell.format.vertical_alignment is not None:
+            values.append(
+                f"vertical-align:{cell.format.vertical_alignment}"
+            )
+        if cell.format.no_wrap is not None:
+            values.append(
+                "white-space:"
+                f"{'nowrap' if cell.format.no_wrap else 'normal'}"
+            )
+        if cell.format.background_color is not None:
+            values.append(
+                f"background-color:{cell.format.background_color}"
+            )
     return ";".join(values)
 
 
@@ -607,15 +634,79 @@ def export_html(
                     f'<tr data-row-id="{escape(row.id, quote=True)}"'
                     f"{_style_attribute(';'.join(row_css))}>"
                 )
-                lines.extend(
-                    (
-                        f'<td data-column-id="'
-                        f'{escape(column.id, quote=True)}"'
-                        f"{_style_attribute(cell_css)}>"
-                        f"{escape(str(row.values.get(column.key, '')))}</td>"
-                    )
+                column_by_key = {
+                    column.key: column
                     for column in block.columns
-                )
+                }
+                column_positions = {
+                    column.key: index
+                    for index, column in enumerate(block.columns)
+                }
+                column_count = len(block.columns)
+                for cell in sorted(
+                    row.cells,
+                    key=lambda item: column_positions.get(
+                        item.column_key,
+                        column_count,
+                    ),
+                ):
+                    column = column_by_key.get(cell.column_key)
+                    if column is None:
+                        continue
+                    span_attributes = (
+                        (
+                            f' colspan="{cell.column_span}"'
+                            if cell.column_span > 1
+                            else ""
+                        )
+                        + (
+                            f' rowspan="{cell.row_span}"'
+                            if cell.row_span > 1
+                            else ""
+                        )
+                    )
+                    value = escape(cell.plain_text)
+                    if cell.content:
+                        rendered_paragraphs: list[str] = []
+                        for paragraph in cell.content:
+                            resolved_paragraph, resolved_text = (
+                                resolve_node_styles(
+                                    spec,
+                                    style_ref=paragraph.style_ref,
+                                    paragraph_style=(
+                                        paragraph.paragraph_style
+                                    ),
+                                    text_style=paragraph.text_style,
+                                )
+                            )
+                            paragraph_value = (
+                                (
+                                    f"<span"
+                                    f"{_style_attribute(_text_css(resolved_text))}>"
+                                    f"{escape(paragraph.text)}</span>"
+                                    if resolved_text is not None
+                                    else escape(paragraph.text)
+                                )
+                                if paragraph.text is not None
+                                else "".join(
+                                    _span_html(span, resolved_text)
+                                    for span in paragraph.content
+                                )
+                            )
+                            rendered_paragraphs.append(
+                                f'<p id="{escape(paragraph.id, quote=True)}"'
+                                f"{_style_attribute(_paragraph_css(resolved_paragraph))}>"
+                                f"{paragraph_value}</p>"
+                            )
+                        value = "".join(rendered_paragraphs)
+                    lines.append(
+                        f'<td data-cell-id="'
+                        f'{escape(cell.id, quote=True)}" '
+                        f'data-column-id="{escape(column.id, quote=True)}"'
+                        f"{span_attributes}"
+                        f"{_style_attribute(_table_cell_css(block, cell))}>"
+                        f"{value}</td>"
+                    )
                 lines.append("</tr>")
             lines.append("</tbody></table>")
         elif isinstance(block, PageBreak):

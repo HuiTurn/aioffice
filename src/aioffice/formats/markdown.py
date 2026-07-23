@@ -71,7 +71,14 @@ def export_markdown(spec: AiOfficeDocumentSpec) -> str:
             lines.append("| " + " | ".join(titles) + " |")
             lines.append("| " + " | ".join("---" for _ in titles) + " |")
             for row in block.rows:
-                values = [_escape_cell(row.values.get(column.key, "")) for column in block.columns]
+                values_by_key = {
+                    cell.column_key: cell.plain_text
+                    for cell in row.cells
+                }
+                values = [
+                    _escape_cell(values_by_key.get(column.key, ""))
+                    for column in block.columns
+                ]
                 lines.append("| " + " | ".join(values) + " |")
         elif isinstance(block, PageBreak):
             lines.append("<!-- pagebreak -->")

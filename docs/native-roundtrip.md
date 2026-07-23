@@ -74,7 +74,8 @@ overwrite unless the caller explicitly opts in.
 
 The current DOCX native layer lowers `text.replace`, `paragraph.format`,
 `text.format`, `node.remove`, `style.define`, `style.apply`, `style.format`,
-`section.format`, `field.update`, `table.format`, and `table.column.format`.
+`section.format`, `field.update`, `table.format`, `table.column.format`, and
+`table.cell.format`.
 Text replacement can cross Word run boundaries while retaining run properties and
 unknown XML. Paragraph and text formatting mutate only selected supported
 `w:pPr` / `w:rPr` properties and preserve unrelated or unknown children. Character
@@ -100,12 +101,23 @@ settings remain untouched.
 
 Body tables project explicit preferred width, alignment, layout algorithm, indent,
 cell spacing, cell margins, repeated-header behavior, row pagination/height, and
-grid-column widths. Table, column, and data-row identities survive generated DOCX
-reopen through the embedded manifest. `table.format` changes only selected
-`w:tblPr` properties. `table.column.format` changes one `w:gridCol` and matching
-one-to-one `w:tcW` values only after proving a regular, unmerged grid. Merged,
-vertically merged, horizontally spanned, or shifted grids reject column mutation
-atomically instead of guessing at physical cell ownership.
+grid-column widths. Table, column, data-row, logical-cell, and supported cell-paragraph
+identities survive generated DOCX reopen through the embedded manifest.
+`gridSpan`/`vMerge` are normalized to anchor cells with column/row spans only after
+proving a rectangular logical grid.
+
+`table.format` changes only selected `w:tblPr` properties.
+`table.column.format` changes one `w:gridCol` and matching one-to-one `w:tcW` values
+only after proving a regular, unmerged grid. Merged, vertically merged, horizontally
+spanned, or shifted grids reject column mutation atomically instead of guessing at
+physical cell ownership. `table.cell.format` mutates only selected properties on one
+mapped anchor `w:tcPr` and therefore remains safe for a mapped merged cell.
+
+Cell paragraphs containing supported text runs and hyperlinks use the same
+`text.replace`, `text.format`, `paragraph.format`, and `style.apply` lowering as body
+paragraphs. Cells containing drawings, objects, nested tables, fields, or malformed
+content expose a read-only display-text fallback; cell-wide formatting can still be
+safe because it does not reconstruct cell children.
 
 Header/footer parts are separately mapped by part URI. Ordinary paragraph edits are
 lowered to the referenced `headerN.xml` or `footerN.xml`; `document.xml` and unrelated
@@ -119,6 +131,6 @@ and unknown elements remain opaque and cannot be selected for destructive text
 edits.
 
 Other operations are rejected before a new native revision is committed. Future
-iterations will add richer field families, editable rich/merged table cells,
-drawings, and further layout-aware operations behind the same capability and
-fidelity contracts.
+iterations will add richer field families, header-cell semantics, cell borders,
+nested table editing, drawings, and further layout-aware operations behind the same
+capability and fidelity contracts.

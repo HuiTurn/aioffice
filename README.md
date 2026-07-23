@@ -16,13 +16,13 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev8`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev9`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
-parts, structured dynamic fields, explicit table geometry, semantic diffs, render
-contracts, and fidelity reports. Workbook, presentation, PDF, native visual
-rendering, and MCP remain planned.
+parts, structured dynamic fields, explicit table geometry, logical merged cells,
+rich table-cell paragraphs, semantic diffs, render contracts, and fidelity reports.
+Workbook, presentation, PDF, native visual rendering, and MCP remain planned.
 
 ## Install
 
@@ -114,7 +114,8 @@ commit is refused when native identity is ambiguous. The detailed invariants are
 Native DOCX lowering in this development version supports `text.replace`,
 `paragraph.format`, `text.format`, `node.remove`, `style.define`, `style.apply`,
 `style.format`, `section.format`, `field.update`, `table.format`, and
-`table.column.format`. Ask the artifact before planning an edit:
+`table.column.format`, and `table.cell.format`. Ask the artifact before planning
+an edit:
 
 ```python
 capabilities = doc.capabilities()
@@ -341,8 +342,9 @@ drawings, objects, tables, and malformed field structures remain opaque. See
 [the dynamic field contract](docs/dynamic-fields.md) and
 [the header/footer contract](docs/header-footer.md).
 
-Document tables keep semantic column keys and stable column/row IDs while exposing
-layout geometry in explicit units:
+Document tables keep semantic column keys and stable column/row/cell IDs while
+exposing layout geometry in explicit units. The `values` form remains a compact
+input shorthand and is normalized to cells:
 
 ```python
 table_doc = DocumentBuilder().table(
@@ -391,10 +393,60 @@ result = table_doc.apply(
 )
 ```
 
-Imported regular DOCX grids support selective table and column formatting. Merged,
-shifted, or otherwise irregular grids remain readable but reject column-width
-mutation atomically; cell content is currently projected as plain text. See
-[the table layout contract](docs/table-layout.md).
+Logical cells can span rows or columns, contain multiple rich paragraphs, and carry
+cell-local formatting:
+
+```python
+from aioffice import Document
+
+rich_table = Document.from_spec({
+    "content": [{
+        "id": "summary_table",
+        "type": "table",
+        "columns": [
+            {"key": "summary", "title": "Summary"},
+            {"key": "detail", "title": "Detail"},
+        ],
+        "rows": [{
+            "id": "summary_row",
+            "cells": [{
+                "id": "summary_cell",
+                "column_key": "summary",
+                "column_span": 2,
+                "content": [{
+                    "id": "summary_text",
+                    "type": "paragraph",
+                    "content": [
+                        {"type": "text", "text": "Approved", "marks": ["strong"]},
+                        {"type": "text", "text": " for release"},
+                    ],
+                }],
+                "format": {
+                    "vertical_alignment": "center",
+                    "background_color": "#EAF2F8",
+                    "margin_left": {"value": 8, "unit": "pt"},
+                },
+            }],
+        }],
+    }],
+})
+
+result = rich_table.apply([{
+    "op": "table.cell.format",
+    "target": "#summary_table",
+    "cell": "#summary_cell",
+    "set": {"background_color": "#FFF2CC"},
+}])
+```
+
+Imported DOCX grids are analyzed as logical cells before `gridSpan` and `vMerge`
+are exposed. Regular grids support selective column widths; merged grids reject
+column-width mutation but still support formatting a mapped anchor cell. Supported
+cell paragraphs use the normal text and paragraph operations. Cells containing
+drawings, nested tables, dynamic fields, or malformed content fall back to a
+read-only text projection while their native XML remains intact. See
+[the table layout contract](docs/table-layout.md) and
+[the table cell contract](docs/table-cells.md).
 
 `doc.render()` currently returns a semantic HTML preview whose contract explicitly
 reports `fidelity="approximate"` and `verification_status="preview_only"`. It must
@@ -442,9 +494,10 @@ preview = result.document
 Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `node.append`, `node.insert_after`, `node.remove`, `node.update`, `style.define`,
 `style.apply`, `style.format`, `section.format`, `field.update`, `table.format`, and
-`table.column.format`. Imported DOCX documents expose the native-safe subset reported
-by `capabilities()`. Selectors use stable content, section, header/footer block,
-field, table, column, or row identities in this release.
+`table.column.format`, and `table.cell.format`. Imported DOCX documents expose the
+native-safe subset reported by `capabilities()`. Selectors use stable content,
+section, header/footer block, field, table, column, row, cell, or rich cell-paragraph
+identities in this release.
 
 ## CLI
 
@@ -465,6 +518,8 @@ aioffice schema --kind document-field --output document-field.schema.json
 aioffice schema --kind table-width --output table-width.schema.json
 aioffice schema --kind table-layout --output table-layout.schema.json
 aioffice schema --kind table-column --output table-column.schema.json
+aioffice schema --kind table-cell --output table-cell.schema.json
+aioffice schema --kind table-cell-format --output table-cell-format.schema.json
 aioffice schema --kind header-footer-bindings --output header-footer-bindings.schema.json
 aioffice schema --kind header-footer-part --output header-footer-part.schema.json
 aioffice schema --kind text-range --output text-range.schema.json

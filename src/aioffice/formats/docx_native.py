@@ -36,10 +36,15 @@ from aioffice.formats.docx_section import (
     patch_section_layout,
 )
 from aioffice.formats.docx_tables import (
+    native_ref_for_table_cell,
+    native_ref_for_table_cell_paragraph,
     native_ref_for_table_column,
     native_ref_for_table_row,
+    patch_table_cell_format,
     patch_table_column_width,
     patch_table_layout,
+    table_cell_from_ref,
+    table_cell_paragraph_from_ref,
 )
 from aioffice.native import (
     FidelityReport,
@@ -61,6 +66,8 @@ from aioffice.spec.models import (
     ParagraphStyle,
     SectionLayout,
     Table,
+    TableCell,
+    TableCellFormat,
     TableLayout,
     TextStyle,
 )
@@ -89,6 +96,14 @@ def _find_source_ref(spec: AiOfficeDocumentSpec, target: Any) -> NativeRef:
                 block
                 for part in spec.header_footers
                 for block in part.content
+            ),
+            *(
+                paragraph
+                for table in spec.content
+                if isinstance(table, Table)
+                for row in table.rows
+                for cell in row.cells
+                for paragraph in cell.content
             ),
         ]
         if node.id == target_id
@@ -199,6 +214,29 @@ def _find_table_column(
     if len(matches) != 1:
         raise NativePackageError(
             f"Column selector {selector!r} matched {len(matches)} columns "
+            f"in table {table.id!r}."
+        )
+    return matches[0]
+
+
+def _find_table_cell(
+    table: Table,
+    selector: Any,
+) -> TableCell:
+    if not isinstance(selector, str) or not selector:
+        raise NativePackageError(
+            "table.cell.format requires a non-empty cell ID."
+        )
+    normalized = selector[1:] if selector.startswith("#") else selector
+    matches = [
+        cell
+        for row in table.rows
+        for cell in row.cells
+        if cell.id == normalized
+    ]
+    if len(matches) != 1:
+        raise NativePackageError(
+            f"Cell selector {selector!r} matched {len(matches)} cells "
             f"in table {table.id!r}."
         )
     return matches[0]
@@ -486,6 +524,7 @@ def apply_docx_operations(
         "field.update",
         "table.format",
         "table.column.format",
+        "table.cell.format",
     }
     unsupported = sorted({str(operation.get("op")) for operation in operations} - supported)
     if unsupported:
@@ -493,7 +532,8 @@ def apply_docx_operations(
             "Imported DOCX V0.2 currently supports native lowering for "
             "text.replace, paragraph.format, text.format, node.remove, "
             "style.apply, style.define, style.format, section.format, and "
-            "field.update, table.format, and table.column.format; "
+            "field.update, table.format, table.column.format, and "
+            "table.cell.format; "
             f"unsupported: {', '.join(unsupported)}."
         )
 
@@ -528,6 +568,36 @@ def apply_docx_operations(
         source_ref: NativeRef,
     ) -> tuple[ET.Element, list[ET.Element]]:
         part_uri = source_ref.part_uri
+        if source_ref.native_kind in {"w:tc", "w:tc/w:p"}:
+            if (
+                part_uri != "/word/document.xml"
+                or source_ref.element_index is None
+            ):
+                raise NativePackageError(
+                    "Table-cell references must point into document.xml."
+                )
+            body_elements = list(body)
+            if source_ref.element_index >= len(body_elements):
+                raise NativePackageError(
+                    "Table-cell reference points outside w:body."
+                )
+            table = body_elements[source_ref.element_index]
+            if table.tag != _q(W, "tbl"):
+                raise NativePackageError(
+                    "Table-cell reference no longer points to w:tbl."
+                )
+            try:
+                if source_ref.native_kind == "w:tc":
+                    return table, [
+                        table_cell_from_ref(table, source_ref)
+                    ]
+                cell, paragraph = table_cell_paragraph_from_ref(
+                    table,
+                    source_ref,
+                )
+                return cell, [paragraph]
+            except ValueError as error:
+                raise NativePackageError(str(error)) from error
         container = part_containers.get(part_uri)
         if container is None:
             if not updated.has_part(part_uri):
@@ -837,6 +907,78 @@ def apply_docx_operations(
                 ) from error
             changed_xml_parts.add(source_ref.part_uri)
             continue
+        if operation_name == "table.cell.format":
+            source_table, source_ref = _find_table(
+                spec,
+                operation.get("target"),
+            )
+            source_cell = _find_table_cell(
+                source_table,
+                operation.get("cell"),
+            )
+            if not isinstance(source_cell.source_ref, NativeRef):
+                raise NativePackageError(
+                    f"Table cell {source_cell.id!r} has no editable "
+                    "DOCX source reference."
+                )
+            _, mapped_elements = elements_for_ref(source_ref)
+            if (
+                len(mapped_elements) != 1
+                or mapped_elements[0].tag != _q(W, "tbl")
+            ):
+                raise NativePackageError(
+                    "table.cell.format requires a native reference "
+                    "to one w:tbl."
+                )
+            result_table = next(
+                (
+                    candidate
+                    for candidate in result_spec.content
+                    if isinstance(candidate, Table)
+                    and candidate.id == source_table.id
+                ),
+                None,
+            )
+            result_cell = (
+                next(
+                    (
+                        cell
+                        for row in result_table.rows
+                        for cell in row.cells
+                        if cell.id == source_cell.id
+                    ),
+                    None,
+                )
+                if result_table is not None
+                else None
+            )
+            if result_cell is None:
+                raise NativePackageError(
+                    f"Patch result no longer contains table cell "
+                    f"{source_cell.id!r}."
+                )
+            fields = set(operation.get("set", {})) | set(
+                operation.get("clear", [])
+            )
+            try:
+                TableCellFormat.model_validate(
+                    operation.get("set", {})
+                )
+                native_cell = table_cell_from_ref(
+                    mapped_elements[0],
+                    source_cell.source_ref,
+                )
+                patch_table_cell_format(
+                    native_cell,
+                    result_cell.format,
+                    fields,
+                )
+            except (ValidationError, ValueError) as error:
+                raise NativePackageError(
+                    f"Could not lower table.cell.format: {error}"
+                ) from error
+            changed_xml_parts.add(source_ref.part_uri)
+            continue
 
         source_ref = _find_source_ref(spec, operation.get("target"))
         container, elements = elements_for_ref(source_ref)
@@ -1059,6 +1201,98 @@ def apply_docx_operations(
                 )
             except ValueError:
                 continue
+        result_cell_ids = {
+            cell.id
+            for row in result_table.rows
+            for cell in row.cells
+        }
+        result_paragraph_ids = {
+            paragraph.id
+            for row in result_table.rows
+            for cell in row.cells
+            for paragraph in cell.content
+        }
+        native_rows = table_element.findall(_q(W, "tr"))
+        for source_row in source_table.rows:
+            for source_cell in source_row.cells:
+                cell_ref = source_cell.source_ref
+                if (
+                    source_cell.id not in result_cell_ids
+                    or not isinstance(cell_ref, NativeRef)
+                ):
+                    continue
+                try:
+                    native_cell = table_cell_from_ref(
+                        table_element,
+                        cell_ref,
+                    )
+                except ValueError:
+                    continue
+                coordinates = next(
+                    (
+                        (native_row_index, native_cell_index)
+                        for native_row_index, native_row in enumerate(
+                            native_rows
+                        )
+                        for native_cell_index, candidate in enumerate(
+                            native_row.findall(_q(W, "tc"))
+                        )
+                        if candidate is native_cell
+                    ),
+                    None,
+                )
+                if coordinates is None:
+                    continue
+                native_row_index, native_cell_index = coordinates
+                identity_updates[source_cell.id] = (
+                    native_ref_for_table_cell(
+                        table_element,
+                        table_index,
+                        native_row_index,
+                        native_cell_index,
+                    )
+                )
+                for source_paragraph in source_cell.content:
+                    paragraph_ref = source_paragraph.source_ref
+                    if (
+                        source_paragraph.id
+                        not in result_paragraph_ids
+                        or not isinstance(paragraph_ref, NativeRef)
+                    ):
+                        continue
+                    try:
+                        paragraph_cell, native_paragraph = (
+                            table_cell_paragraph_from_ref(
+                                table_element,
+                                paragraph_ref,
+                            )
+                        )
+                    except ValueError:
+                        continue
+                    if paragraph_cell is not native_cell:
+                        continue
+                    paragraphs = native_cell.findall(_q(W, "p"))
+                    paragraph_index = next(
+                        (
+                            paragraph_index
+                            for paragraph_index, candidate in enumerate(
+                                paragraphs
+                            )
+                            if candidate is native_paragraph
+                        ),
+                        None,
+                    )
+                    if paragraph_index is None:
+                        continue
+                    identity_updates[source_paragraph.id] = (
+                        native_ref_for_table_cell_paragraph(
+                            table_element,
+                            table_index,
+                            native_row_index,
+                            native_cell_index,
+                            paragraph_index,
+                        )
+                    )
     for section_id, (section, container, container_kind) in source_sections.items():
         index = current_indices.get(id(container))
         if index is None:
@@ -1117,6 +1351,14 @@ def apply_docx_operations(
             for row in table.rows:
                 if row.id in identity_updates:
                     row.source_ref = identity_updates[row.id]
+                for cell in row.cells:
+                    if cell.id in identity_updates:
+                        cell.source_ref = identity_updates[cell.id]
+                    for paragraph in cell.content:
+                        if paragraph.id in identity_updates:
+                            paragraph.source_ref = identity_updates[
+                                paragraph.id
+                            ]
         updated.set_part(
             MANIFEST_PART_URI,
             serialize_identity_manifest(build_identity_manifest(manifest_spec)),

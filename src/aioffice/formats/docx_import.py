@@ -41,9 +41,13 @@ from aioffice.formats.docx_section import (
     read_section_layout,
 )
 from aioffice.formats.docx_tables import (
+    analyze_table_grid,
     is_regular_table_grid,
+    native_ref_for_table_cell,
+    native_ref_for_table_cell_paragraph,
     native_ref_for_table_column,
     native_ref_for_table_row,
+    read_table_cell_format,
     read_table_column_widths,
     read_table_layout,
     read_table_row,
@@ -569,22 +573,44 @@ def _table_projection(
     element: ET.Element,
     index: int,
     seen_ids: set[str],
+    hyperlink_targets: dict[str, str],
+    named_styles: dict[str, NamedStyle],
 ) -> dict[str, Any]:
     native_rows = element.findall(f"./{_q(W, 'tr')}")
-    raw_rows = [
-        [
-            _paragraph_text(cell)
-            for cell in row.findall(f"./{_q(W, 'tc')}")
-        ]
-        for row in native_rows
-    ]
     grid_widths = read_table_column_widths(element)
     column_count = max(
         len(grid_widths),
-        max((len(row) for row in raw_rows), default=0),
+        max(
+            (
+                len(row.findall(f"./{_q(W, 'tc')}"))
+                for row in native_rows
+            ),
+            default=0,
+        ),
         1,
     )
-    header = raw_rows[0] if raw_rows else []
+    header: list[str] = [""] * column_count
+    if native_rows:
+        header_cursor = 0
+        for cell in native_rows[0].findall(f"./{_q(W, 'tc')}"):
+            properties = cell.find(_q(W, "tcPr"))
+            span = (
+                properties.find(_q(W, "gridSpan"))
+                if properties is not None
+                else None
+            )
+            raw_span = (
+                span.get(_q(W, "val"))
+                if span is not None
+                else "1"
+            )
+            try:
+                column_span = max(1, int(raw_span or "1"))
+            except ValueError:
+                column_span = 1
+            if header_cursor < column_count:
+                header[header_cursor] = _paragraph_text(cell)
+            header_cursor += column_span
     fingerprint = hashlib.sha256(
         ET.tostring(element, encoding="utf-8")
     ).hexdigest()[:12]
@@ -612,7 +638,7 @@ def _table_projection(
             "key": f"column_{column_index + 1}",
             "title": (
                 header[column_index]
-                if column_index < len(header) and header[column_index]
+                if header[column_index]
                 else f"Column {column_index + 1}"
             ),
         }
@@ -625,12 +651,181 @@ def _table_projection(
                 column_index,
             ).model_dump(mode="json", exclude_none=True)
         columns.append(column)
+
+    analysis = analyze_table_grid(element, start_row=1)
+    logical_anchors = {
+        (placement.row_index, placement.cell_index): placement
+        for placement in analysis.placements
+        if not placement.continuation
+    }
+    flattened_paragraph_index = 0
+
+    def cell_payload(
+        cell: ET.Element,
+        *,
+        row_index: int,
+        cell_index: int,
+        start_column: int,
+        column_span: int = 1,
+        row_span: int = 1,
+    ) -> dict[str, Any]:
+        nonlocal flattened_paragraph_index
+        cell_fingerprint = hashlib.sha256(
+            ET.tostring(cell, encoding="utf-8")
+        ).hexdigest()[:12]
+        payload: dict[str, Any] = {
+            "id": _unique_id(
+                "cell",
+                (
+                    f"{fingerprint}_{row_index}_{cell_index}_"
+                    f"{cell_fingerprint}"
+                ),
+                cell_index,
+                seen_ids,
+            ),
+            "type": "table_cell",
+            "column_key": columns[start_column]["key"],
+            "source_ref": native_ref_for_table_cell(
+                element,
+                index,
+                row_index,
+                cell_index,
+            ).model_dump(mode="json", exclude_none=True),
+            "format": read_table_cell_format(cell).model_dump(
+                mode="json",
+                exclude_none=True,
+            ),
+        }
+        if column_span > 1:
+            payload["column_span"] = column_span
+        if row_span > 1:
+            payload["row_span"] = row_span
+        paragraphs = cell.findall(f"./{_q(W, 'p')}")
+        has_unsupported_content = (
+            cell.find(f"./{_q(W, 'tbl')}") is not None
+            or cell.find(f".//{_q(W, 'drawing')}") is not None
+            or cell.find(f".//{_q(W, 'object')}") is not None
+            or cell.find(f".//{_q(W, 'fldSimple')}") is not None
+            or cell.find(f".//{_q(W, 'fldChar')}") is not None
+            or cell.find(f".//{_q(W, 'instrText')}") is not None
+        )
+        scalar_projection = (
+            not has_unsupported_content
+            and len(paragraphs) == 1
+            and paragraphs[0].get(_q(W14, "paraId")) is None
+            and paragraphs[0].find(_q(W, "pPr")) is None
+            and paragraphs[0].find(_q(W, "hyperlink")) is None
+            and all(
+                child.tag == _q(W, "r")
+                for child in list(paragraphs[0])
+            )
+        )
+        projected_paragraphs: list[dict[str, Any]] = []
+        if (
+            not has_unsupported_content
+            and not scalar_projection
+            and paragraphs
+        ):
+            for paragraph_index, paragraph in enumerate(paragraphs):
+                projected = _paragraph_projection(
+                    paragraph,
+                    flattened_paragraph_index,
+                    seen_ids,
+                    hyperlink_targets,
+                    named_styles,
+                    allow_heading=False,
+                )
+                flattened_paragraph_index += 1
+                if projected.get("type") != "paragraph":
+                    projected_paragraphs = []
+                    has_unsupported_content = True
+                    break
+                projected["source_ref"] = (
+                    native_ref_for_table_cell_paragraph(
+                        element,
+                        index,
+                        row_index,
+                        cell_index,
+                        paragraph_index,
+                    ).model_dump(mode="json", exclude_none=True)
+                )
+                projected_paragraphs.append(projected)
+        else:
+            flattened_paragraph_index += len(paragraphs)
+        if projected_paragraphs and not has_unsupported_content:
+            payload["content"] = projected_paragraphs
+            payload["metadata"] = {
+                "content_projection": "rich_paragraphs",
+                "content_editable": True,
+            }
+        else:
+            payload["value"] = _paragraph_text(cell)
+            payload["metadata"] = {
+                "content_projection": (
+                    "scalar_value"
+                    if scalar_projection
+                    else "plain_text_read_only"
+                ),
+                "content_editable": False,
+            }
+        return payload
+
     rows = []
-    for row_index, values in enumerate(raw_rows[1:], start=1):
-        native_row = native_rows[row_index]
+    for row_index, native_row in enumerate(native_rows[1:], start=1):
         row_fingerprint = hashlib.sha256(
             ET.tostring(native_row, encoding="utf-8")
         ).hexdigest()[:12]
+        native_cells = native_row.findall(f"./{_q(W, 'tc')}")
+        cells: list[dict[str, Any]] = []
+        if analysis.logical_grid:
+            for cell_index, cell in enumerate(native_cells):
+                placement = logical_anchors.get(
+                    (row_index, cell_index)
+                )
+                if placement is None:
+                    continue
+                cells.append(
+                    cell_payload(
+                        cell,
+                        row_index=row_index,
+                        cell_index=cell_index,
+                        start_column=placement.start_column,
+                        column_span=placement.column_span,
+                        row_span=placement.row_span,
+                    )
+                )
+        else:
+            for column_index, column in enumerate(columns):
+                if column_index < len(native_cells):
+                    cells.append(
+                        cell_payload(
+                            native_cells[column_index],
+                            row_index=row_index,
+                            cell_index=column_index,
+                            start_column=column_index,
+                        )
+                    )
+                else:
+                    cells.append(
+                        {
+                            "id": _unique_id(
+                                "cell",
+                                (
+                                    f"{fingerprint}_{row_index}_"
+                                    f"missing_{column_index}"
+                                ),
+                                column_index,
+                                seen_ids,
+                            ),
+                            "type": "table_cell",
+                            "column_key": column["key"],
+                            "value": "",
+                            "metadata": {
+                                "content_projection": "unmapped",
+                                "content_editable": False,
+                            },
+                        }
+                    )
         rows.append(
             {
                 "id": _unique_id(
@@ -640,10 +835,7 @@ def _table_projection(
                     seen_ids,
                 ),
                 "type": "table_row",
-                "values": {
-                    column["key"]: values[column_index] if column_index < len(values) else ""
-                    for column_index, column in enumerate(columns)
-                },
+                "cells": cells,
                 "source_ref": native_ref_for_table_row(
                     element,
                     index,
@@ -651,7 +843,7 @@ def _table_projection(
                 ).model_dump(mode="json", exclude_none=True),
                 **read_table_row(native_row),
             }
-        )
+    )
     layout = read_table_layout(element)
     regular_grid = is_regular_table_grid(element)
     return {
@@ -663,13 +855,17 @@ def _table_projection(
         "source_ref": _source_ref([element], [index], "w:tbl"),
         "metadata": {
             "projection": (
-                "regular_grid"
-                if regular_grid
+                "logical_grid"
+                if analysis.logical_grid
                 else "heuristic"
             ),
+            "logical_grid": analysis.logical_grid,
             "regular_grid": regular_grid,
-            "header_row_assumed": bool(raw_rows),
-            "cell_content_projection": "plain_text",
+            "grid_diagnostics": analysis.reasons,
+            "header_row_assumed": bool(native_rows),
+            "cell_content_projection": (
+                "rich_paragraphs_or_read_only_plain_text"
+            ),
         },
     }
 
@@ -1088,7 +1284,13 @@ def import_docx(
             content.append(projected)
             body_index_to_node[index] = projected
         elif element.tag == _q(W, "tbl"):
-            projected = _table_projection(element, index, seen_ids)
+            projected = _table_projection(
+                element,
+                index,
+                seen_ids,
+                hyperlink_targets,
+                named_styles,
+            )
             content.append(projected)
             body_index_to_node[index] = projected
         elif element.tag == _q(W, "sectPr"):
