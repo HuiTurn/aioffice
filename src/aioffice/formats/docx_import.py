@@ -20,6 +20,14 @@ from aioffice.formats.docx_named_styles import (
     read_document_defaults,
     read_named_styles,
 )
+from aioffice.formats.docx_header_footer import (
+    FOOTER_RELATIONSHIP_TYPE,
+    HEADER_RELATIONSHIP_TYPE,
+    binding_field,
+    native_ref_for_header_footer_part,
+    read_even_and_odd_headers,
+    resolve_relationship_target,
+)
 from aioffice.formats.docx_section import (
     native_ref_for_section,
     read_section_layout,
@@ -32,6 +40,7 @@ from aioffice.native import (
     NativePackage,
     apply_identity_manifest,
     native_ref_for_elements,
+    native_ref_for_part_elements,
     parse_identity_manifest,
 )
 from aioffice.native.xml import parse_xml
@@ -77,11 +86,15 @@ def _is_section_carrier(element: ET.Element) -> bool:
     )
 
 
-def _hyperlink_targets(package: NativePackage) -> dict[str, str]:
+def _hyperlink_targets(
+    package: NativePackage,
+    *,
+    source_part: str = "/word/document.xml",
+) -> dict[str, str]:
     return {
         relationship.relationship_id: relationship.target
         for relationship in package.relationships
-        if relationship.source_part == "/word/document.xml"
+        if relationship.source_part == source_part
         and relationship.relationship_type == HYPERLINK_RELATIONSHIP_TYPE
     }
 
@@ -181,13 +194,33 @@ def _source_ref(
     native_kind: str,
     *,
     native_id: str | None = None,
+    part_uri: str = "/word/document.xml",
+    root_path: str = "/w:document/w:body",
 ) -> dict[str, Any]:
-    return native_ref_for_elements(
-        elements,
-        indices,
-        native_kind=native_kind,
-        native_id=native_id,
-    ).model_dump(mode="json", exclude_none=True)
+    factory = (
+        native_ref_for_elements
+        if part_uri == "/word/document.xml"
+        and root_path == "/w:document/w:body"
+        else None
+    )
+    source_ref = (
+        factory(
+            elements,
+            indices,
+            native_kind=native_kind,
+            native_id=native_id,
+        )
+        if factory is not None
+        else native_ref_for_part_elements(
+            elements,
+            indices,
+            part_uri=part_uri,
+            native_kind=native_kind,
+            root_path=root_path,
+            native_id=native_id,
+        )
+    )
+    return source_ref.model_dump(mode="json", exclude_none=True)
 
 
 def _paragraph_projection(
@@ -196,6 +229,10 @@ def _paragraph_projection(
     seen_ids: set[str],
     hyperlink_targets: dict[str, str],
     named_styles: dict[str, NamedStyle],
+    *,
+    part_uri: str = "/word/document.xml",
+    root_path: str = "/w:document/w:body",
+    allow_heading: bool = True,
 ) -> dict[str, Any]:
     text_projection, text_style = _text_projection(element, hyperlink_targets)
     text = _paragraph_text(element)
@@ -224,6 +261,8 @@ def _paragraph_projection(
             [index],
             "w:p",
             native_id=element.attrib.get(_q(W14, "paraId")),
+            part_uri=part_uri,
+            root_path=root_path,
         ),
         "metadata": {
             "native_style_id": style_id or None,
@@ -244,7 +283,7 @@ def _paragraph_projection(
         )
     if text_style is not None:
         common["text_style"] = text_style
-    if heading_level is not None:
+    if heading_level is not None and allow_heading:
         return {
             **common,
             "type": "heading",
@@ -261,6 +300,100 @@ def _paragraph_projection(
             "editable": False,
         }
     return {**common, "type": "paragraph", **text_projection}
+
+
+def _header_footer_part_projection(
+    package: NativePackage,
+    *,
+    part_uri: str,
+    kind: str,
+    seen_ids: set[str],
+    named_styles: dict[str, NamedStyle],
+) -> dict[str, Any]:
+    root = parse_xml(package.get_part(part_uri))
+    expected_root = _q(W, "hdr" if kind == "header" else "ftr")
+    if root.tag != expected_root:
+        raise NativePackageError(
+            f"Header/footer relationship targets unexpected root {root.tag!r}."
+        )
+    fingerprint = hashlib.sha256(
+        ET.tostring(root, encoding="utf-8")
+    ).hexdigest()[:12]
+    part_id = _unique_id(kind, fingerprint, 0, seen_ids)
+    root_path = "/w:hdr" if kind == "header" else "/w:ftr"
+    hyperlinks = _hyperlink_targets(package, source_part=part_uri)
+    content: list[dict[str, Any]] = []
+    for index, element in enumerate(list(root)):
+        complex_features = [
+            feature
+            for feature, query in (
+                ("field", f".//{_q(W, 'fldChar')}"),
+                ("field_code", f".//{_q(W, 'instrText')}"),
+                ("drawing", f".//{_q(W, 'drawing')}"),
+                ("object", f".//{_q(W, 'object')}"),
+            )
+            if element.find(query) is not None
+        ]
+        if element.tag == _q(W, "p") and not complex_features:
+            content.append(
+                _paragraph_projection(
+                    element,
+                    index,
+                    seen_ids,
+                    hyperlinks,
+                    named_styles,
+                    part_uri=part_uri,
+                    root_path=root_path,
+                    allow_heading=False,
+                )
+            )
+            continue
+        native_kind = element.tag.rsplit("}", 1)[-1]
+        summary = (
+            f"Native {kind} paragraph contains "
+            f"{', '.join(complex_features)}."
+            if element.tag == _q(W, "p")
+            else f"Unsupported native {kind} element {native_kind}."
+        )
+        content.append(
+            {
+                "id": _unique_id(
+                    "opaque",
+                    f"{kind}_{native_kind}_{fingerprint}",
+                    index,
+                    seen_ids,
+                ),
+                "type": "opaque",
+                "summary": summary,
+                "source_ref": _source_ref(
+                    [element],
+                    [index],
+                    native_kind,
+                    part_uri=part_uri,
+                    root_path=root_path,
+                ),
+                "capabilities": ["inspect", "render"],
+                "editable": False,
+                "metadata": {"native_features": complex_features},
+            }
+        )
+    return {
+        "id": part_id,
+        "type": "header_footer",
+        "kind": kind,
+        "content": content,
+        "source_ref": native_ref_for_header_footer_part(
+            root,
+            part_uri,
+            kind=kind,
+        ).model_dump(mode="json", exclude_none=True),
+        "metadata": {
+            "native_part_uri": part_uri,
+            "projection_complete": not any(
+                block["type"] == "opaque" for block in content
+            ),
+        },
+    }
 
 
 def _table_projection(
@@ -495,6 +628,12 @@ def import_docx(
     content: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     body_elements = list(body)
+    header_footer_diagnostics: list[Diagnostic] = []
+    document_relationships = {
+        relationship.relationship_id: relationship
+        for relationship in package.relationships
+        if relationship.source_part == "/word/document.xml"
+    }
     section_endpoints: list[tuple[int, ET.Element, str]] = []
     for body_index, body_element in enumerate(body_elements):
         if body_element.tag == _q(W, "p"):
@@ -506,6 +645,7 @@ def import_docx(
         elif body_element.tag == _q(W, "sectPr"):
             section_endpoints.append((body_index, body_element, "body"))
     sections: list[dict[str, Any]] = []
+    section_binding_targets: list[dict[str, tuple[str, str]]] = []
     for section_index, (body_index, section, container) in enumerate(
         section_endpoints
     ):
@@ -537,6 +677,66 @@ def import_docx(
                 },
             }
         )
+        binding_targets: dict[str, tuple[str, str]] = {}
+        for reference in list(section):
+            if reference.tag == _q(W, "headerReference"):
+                kind = "header"
+                expected_relationship_type = HEADER_RELATIONSHIP_TYPE
+            elif reference.tag == _q(W, "footerReference"):
+                kind = "footer"
+                expected_relationship_type = FOOTER_RELATIONSHIP_TYPE
+            else:
+                continue
+            variant = reference.get(_q(W, "type"), "default")
+            field_name = binding_field(kind, variant)
+            relationship_id = reference.get(_q(R, "id"))
+            relationship = (
+                document_relationships.get(relationship_id)
+                if relationship_id is not None
+                else None
+            )
+            if (
+                field_name is None
+                or relationship is None
+                or relationship.external
+                or relationship.relationship_type != expected_relationship_type
+            ):
+                header_footer_diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.WARNING,
+                        code="HEADER_FOOTER_REFERENCE_INVALID",
+                        message=(
+                            f"Section {section_id!r} contains an invalid "
+                            f"{kind} reference."
+                        ),
+                        node_ids=[section_id],
+                        recoverable=True,
+                        suggested_actions=[
+                            {"action": "inspect_native_header_footer_reference"}
+                        ],
+                    )
+                )
+                continue
+            part_uri = resolve_relationship_target(
+                relationship.source_part,
+                relationship.target,
+            )
+            if not package.has_part(part_uri) or field_name in binding_targets:
+                header_footer_diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.WARNING,
+                        code="HEADER_FOOTER_REFERENCE_INVALID",
+                        message=(
+                            f"Section {section_id!r} has a missing or duplicate "
+                            f"{field_name} target."
+                        ),
+                        node_ids=[section_id],
+                        recoverable=True,
+                    )
+                )
+                continue
+            binding_targets[field_name] = (kind, part_uri)
+        section_binding_targets.append(binding_targets)
     body_index_to_node: dict[int, dict[str, Any]] = {}
     numbering_formats = _numbering_formats(package)
     hyperlink_targets = _hyperlink_targets(package)
@@ -560,6 +760,56 @@ def import_docx(
     document_defaults = (
         read_document_defaults(styles_root) if styles_root is not None else None
     )
+    header_footers: list[dict[str, Any]] = []
+    header_footer_by_uri: dict[str, dict[str, Any]] = {}
+    section_binding_parts: list[dict[str, dict[str, Any]]] = []
+    for section_index, binding_targets in enumerate(section_binding_targets):
+        binding_parts: dict[str, dict[str, Any]] = {}
+        for field_name, (kind, part_uri) in binding_targets.items():
+            projected_part = header_footer_by_uri.get(part_uri)
+            if projected_part is None:
+                try:
+                    projected_part = _header_footer_part_projection(
+                        package,
+                        part_uri=part_uri,
+                        kind=kind,
+                        seen_ids=seen_ids,
+                        named_styles=named_styles,
+                    )
+                except NativePackageError as error:
+                    header_footer_diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.WARNING,
+                            code="HEADER_FOOTER_PROJECTION_FAILED",
+                            message=str(error),
+                            node_ids=[sections[section_index]["id"]],
+                            recoverable=True,
+                        )
+                    )
+                    continue
+                header_footer_by_uri[part_uri] = projected_part
+                header_footers.append(projected_part)
+            elif projected_part["kind"] != kind:
+                header_footer_diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.WARNING,
+                        code="HEADER_FOOTER_REFERENCE_INVALID",
+                        message=(
+                            f"Part {part_uri!r} is referenced as both a header "
+                            "and footer."
+                        ),
+                        node_ids=[sections[section_index]["id"]],
+                        recoverable=True,
+                    )
+                )
+                continue
+            binding_parts[field_name] = projected_part
+        section_binding_parts.append(binding_parts)
+        if binding_parts:
+            sections[section_index]["header_footer"] = {
+                field_name: part["id"]
+                for field_name, part in binding_parts.items()
+            }
     index = 0
     while index < len(body_elements):
         element = body_elements[index]
@@ -635,19 +885,26 @@ def import_docx(
         if active_identity_manifest is not None:
             identity_source = "embedded"
     diagnostics: list[Diagnostic] = [
-        Diagnostic(
-            severity=Severity.WARNING,
-            code="STYLE_PROJECTION_AMBIGUOUS",
-            message=(
-                f"Native DOCX contains duplicate paragraph style ID {style_id!r}; "
-                "the first definition is projected and all native definitions are preserved."
-            ),
-            recoverable=True,
-            suggested_actions=[
-                {"action": "repair_duplicate_native_style", "style_id": style_id}
-            ],
-        )
-        for style_id in sorted(duplicate_style_ids)
+        *header_footer_diagnostics,
+        *[
+            Diagnostic(
+                severity=Severity.WARNING,
+                code="STYLE_PROJECTION_AMBIGUOUS",
+                message=(
+                    f"Native DOCX contains duplicate paragraph style ID {style_id!r}; "
+                    "the first definition is projected and all native definitions "
+                    "are preserved."
+                ),
+                recoverable=True,
+                suggested_actions=[
+                    {
+                        "action": "repair_duplicate_native_style",
+                        "style_id": style_id,
+                    }
+                ],
+            )
+            for style_id in sorted(duplicate_style_ids)
+        ],
     ]
     if active_identity_manifest is not None:
         if active_identity_manifest.format != "docx":
@@ -658,10 +915,17 @@ def import_docx(
                 active_identity_manifest,
                 package_sha256=package.source_sha256,
                 sections=sections,
+                header_footers=header_footers,
             )
         )
 
     for section_index, section in enumerate(sections):
+        binding_parts = section_binding_parts[section_index]
+        if binding_parts:
+            section["header_footer"] = {
+                field_name: part["id"]
+                for field_name, part in binding_parts.items()
+            }
         if section_index == 0:
             section["start_at"] = None
             continue
@@ -676,6 +940,12 @@ def import_docx(
             None,
         )
         section["start_at"] = start_node["id"] if start_node is not None else None
+
+    try:
+        settings_root = parse_xml(package.get_part("/word/settings.xml"))
+    except NativePackageError:
+        settings_root = None
+    even_and_odd_headers = read_even_and_odd_headers(settings_root)
 
     spec = AiOfficeDocumentSpec.model_validate(
         {
@@ -697,11 +967,17 @@ def import_docx(
                 if document_defaults is not None
                 else {}
             ),
+            "settings": (
+                {"even_and_odd_headers": even_and_odd_headers}
+                if even_and_odd_headers is not None
+                else None
+            ),
             "styles": [
                 style.model_dump(mode="json", exclude_none=True)
                 for style in projected_styles
             ],
             "sections": sections or [{"id": "section_default"}],
+            "header_footers": header_footers,
             "content": content,
             "extensions": {
                 "dev.aioffice.native": {

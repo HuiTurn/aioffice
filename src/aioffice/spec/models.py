@@ -16,7 +16,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.5"
+SPEC_VERSION = "0.2-draft.6"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -453,6 +453,23 @@ class NativeRef(StrictModel):
         return self
 
 
+class HeaderFooterBindings(StrictModel):
+    """Explicit section bindings; a missing slot inherits from the previous section."""
+
+    header_default: NodeId | None = None
+    header_first: NodeId | None = None
+    header_even: NodeId | None = None
+    footer_default: NodeId | None = None
+    footer_first: NodeId | None = None
+    footer_even: NodeId | None = None
+
+
+class DocumentSettings(StrictModel):
+    """Document-wide layout switches that cannot be scoped to one section."""
+
+    even_and_odd_headers: bool | None = None
+
+
 class DocumentSection(StrictModel):
     """A stable semantic section anchored at its first content node."""
 
@@ -460,6 +477,7 @@ class DocumentSection(StrictModel):
     type: Literal["section"] = "section"
     start_at: NodeId | None = None
     layout: SectionLayout = Field(default_factory=_default_section_layout)
+    header_footer: HeaderFooterBindings | None = None
     source_ref: NativeRef | str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     revision_added: int = Field(default=1, ge=1)
@@ -600,6 +618,25 @@ Block = Annotated[
 ]
 
 
+HeaderFooterBlock = Annotated[
+    Paragraph | OpaqueBlock,
+    Field(discriminator="type"),
+]
+
+
+class HeaderFooterPart(StrictModel):
+    """A reusable header or footer part referenced by one or more sections."""
+
+    id: NodeId = Field(default_factory=lambda: new_id("region"))
+    type: Literal["header_footer"] = "header_footer"
+    kind: Literal["header", "footer"]
+    content: list[HeaderFooterBlock] = Field(default_factory=list)
+    source_ref: NativeRef | str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    revision_added: int = Field(default=1, ge=1)
+    revision_updated: int = Field(default=1, ge=1)
+
+
 class AiOfficeDocumentSpec(StrictModel):
     schema_url: Literal["https://schemas.aioffice.dev/spec/draft/0.2/document.json"] = Field(
         default=DOCUMENT_SCHEMA_URL,
@@ -611,12 +648,14 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.3",
         "0.2-draft.4",
         "0.2-draft.5",
+        "0.2-draft.6",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)
     metadata: DocumentMetadata = Field(default_factory=DocumentMetadata)
     theme: ThemeRef = Field(default_factory=ThemeRef)
     defaults: DocumentDefaults = Field(default_factory=DocumentDefaults)
+    settings: DocumentSettings | None = None
     styles: list[NamedStyle] = Field(default_factory=list)
     sections: list[DocumentSection] = Field(
         default_factory=lambda: [
@@ -624,6 +663,7 @@ class AiOfficeDocumentSpec(StrictModel):
         ],
         min_length=1,
     )
+    header_footers: list[HeaderFooterPart] = Field(default_factory=list)
     content: list[Block] = Field(default_factory=list)
     assets: list[AssetRef] = Field(default_factory=list)
     extensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -648,4 +688,27 @@ class AiOfficeDocumentSpec(StrictModel):
         section_ids = [section.id for section in self.sections]
         if len(section_ids) != len(set(section_ids)):
             raise ValueError("Document section IDs must be unique.")
+        header_footer_ids = [part.id for part in self.header_footers]
+        if len(header_footer_ids) != len(set(header_footer_ids)):
+            raise ValueError("Header/footer part IDs must be unique.")
+        part_kinds = {part.id: part.kind for part in self.header_footers}
+        for section in self.sections:
+            if section.header_footer is None:
+                continue
+            for field_name, part_id in section.header_footer.model_dump(
+                mode="python"
+            ).items():
+                if part_id is None:
+                    continue
+                expected_kind = field_name.split("_", 1)[0]
+                if part_id not in part_kinds:
+                    raise ValueError(
+                        f"Section {section.id!r} references missing "
+                        f"header/footer part {part_id!r}."
+                    )
+                if part_kinds[part_id] != expected_kind:
+                    raise ValueError(
+                        f"Section {section.id!r} binds {part_id!r} as "
+                        f"{expected_kind}, but the part is {part_kinds[part_id]}."
+                    )
         return self

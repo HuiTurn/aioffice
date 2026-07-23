@@ -16,12 +16,12 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev5`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev6`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
-named styles, document defaults, ordered page/section models, semantic diffs, render
-contracts, and fidelity reports. Workbook, presentation, PDF, native visual rendering,
-and MCP remain planned.
+named styles, document defaults, ordered page/section models, reusable header/footer
+parts, semantic diffs, render contracts, and fidelity reports. Workbook, presentation,
+PDF, native visual rendering, and MCP remain planned.
 
 ## Install
 
@@ -257,6 +257,55 @@ and `section.format` changes only the selected native section properties. Unknow
 section XML remains native and untouched. See
 [the page and section contract](docs/section-layout.md).
 
+Headers and footers use reusable parts rather than copied strings. Each section may
+explicitly bind `default`, `first`, and `even` header/footer variants; a missing
+binding means “inherit the same slot from the previous section”:
+
+```python
+doc = DocumentBuilder(
+    settings={"even_and_odd_headers": True},
+    header_footers=[
+        {
+            "id": "report_header",
+            "kind": "header",
+            "content": [
+                {
+                    "id": "report_header_text",
+                    "type": "paragraph",
+                    "text": "Confidential",
+                }
+            ],
+        },
+        {
+            "id": "report_footer",
+            "kind": "footer",
+            "content": [
+                {
+                    "id": "report_footer_text",
+                    "type": "paragraph",
+                    "text": "AiOffice",
+                }
+            ],
+        },
+    ],
+    sections=[
+        {
+            "id": "main_section",
+            "header_footer": {
+                "header_default": "report_header",
+                "footer_default": "report_footer",
+            },
+        }
+    ],
+).paragraph("Report body", id="body").build()
+```
+
+The paragraph IDs inside a header/footer are regular edit selectors. `text.replace`,
+`text.format`, and `paragraph.format` lower directly into the referenced
+`headerN.xml` or `footerN.xml` part. Native fields, drawings, objects, tables, and
+unknown elements remain opaque and are never reconstructed from their preview text.
+See [the header/footer contract](docs/header-footer.md).
+
 `doc.render()` currently returns a semantic HTML preview whose contract explicitly
 reports `fidelity="approximate"` and `verification_status="preview_only"`. It must
 not be treated as proof of Word pagination. See
@@ -320,6 +369,9 @@ aioffice schema --kind document-defaults --output document-defaults.schema.json
 aioffice schema --kind page-size --output page-size.schema.json
 aioffice schema --kind section-layout --output section-layout.schema.json
 aioffice schema --kind document-section --output document-section.schema.json
+aioffice schema --kind document-settings --output document-settings.schema.json
+aioffice schema --kind header-footer-bindings --output header-footer-bindings.schema.json
+aioffice schema --kind header-footer-part --output header-footer-part.schema.json
 aioffice schema --kind text-range --output text-range.schema.json
 
 aioffice workspace init project

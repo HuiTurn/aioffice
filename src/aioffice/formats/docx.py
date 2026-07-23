@@ -16,7 +16,19 @@ from aioffice.native.identity import (
     MANIFEST_RELATIONSHIP_TYPE,
     build_identity_manifest,
     native_ref_for_elements,
+    native_ref_for_part_elements,
     serialize_identity_manifest,
+)
+from aioffice.formats.docx_header_footer import (
+    FOOTER_CONTENT_TYPE,
+    FOOTER_RELATIONSHIP_TYPE,
+    HEADER_CONTENT_TYPE,
+    HEADER_RELATIONSHIP_TYPE,
+    SETTINGS_CONTENT_TYPE,
+    SETTINGS_RELATIONSHIP_TYPE,
+    apply_header_footer_bindings,
+    native_ref_for_header_footer_part,
+    settings_xml,
 )
 from aioffice.formats.docx_style import (
     apply_paragraph_mark_text_style,
@@ -32,6 +44,8 @@ from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     BulletList,
     Heading,
+    HeaderFooterPart,
+    OpaqueBlock,
     OrderedList,
     PageBreak,
     Paragraph,
@@ -89,7 +103,7 @@ def _relationship(
     parent: ET.Element, rel_id: str, rel_type: str, target: str, **attrs: str
 ) -> None:
     values = {"Id": rel_id, "Type": rel_type, "Target": target, **attrs}
-    ET.SubElement(parent, _q(REL, "Relationship"), values)
+    ET.SubElement(parent, "Relationship", values)
 
 
 def _string_value(value: Any) -> str:
@@ -115,6 +129,17 @@ class _DocxContext:
         rel_id = f"rId{len(self.hyperlinks) + 3}"
         self.hyperlinks.append((rel_id, target))
         return rel_id
+
+
+@dataclass
+class _CompiledHeaderFooters:
+    parts: dict[str, bytes] = field(default_factory=dict)
+    content_types: dict[str, str] = field(default_factory=dict)
+    document_relationships: list[tuple[str, str, str]] = field(
+        default_factory=list
+    )
+    relationship_ids: dict[str, str] = field(default_factory=dict)
+    refs: dict[str, NativeRef] = field(default_factory=dict)
 
 
 def _merge_text_style(
@@ -239,6 +264,7 @@ def _add_table(body: ET.Element, table: Table, context: _DocxContext) -> ET.Elem
 def _document_xml(
     spec: AiOfficeDocumentSpec,
     context: _DocxContext,
+    header_footer_relationship_ids: dict[str, str],
 ) -> tuple[bytes, dict[str, NativeRef]]:
     root = ET.Element(
         _q(W, "document"),
@@ -264,6 +290,11 @@ def _document_xml(
             carrier = _child(body, "p")
             carrier_properties = _child(carrier, "pPr")
             carrier_section = _child(carrier_properties, "sectPr")
+            apply_header_footer_bindings(
+                carrier_section,
+                active_section.header_footer,
+                header_footer_relationship_ids,
+            )
             apply_section_layout(carrier_section, active_section.layout)
             refs[active_section.id] = native_ref_for_section(
                 carrier_section,
@@ -371,6 +402,11 @@ def _document_xml(
     if section_index + 1 != len(sections):
         raise ValueError("Every document section after the first requires a valid start_at.")
     section = _child(body, "sectPr")
+    apply_header_footer_bindings(
+        section,
+        active_section.header_footer,
+        header_footer_relationship_ids,
+    )
     apply_section_layout(section, active_section.layout)
     refs[active_section.id] = native_ref_for_section(
         section,
@@ -378,6 +414,98 @@ def _document_xml(
         container="body",
     )
     return _xml(root), refs
+
+
+def _header_footer_xml(
+    part: HeaderFooterPart,
+    *,
+    part_uri: str,
+) -> tuple[bytes, dict[str, NativeRef], bytes | None]:
+    root_name = "hdr" if part.kind == "header" else "ftr"
+    root = ET.Element(
+        _q(W, root_name),
+        {_q(MC, "Ignorable"): "w14"},
+    )
+    context = _DocxContext()
+    refs: dict[str, NativeRef] = {
+        part.id: native_ref_for_header_footer_part(
+            root,
+            part_uri,
+            kind=part.kind,
+        )
+    }
+    if not part.content:
+        _add_paragraph(root, [], context)
+    for block in part.content:
+        if isinstance(block, OpaqueBlock):
+            raise ValueError(
+                "Semantic DOCX generation cannot compile opaque header/footer content."
+            )
+        spans = block.content if block.text is None else [TextSpan(text=block.text)]
+        element = _add_paragraph(
+            root,
+            spans,
+            context,
+            style=block.style_ref,
+            native_anchor=_native_anchor(block.id),
+            paragraph_style=block.paragraph_style,
+            text_style=block.text_style,
+        )
+        index = len(root) - 1
+        refs[block.id] = native_ref_for_part_elements(
+            [element],
+            [index],
+            part_uri=part_uri,
+            native_kind="w:p",
+            root_path=f"/w:{root_name}",
+            native_id=element.attrib.get(_q(W14, "paraId")),
+        )
+    refs[part.id] = native_ref_for_header_footer_part(
+        root,
+        part_uri,
+        kind=part.kind,
+    )
+    relationships = (
+        _hyperlink_relationships_xml(context) if context.hyperlinks else None
+    )
+    return _xml(root), refs, relationships
+
+
+def _compile_header_footers(spec: AiOfficeDocumentSpec) -> _CompiledHeaderFooters:
+    compiled = _CompiledHeaderFooters()
+    counters = {"header": 0, "footer": 0}
+    for index, part in enumerate(spec.header_footers, start=1):
+        counters[part.kind] += 1
+        number = counters[part.kind]
+        filename = f"{part.kind}{number}.xml"
+        part_uri = f"/word/{filename}"
+        relationship_id = f"rIdHeaderFooter{index}"
+        relationship_type = (
+            HEADER_RELATIONSHIP_TYPE
+            if part.kind == "header"
+            else FOOTER_RELATIONSHIP_TYPE
+        )
+        content_type = (
+            HEADER_CONTENT_TYPE
+            if part.kind == "header"
+            else FOOTER_CONTENT_TYPE
+        )
+        payload, refs, relationships = _header_footer_xml(
+            part,
+            part_uri=part_uri,
+        )
+        compiled.parts[part_uri.lstrip("/")] = payload
+        compiled.content_types[part_uri] = content_type
+        compiled.document_relationships.append(
+            (relationship_id, relationship_type, filename)
+        )
+        compiled.relationship_ids[part.id] = relationship_id
+        compiled.refs.update(refs)
+        if relationships is not None:
+            compiled.parts[
+                f"word/_rels/{filename}.rels"
+            ] = relationships
+    return compiled
 
 
 def _styles_xml(spec: AiOfficeDocumentSpec) -> bytes:
@@ -435,15 +563,17 @@ def _numbering_xml() -> bytes:
     return _xml(root)
 
 
-def _content_types_xml() -> bytes:
-    root = ET.Element(_q(CT, "Types"))
+def _content_types_xml(
+    extra_overrides: dict[str, str] | None = None,
+) -> bytes:
+    root = ET.Element("Types", {"xmlns": CT})
     ET.SubElement(
         root,
-        _q(CT, "Default"),
+        "Default",
         Extension="rels",
         ContentType="application/vnd.openxmlformats-package.relationships+xml",
     )
-    ET.SubElement(root, _q(CT, "Default"), Extension="xml", ContentType="application/xml")
+    ET.SubElement(root, "Default", Extension="xml", ContentType="application/xml")
     overrides = {
         "/word/document.xml": "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
         "/word/styles.xml": "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
@@ -451,13 +581,14 @@ def _content_types_xml() -> bytes:
         "/docProps/core.xml": "application/vnd.openxmlformats-package.core-properties+xml",
         "/docProps/app.xml": "application/vnd.openxmlformats-officedocument.extended-properties+xml",
     }
+    overrides.update(extra_overrides or {})
     for part_name, content_type in overrides.items():
-        ET.SubElement(root, _q(CT, "Override"), PartName=part_name, ContentType=content_type)
+        ET.SubElement(root, "Override", PartName=part_name, ContentType=content_type)
     return _xml(root)
 
 
 def _root_relationships_xml() -> bytes:
-    root = ET.Element(_q(REL, "Relationships"))
+    root = ET.Element("Relationships", {"xmlns": REL})
     _relationship(
         root,
         "rId1",
@@ -485,8 +616,26 @@ def _root_relationships_xml() -> bytes:
     return _xml(root)
 
 
-def _document_relationships_xml(context: _DocxContext) -> bytes:
-    root = ET.Element(_q(REL, "Relationships"))
+def _hyperlink_relationships_xml(context: _DocxContext) -> bytes:
+    root = ET.Element("Relationships", {"xmlns": REL})
+    for rel_id, target in context.hyperlinks:
+        _relationship(
+            root,
+            rel_id,
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+            target,
+            TargetMode="External",
+        )
+    return _xml(root)
+
+
+def _document_relationships_xml(
+    context: _DocxContext,
+    header_footer_relationships: list[tuple[str, str, str]],
+    *,
+    has_settings: bool,
+) -> bytes:
+    root = ET.Element("Relationships", {"xmlns": REL})
     _relationship(
         root,
         "rId1",
@@ -499,6 +648,15 @@ def _document_relationships_xml(context: _DocxContext) -> bytes:
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
         "numbering.xml",
     )
+    if has_settings:
+        _relationship(
+            root,
+            "rIdSettings",
+            SETTINGS_RELATIONSHIP_TYPE,
+            "settings.xml",
+        )
+    for rel_id, rel_type, target in header_footer_relationships:
+        _relationship(root, rel_id, rel_type, target)
     for rel_id, target in context.hyperlinks:
         _relationship(
             root,
@@ -543,21 +701,45 @@ def compile_docx(spec: AiOfficeDocumentSpec) -> bytes:
     """Compile a validated document into a deterministic OOXML package."""
 
     context = _DocxContext()
-    document_xml, refs = _document_xml(spec, context)
+    header_footers = _compile_header_footers(spec)
+    document_xml, refs = _document_xml(
+        spec,
+        context,
+        header_footers.relationship_ids,
+    )
+    refs.update(header_footers.refs)
     identity_manifest = build_identity_manifest(spec, refs=refs)
+    settings_payload = (
+        settings_xml(
+            even_and_odd_headers=spec.settings.even_and_odd_headers,
+        )
+        if spec.settings is not None
+        and spec.settings.even_and_odd_headers is not None
+        else None
+    )
+    content_type_overrides = dict(header_footers.content_types)
+    if settings_payload is not None:
+        content_type_overrides["/word/settings.xml"] = SETTINGS_CONTENT_TYPE
     stream = BytesIO()
     with ZipFile(stream, mode="w") as archive:
         parts = {
-            "[Content_Types].xml": _content_types_xml(),
+            "[Content_Types].xml": _content_types_xml(content_type_overrides),
             "_rels/.rels": _root_relationships_xml(),
             MANIFEST_PART_URI.lstrip("/"): serialize_identity_manifest(identity_manifest),
             "docProps/app.xml": _app_properties_xml(),
             "docProps/core.xml": _core_properties_xml(spec),
             "word/document.xml": document_xml,
-            "word/_rels/document.xml.rels": _document_relationships_xml(context),
+            "word/_rels/document.xml.rels": _document_relationships_xml(
+                context,
+                header_footers.document_relationships,
+                has_settings=settings_payload is not None,
+            ),
             "word/numbering.xml": _numbering_xml(),
             "word/styles.xml": _styles_xml(spec),
+            **header_footers.parts,
         }
+        if settings_payload is not None:
+            parts["word/settings.xml"] = settings_payload
         for path in sorted(parts):
             _write_part(archive, path, parts[path])
     return stream.getvalue()

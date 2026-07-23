@@ -21,6 +21,9 @@ from aioffice.formats.docx_named_styles import (
     format_named_style,
     upsert_named_style,
 )
+from aioffice.formats.docx_header_footer import (
+    native_ref_for_header_footer_part,
+)
 from aioffice.formats.docx_section import (
     native_ref_for_section,
     patch_section_layout,
@@ -30,7 +33,7 @@ from aioffice.native import (
     MANIFEST_PART_URI,
     NativePackage,
     build_identity_manifest,
-    native_ref_for_elements,
+    native_ref_for_part_elements,
     serialize_identity_manifest,
 )
 from aioffice.native.xml import parse_xml, serialize_xml
@@ -61,7 +64,18 @@ def _target_id(value: Any) -> str:
 
 def _find_source_ref(spec: AiOfficeDocumentSpec, target: Any) -> NativeRef:
     target_id = _target_id(target)
-    matches = [node for node in spec.content if node.id == target_id]
+    matches = [
+        node
+        for node in [
+            *spec.content,
+            *(
+                block
+                for part in spec.header_footers
+                for block in part.content
+            ),
+        ]
+        if node.id == target_id
+    ]
     if len(matches) != 1:
         raise NativePackageError(
             f"Native DOCX target #{target_id} matched {len(matches)} semantic nodes."
@@ -71,11 +85,9 @@ def _find_source_ref(spec: AiOfficeDocumentSpec, target: Any) -> NativeRef:
         raise NativePackageError(
             f"Semantic node {target_id!r} has no editable DOCX source reference."
         )
-    if source_ref.part_uri != "/word/document.xml" or (
-        source_ref.element_index is None and not source_ref.element_indices
-    ):
+    if source_ref.element_index is None and not source_ref.element_indices:
         raise NativePackageError(
-            f"Semantic node {target_id!r} is not mapped to the DOCX main document part."
+            f"Semantic node {target_id!r} has no indexed DOCX element mapping."
         )
     return source_ref
 
@@ -381,7 +393,7 @@ def apply_docx_operations(
     }.intersection(str(operation.get("op")) for operation in operations)
     styles_root: ET.Element | None = None
     styles_changed = False
-    document_changed = False
+    changed_xml_parts: set[str] = set()
     if style_operations:
         if not updated.has_part("/word/styles.xml"):
             raise NativePackageError(
@@ -389,18 +401,55 @@ def apply_docx_operations(
             )
         styles_root = parse_xml(updated.get_part("/word/styles.xml"))
     original_elements = list(body)
-    source_elements: dict[str, list[ET.Element]] = {}
-    for node in spec.content:
+    part_roots: dict[str, ET.Element] = {
+        "/word/document.xml": root,
+    }
+    part_containers: dict[str, ET.Element] = {
+        "/word/document.xml": body,
+    }
+
+    def elements_for_ref(
+        source_ref: NativeRef,
+    ) -> tuple[ET.Element, list[ET.Element]]:
+        part_uri = source_ref.part_uri
+        container = part_containers.get(part_uri)
+        if container is None:
+            if not updated.has_part(part_uri):
+                raise NativePackageError(
+                    f"DOCX source part {part_uri!r} no longer exists."
+                )
+            part_root = parse_xml(updated.get_part(part_uri))
+            if part_root.tag not in {_q(W, "hdr"), _q(W, "ftr")}:
+                raise NativePackageError(
+                    f"DOCX source part {part_uri!r} is not an editable "
+                    "header/footer part."
+                )
+            part_roots[part_uri] = part_root
+            part_containers[part_uri] = part_root
+            container = part_root
+        indices = _source_indices(source_ref)
+        elements = list(container)
+        if any(index >= len(elements) for index in indices):
+            raise NativePackageError(
+                f"DOCX source reference points outside {part_uri!r}."
+            )
+        return container, [elements[index] for index in indices]
+
+    source_elements: dict[str, tuple[list[ET.Element], NativeRef]] = {}
+    semantic_nodes = [
+        *spec.content,
+        *(
+            block
+            for part in spec.header_footers
+            for block in part.content
+        ),
+    ]
+    for node in semantic_nodes:
         source_ref = node.source_ref
         if not isinstance(source_ref, NativeRef):
             continue
-        indices = _source_indices(source_ref)
-        if (
-            source_ref.part_uri == "/word/document.xml"
-            and indices
-            and all(index < len(original_elements) for index in indices)
-        ):
-            source_elements[node.id] = [original_elements[index] for index in indices]
+        _, mapped_elements = elements_for_ref(source_ref)
+        source_elements[node.id] = (mapped_elements, source_ref)
     source_sections: dict[
         str,
         tuple[ET.Element, ET.Element, str],
@@ -491,14 +540,11 @@ def apply_docx_operations(
                 original_elements,
                 source_ref,
             )
-            document_changed = True
+            changed_xml_parts.add("/word/document.xml")
             continue
 
         source_ref = _find_source_ref(spec, operation.get("target"))
-        indices = _source_indices(source_ref)
-        if any(index >= len(original_elements) for index in indices):
-            raise NativePackageError("DOCX source reference points outside w:body.")
-        elements = [original_elements[index] for index in indices]
+        container, elements = elements_for_ref(source_ref)
         if operation_name == "style.apply":
             if len(elements) != 1 or elements[0].tag != _q(W, "p"):
                 raise NativePackageError(
@@ -525,7 +571,7 @@ def apply_docx_operations(
                         f"Native DOCX has no paragraph style {native_style_ref!r}."
                     )
             patch_paragraph_style_ref(elements[0], native_style_ref)
-            document_changed = True
+            changed_xml_parts.add(source_ref.part_uri)
         elif operation_name == "text.replace":
             if len(elements) != 1:
                 raise NativePackageError(
@@ -543,7 +589,7 @@ def apply_docx_operations(
                 replacement,
                 replace_all=bool(operation.get("replace_all", False)),
             )
-            document_changed = True
+            changed_xml_parts.add(source_ref.part_uri)
         elif operation_name == "paragraph.format":
             if len(elements) != 1 or elements[0].tag != _q(W, "p"):
                 raise NativePackageError(
@@ -557,7 +603,7 @@ def apply_docx_operations(
                     f"Could not lower paragraph.format values: {error}"
                 ) from error
             patch_paragraph_style(elements[0], style, fields)
-            document_changed = True
+            changed_xml_parts.add(source_ref.part_uri)
         elif operation_name == "text.format":
             if len(elements) != 1 or elements[0].tag != _q(W, "p"):
                 raise NativePackageError(
@@ -592,31 +638,39 @@ def apply_docx_operations(
                     style=style,
                     fields=fields,
                 )
-            document_changed = True
+            changed_xml_parts.add(source_ref.part_uri)
         elif operation_name == "node.remove":
             for element in elements:
-                if element not in list(body):
+                if element not in list(container):
                     raise NativePackageError("DOCX node has already been removed by this patch.")
-                body.remove(element)
-            document_changed = True
+                container.remove(element)
+            changed_xml_parts.add(source_ref.part_uri)
 
     current_indices = {id(element): index for index, element in enumerate(list(body))}
     identity_updates: dict[str, NativeRef] = {}
-    for node_id, elements in source_elements.items():
-        indices = [current_indices.get(id(element)) for element in elements]
+    for node_id, (elements, original_ref) in source_elements.items():
+        current_container = part_containers[original_ref.part_uri]
+        part_indices = {
+            id(element): index
+            for index, element in enumerate(list(current_container))
+        }
+        indices = [part_indices.get(id(element)) for element in elements]
         if any(index is None for index in indices):
             continue
         normalized_indices = [index for index in indices if index is not None]
-        original_ref = next(
-            node.source_ref
-            for node in spec.content
-            if node.id == node_id and isinstance(node.source_ref, NativeRef)
+        root_path = (
+            "/w:document/w:body"
+            if original_ref.part_uri == "/word/document.xml"
+            else "/w:hdr"
+            if part_roots[original_ref.part_uri].tag == _q(W, "hdr")
+            else "/w:ftr"
         )
-        assert isinstance(original_ref, NativeRef)
-        identity_updates[node_id] = native_ref_for_elements(
+        identity_updates[node_id] = native_ref_for_part_elements(
             elements,
             normalized_indices,
+            part_uri=original_ref.part_uri,
             native_kind=original_ref.native_kind,
+            root_path=root_path,
             native_id=original_ref.native_id,
         )
     for section_id, (section, container, container_kind) in source_sections.items():
@@ -628,9 +682,22 @@ def apply_docx_operations(
             index,
             container=container_kind,
         )
+    for part in spec.header_footers:
+        source_ref = part.source_ref
+        if not isinstance(source_ref, NativeRef):
+            continue
+        part_root = part_roots.get(source_ref.part_uri)
+        if part_root is None:
+            part_root = parse_xml(updated.get_part(source_ref.part_uri))
+            part_roots[source_ref.part_uri] = part_root
+        identity_updates[part.id] = native_ref_for_header_footer_part(
+            part_root,
+            source_ref.part_uri,
+            kind=part.kind,
+        )
 
-    if document_changed:
-        updated.set_part("/word/document.xml", serialize_xml(root))
+    for part_uri in sorted(changed_xml_parts):
+        updated.set_part(part_uri, serialize_xml(part_roots[part_uri]))
     if styles_changed:
         assert styles_root is not None
         updated.set_part("/word/styles.xml", serialize_xml(styles_root))
@@ -642,6 +709,12 @@ def apply_docx_operations(
         for section in manifest_spec.sections:
             if section.id in identity_updates:
                 section.source_ref = identity_updates[section.id]
+        for part in manifest_spec.header_footers:
+            if part.id in identity_updates:
+                part.source_ref = identity_updates[part.id]
+            for block in part.content:
+                if block.id in identity_updates:
+                    block.source_ref = identity_updates[block.id]
         updated.set_part(
             MANIFEST_PART_URI,
             serialize_identity_manifest(build_identity_manifest(manifest_spec)),

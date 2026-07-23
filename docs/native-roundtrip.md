@@ -26,11 +26,12 @@ AiOffice-generated DOCX files contain:
 /customXml/aioffice-manifest.xml
 ```
 
-The manifest stores the artifact ID, revision, Spec version, content and section IDs,
-native references, structural paths, native object IDs, and fingerprints. Paragraph
-anchors are emitted as `w14:paraId` values and declared through Markup Compatibility.
-Section identities point to the exact paragraph-carried or body-level `w:sectPr`
-without pretending the semantic Spec contains all of its XML.
+The manifest stores the artifact ID, revision, Spec version, content, section,
+header/footer part, and region-block IDs, native references, structural paths, native
+object IDs, and fingerprints. Paragraph anchors are emitted as `w14:paraId` values
+and declared through Markup Compatibility. Section identities point to the exact
+paragraph-carried or body-level `w:sectPr` without pretending the semantic Spec
+contains all of its XML.
 
 Third-party documents use the same identity model in a `.aioffice/` workspace
 sidecar. Rebinding after an external edit follows this order:
@@ -94,6 +95,12 @@ ordered semantic sections. Native section edits update only explicitly selected
 Unrecognized attributes, children, header/footer relationships, and other section
 settings remain untouched.
 
+Header/footer parts are separately mapped by part URI. Ordinary paragraph edits are
+lowered to the referenced `headerN.xml` or `footerN.xml`; `document.xml` and unrelated
+region parts remain byte-identical. Shared parts stay shared, while an absent section
+binding remains an inheritance instruction. Native fields, drawings, objects, tables,
+and unknown elements are opaque and cannot be selected for destructive text edits.
+
 Other operations are rejected before a new native revision is committed. Future
-iterations will add tables, header/footer content, drawings, and further layout-aware
+iterations will add tables, structured header/footer fields, drawings, and further layout-aware
 operations behind the same capability and fidelity contracts.

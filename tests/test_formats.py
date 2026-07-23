@@ -83,8 +83,21 @@ class FormatTests(unittest.TestCase):
             relationships = archive.read("word/_rels/document.xml.rels").decode("utf-8")
             self.assertIn("AiOffice", document_xml)
             self.assertIn("https://example.com", relationships)
+            self.assertIn(
+                '<Relationships xmlns="http://schemas.openxmlformats.org/'
+                'package/2006/relationships">',
+                relationships,
+            )
+            self.assertNotIn("ns0:Relationships", relationships)
             root_relationships = archive.read("_rels/.rels").decode("utf-8")
             self.assertIn(MANIFEST_RELATIONSHIP_TYPE, root_relationships)
+            content_types = archive.read("[Content_Types].xml").decode("utf-8")
+            self.assertIn(
+                '<Types xmlns="http://schemas.openxmlformats.org/package/'
+                '2006/content-types">',
+                content_types,
+            )
+            self.assertNotIn("ns0:Types", content_types)
 
     def test_generated_docx_restores_embedded_semantic_identity(self) -> None:
         document = (

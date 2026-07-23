@@ -9,6 +9,7 @@ from .identity import (
     apply_identity_manifest,
     build_identity_manifest,
     native_ref_for_elements,
+    native_ref_for_part_elements,
     parse_identity_manifest,
     serialize_identity_manifest,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "apply_identity_manifest",
     "build_identity_manifest",
     "native_ref_for_elements",
+    "native_ref_for_part_elements",
     "parse_identity_manifest",
     "serialize_identity_manifest",
 ]

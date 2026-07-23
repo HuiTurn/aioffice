@@ -104,6 +104,19 @@ def _semantic_node(node: dict[str, Any], *, include_native: bool) -> dict[str, A
     return value
 
 
+def _semantic_header_footer(
+    part: dict[str, Any],
+    *,
+    include_native: bool,
+) -> dict[str, Any]:
+    value = _semantic_node(part, include_native=include_native)
+    value["content"] = [
+        _semantic_node(block, include_native=include_native)
+        for block in part.get("content", [])
+    ]
+    return value
+
+
 def compute_document_diff(
     before: AiOfficeDocumentSpec,
     after: AiOfficeDocumentSpec,
@@ -119,6 +132,7 @@ def compute_document_diff(
     for payload in (before_payload, after_payload):
         payload.pop("content", None)
         payload.pop("sections", None)
+        payload.pop("header_footers", None)
         payload.pop("engine_version", None)
         artifact = payload.get("artifact", {})
         artifact.pop("revision", None)
@@ -234,6 +248,60 @@ def compute_document_diff(
                 path=f"sections.#{section_id}",
                 entries=entries,
                 node_id=section_id,
+            )
+
+    before_parts = {
+        part.id: _semantic_header_footer(
+            part.model_dump(mode="json", exclude_none=True),
+            include_native=include_native,
+        )
+        for part in before.header_footers
+    }
+    after_parts = {
+        part.id: _semantic_header_footer(
+            part.model_dump(mode="json", exclude_none=True),
+            include_native=include_native,
+        )
+        for part in after.header_footers
+    }
+    before_part_order = [part.id for part in before.header_footers]
+    after_part_order = [part.id for part in after.header_footers]
+    if before_part_order != after_part_order:
+        entries.append(
+            DiffEntry(
+                path="header_footers.order",
+                kind="moved",
+                before=before_part_order,
+                after=after_part_order,
+            )
+        )
+    for part_id in before_part_order:
+        if part_id not in after_parts:
+            entries.append(
+                DiffEntry(
+                    path=f"header_footers.#{part_id}",
+                    kind="removed",
+                    node_id=part_id,
+                    before=before_parts[part_id],
+                )
+            )
+    for part_id in after_part_order:
+        if part_id not in before_parts:
+            entries.append(
+                DiffEntry(
+                    path=f"header_footers.#{part_id}",
+                    kind="added",
+                    node_id=part_id,
+                    after=after_parts[part_id],
+                )
+            )
+        else:
+            _walk(
+                before_parts[part_id],
+                after_parts[part_id],
+                path=f"header_footers.#{part_id}",
+                entries=entries,
+                node_id=part_id,
             )
     return DocumentDiff(
         artifact_id=after.artifact.id,

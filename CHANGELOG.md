@@ -43,9 +43,22 @@
 - Added selective `section.format` native lowering that mutates one mapped
   `w:sectPr`, preserves unknown section XML, and refreshes section fingerprints.
 - Added section anchor, ordering, page-geometry, and column-overflow diagnostics.
+- Added normalized, reusable header/footer parts and per-section bindings for
+  default, first, and even page variants.
+- Added document-wide `even_and_odd_headers` settings with native
+  `word/settings.xml` generation and projection.
+- Added header/footer relationship, content-type, inheritance, persistent identity,
+  and semantic HTML preview support.
+- Extended `text.replace`, `paragraph.format`, and `text.format` native lowering to
+  ordinary header/footer paragraphs while touching only the target part.
+- Added conservative opaque projection for native header/footer fields, drawings,
+  objects, tables, and unknown elements so computed content is never reconstructed
+  from display text.
+- Serialized OPC content-type and relationship control parts with default package
+  namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.5`.
+- Advanced the AiOffice Document Spec to `0.2-draft.6`.
 
 ## 0.1.0
 

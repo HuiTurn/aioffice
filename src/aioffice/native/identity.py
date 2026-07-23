@@ -57,21 +57,42 @@ def native_ref_for_elements(
     native_kind: str,
     native_id: str | None = None,
 ) -> NativeRef:
+    return native_ref_for_part_elements(
+        elements,
+        indices,
+        part_uri="/word/document.xml",
+        native_kind=native_kind,
+        root_path="/w:document/w:body",
+        native_id=native_id,
+    )
+
+
+def native_ref_for_part_elements(
+    elements: Sequence[ET.Element],
+    indices: Sequence[int],
+    *,
+    part_uri: str,
+    native_kind: str,
+    root_path: str,
+    native_id: str | None = None,
+) -> NativeRef:
+    """Build an indexed native reference under an arbitrary XML part root."""
+
     if not elements or len(elements) != len(indices):
         raise ValueError("A native reference requires matching elements and indices.")
     normalized_indices = list(indices)
     if normalized_indices != sorted(set(normalized_indices)):
         raise ValueError("Native reference indices must be sorted and unique.")
     if len(normalized_indices) == 1:
-        path_hint = f"/w:document/w:body/*[{normalized_indices[0] + 1}]"
+        path_hint = f"{root_path}/*[{normalized_indices[0] + 1}]"
     else:
         path_hint = (
-            f"/w:document/w:body/*[{normalized_indices[0] + 1}"
+            f"{root_path}/*[{normalized_indices[0] + 1}"
             f"..{normalized_indices[-1] + 1}]"
         )
     return NativeRef(
         format="docx",
-        part_uri="/word/document.xml",
+        part_uri=part_uri,
         native_kind=native_kind,
         element_index=normalized_indices[0],
         element_indices=normalized_indices,
@@ -128,7 +149,13 @@ def build_identity_manifest(
     package_sha256: str | None = None,
 ) -> IdentityManifest:
     records: list[IdentityNode] = []
-    for nodes in (spec.content, spec.sections):
+    node_groups = [
+        list(spec.content),
+        list(spec.sections),
+        list(spec.header_footers),
+        *(list(part.content) for part in spec.header_footers),
+    ]
+    for nodes in node_groups:
         group: list[IdentityNode] = []
         for node in nodes:
             source_ref = refs.get(node.id) if refs is not None else node.source_ref
@@ -264,15 +291,27 @@ def apply_identity_manifest(
     *,
     package_sha256: str,
     sections: list[dict[str, Any]] | None = None,
+    header_footers: list[dict[str, Any]] | None = None,
 ) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
-    projected = [*content, *(sections or [])]
+    projected = [
+        *content,
+        *(sections or []),
+        *(header_footers or []),
+        *(
+            block
+            for part in (header_footers or [])
+            for block in part.get("content", [])
+            if isinstance(block, dict)
+        ),
+    ]
     candidates = [
         (index, candidate, _candidate_ref(candidate))
         for index, candidate in enumerate(projected)
     ]
     candidates.sort(
         key=lambda item: (
+            item[2].part_uri if item[2] is not None else "",
             (
                 item[2].element_index
                 if item[2] is not None and item[2].element_index is not None
@@ -301,6 +340,7 @@ def apply_identity_manifest(
                 for index, candidate, candidate_ref in candidates
                 if candidate_ref is not None
                 and index not in used
+                and candidate_ref.part_uri == source_ref.part_uri
                 and candidate_ref.native_kind == source_ref.native_kind
                 and candidate_ref.element_index == source_ref.element_index
                 and candidate_ref.element_indices == source_ref.element_indices
@@ -312,6 +352,7 @@ def apply_identity_manifest(
                 for index, candidate, candidate_ref in candidates
                 if candidate_ref is not None
                 and index not in used
+                and candidate_ref.part_uri == source_ref.part_uri
                 and candidate_ref.native_kind == source_ref.native_kind
                 and candidate_ref.native_id == source_ref.native_id
             ]
@@ -322,6 +363,7 @@ def apply_identity_manifest(
                 for index, candidate, candidate_ref in candidates
                 if candidate_ref is not None
                 and index not in used
+                and candidate_ref.part_uri == source_ref.part_uri
                 and candidate_ref.native_kind == source_ref.native_kind
                 and candidate_ref.fingerprint == source_ref.fingerprint
             ]
@@ -332,6 +374,7 @@ def apply_identity_manifest(
                 for index, candidate, candidate_ref in candidates
                 if candidate_ref is not None
                 and index not in used
+                and candidate_ref.part_uri == source_ref.part_uri
                 and candidate_ref.native_kind == source_ref.native_kind
                 and candidate_ref.element_index == source_ref.element_index
             ]
@@ -473,6 +516,7 @@ __all__ = [
     "build_identity_manifest",
     "fingerprint_elements",
     "native_ref_for_elements",
+    "native_ref_for_part_elements",
     "parse_identity_manifest",
     "serialize_identity_manifest",
 ]

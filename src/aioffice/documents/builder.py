@@ -16,24 +16,41 @@ class DocumentBuilder:
         author: str | None = None,
         theme: str = "business-clean",
         defaults: Mapping[str, Any] | None = None,
+        settings: Mapping[str, Any] | None = None,
         styles: Iterable[Mapping[str, Any]] = (),
         sections: Iterable[Mapping[str, Any]] | None = None,
+        header_footers: Iterable[Mapping[str, Any]] = (),
     ) -> None:
         self._metadata: dict[str, Any] = {"title": title, "author": author}
         self._theme = theme
         self._defaults = deepcopy(dict(defaults)) if defaults is not None else {}
+        self._settings = (
+            deepcopy(dict(settings)) if settings is not None else None
+        )
         self._styles = [deepcopy(dict(style)) for style in styles]
         self._sections = (
             [deepcopy(dict(section)) for section in sections]
             if sections is not None
             else None
         )
+        self._header_footers = [
+            deepcopy(dict(part)) for part in header_footers
+        ]
         self._content: list[dict[str, Any]] = []
 
     def define_style(self, style: Mapping[str, Any]) -> "DocumentBuilder":
         """Add a strict document-local named style definition."""
 
         self._styles.append(deepcopy(dict(style)))
+        return self
+
+    def define_header_footer(
+        self,
+        part: Mapping[str, Any],
+    ) -> "DocumentBuilder":
+        """Add a reusable header/footer part referenced by section bindings."""
+
+        self._header_footers.append(deepcopy(dict(part)))
         return self
 
     def section(
@@ -236,8 +253,11 @@ class DocumentBuilder:
             "theme": {"ref": self._theme},
             "defaults": deepcopy(self._defaults),
             "styles": deepcopy(self._styles),
+            "header_footers": deepcopy(self._header_footers),
             "content": deepcopy(self._content),
         }
+        if self._settings is not None:
+            payload["settings"] = deepcopy(self._settings)
         if self._sections is not None:
             payload["sections"] = deepcopy(self._sections)
         return Document.from_spec(payload)

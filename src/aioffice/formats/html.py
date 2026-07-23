@@ -9,8 +9,10 @@ from aioffice.spec.models import (
     BulletList,
     DocumentSection,
     Heading,
+    HeaderFooterPart,
     Length,
     OrderedList,
+    OpaqueBlock,
     PageBreak,
     Paragraph,
     ParagraphStyle,
@@ -186,6 +188,51 @@ def _section_open(
     )
 
 
+def _effective_header_footers(
+    spec: AiOfficeDocumentSpec,
+) -> dict[str, dict[str, HeaderFooterPart]]:
+    parts = {part.id: part for part in spec.header_footers}
+    inherited: dict[str, HeaderFooterPart] = {}
+    result: dict[str, dict[str, HeaderFooterPart]] = {}
+    for section in spec.sections:
+        if section.header_footer is not None:
+            for field_name, part_id in section.header_footer.model_dump(
+                mode="python",
+                exclude_none=True,
+            ).items():
+                part = parts.get(part_id)
+                if part is not None:
+                    inherited[field_name] = part
+        result[section.id] = dict(inherited)
+    return result
+
+
+def _header_footer_html(
+    part: HeaderFooterPart | None,
+    *,
+    kind: str,
+    variant: str,
+) -> list[str]:
+    if part is None:
+        return []
+    lines = [
+        f'<{kind} class="document-{kind}" '
+        f'data-aioffice-header-footer="{escape(part.id, quote=True)}" '
+        f'data-aioffice-variant="{variant}">'
+    ]
+    for block in part.content:
+        block_id = escape(block.id, quote=True)
+        if isinstance(block, Paragraph):
+            lines.append(f'<p id="{block_id}">{escape(block.plain_text)}</p>')
+        elif isinstance(block, OpaqueBlock):
+            lines.append(
+                f'<div id="{block_id}" class="opaque-header-footer">'
+                f"{escape(block.summary)}</div>"
+            )
+    lines.append(f"</{kind}>")
+    return lines
+
+
 def _span_html(span: TextSpan, inherited_style: TextStyle | None = None) -> str:
     value = escape(span.text)
     css = _text_css(_merge_text_style(inherited_style, span.style))
@@ -271,6 +318,15 @@ def export_html(
         "th{background:#eef3f7}",
         ".underline{text-decoration:underline}",
         ".page-break{break-after:page;border:0;border-top:1px dashed #bbb;margin:2em 0}",
+        (
+            ".document-header{border-bottom:1px solid #d8dee5;margin-bottom:18pt;"
+            "padding-bottom:6pt;color:#59636e}"
+        ),
+        (
+            ".document-footer{border-top:1px solid #d8dee5;margin-top:18pt;"
+            "padding-top:6pt;color:#59636e}"
+        ),
+        ".opaque-header-footer{font-style:italic;color:#7a828a}",
         "</style>",
     ]
     if include_document_metadata:
@@ -296,6 +352,8 @@ def export_html(
     )
 
     first_section = spec.sections[0]
+    active_section = first_section
+    effective_header_footers = _effective_header_footers(spec)
     opened_section_ids = {first_section.id}
     section_starts = {
         section.start_at: section
@@ -303,11 +361,53 @@ def export_html(
         if section.start_at is not None
     }
     lines.append(_section_open(first_section, page_view=page_view))
+    active_parts = effective_header_footers[first_section.id]
+    header_variant = (
+        "first"
+        if first_section.layout.different_first_page is True
+        and "header_first" in active_parts
+        else "default"
+    )
+    lines.extend(
+        _header_footer_html(
+            active_parts.get(f"header_{header_variant}"),
+            kind="header",
+            variant=header_variant,
+        )
+    )
     for block in spec.content:
         starting_section = section_starts.get(block.id)
         if starting_section is not None:
+            footer_variant = (
+                "first"
+                if active_section.layout.different_first_page is True
+                and "footer_first" in active_parts
+                else "default"
+            )
+            lines.extend(
+                _header_footer_html(
+                    active_parts.get(f"footer_{footer_variant}"),
+                    kind="footer",
+                    variant=footer_variant,
+                )
+            )
             lines.append("</section>")
             lines.append(_section_open(starting_section, page_view=page_view))
+            active_section = starting_section
+            active_parts = effective_header_footers[starting_section.id]
+            header_variant = (
+                "first"
+                if starting_section.layout.different_first_page is True
+                and "header_first" in active_parts
+                else "default"
+            )
+            lines.extend(
+                _header_footer_html(
+                    active_parts.get(f"header_{header_variant}"),
+                    kind="header",
+                    variant=header_variant,
+                )
+            )
             opened_section_ids.add(starting_section.id)
         block_id = escape(block.id, quote=True)
         if isinstance(block, Heading):
@@ -387,6 +487,19 @@ def export_html(
         elif isinstance(block, PageBreak):
             lines.append(f'<hr id="{block_id}" class="page-break">')
 
+    footer_variant = (
+        "first"
+        if active_section.layout.different_first_page is True
+        and "footer_first" in active_parts
+        else "default"
+    )
+    lines.extend(
+        _header_footer_html(
+            active_parts.get(f"footer_{footer_variant}"),
+            kind="footer",
+            variant=footer_variant,
+        )
+    )
     lines.append("</section>")
     for section in spec.sections:
         if section.id not in opened_section_ids:

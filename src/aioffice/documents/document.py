@@ -264,6 +264,7 @@ class Document:
             "diagnostic_count": len(self._import_diagnostics),
             "style_count": len(style_catalog(self._spec)),
             "section_count": len(self._spec.sections),
+            "header_footer_count": len(self._spec.header_footers),
         }
         if response_format == "compact":
             style_usage: dict[str, int] = {}
@@ -325,8 +326,40 @@ class Document:
                         if section.layout.columns is not None
                         else None
                     ),
+                    "header_footer": (
+                        section.header_footer.model_dump(
+                            mode="json",
+                            exclude_none=True,
+                        )
+                        if section.header_footer is not None
+                        else {}
+                    ),
                 }
                 for section in self._spec.sections
+            ]
+            result["header_footers"] = [
+                {
+                    "id": part.id,
+                    "kind": part.kind,
+                    "block_count": len(part.content),
+                    "blocks": [
+                        {
+                            "id": block.id,
+                            "type": block.type,
+                            **(
+                                {"text": block.plain_text}
+                                if isinstance(block, Paragraph)
+                                else {"summary": block.summary}
+                            ),
+                        }
+                        for block in part.content
+                    ],
+                    "projection_complete": part.metadata.get(
+                        "projection_complete",
+                        True,
+                    ),
+                }
+                for part in self._spec.header_footers
             ]
         elif response_format == "expanded":
             result["nodes"] = [
@@ -335,6 +368,10 @@ class Document:
             result["sections"] = [
                 section.model_dump(mode="json", exclude_none=True)
                 for section in self._spec.sections
+            ]
+            result["header_footers"] = [
+                part.model_dump(mode="json", exclude_none=True)
+                for part in self._spec.header_footers
             ]
         return result
 
@@ -427,7 +464,11 @@ class Document:
                 "native_visual_verification_available": False,
             },
             "operations": operations,
-            "selectors": ["#node_id", "#section_id"],
+            "selectors": [
+                "#node_id",
+                "#section_id",
+                "#header_footer_block_id",
+            ],
             "formatting": {
                 "length_units": ["pt", "in", "cm", "mm", "px"],
                 "paragraph_properties": sorted(ParagraphStyle.model_fields),
@@ -462,6 +503,18 @@ class Document:
                     "later_sections_start_at": "existing_content_node_id",
                     "native_patch_scope": "one mapped w:sectPr",
                 },
+                "header_footer_contract": {
+                    "part_model": "shared_reusable_parts",
+                    "variants": ["default", "first", "even"],
+                    "missing_binding": "inherit_previous_section",
+                    "editable_blocks": ["paragraph"],
+                    "opaque_native_features": [
+                        "fields",
+                        "drawings",
+                        "objects",
+                        "tables",
+                    ],
+                },
             },
             "identity": {
                 "source": native_extension.get(
@@ -486,6 +539,10 @@ class Document:
 
     def validate(self) -> ValidationResult:
         diagnostics = self.import_diagnostics
+        native_projection = self._native is not None or (
+            self._spec.extensions.get("dev.aioffice.native", {}).get("authority")
+            == "native"
+        )
         seen: dict[str, str] = {self.id: "artifact"}
         content_positions = {
             node.id: index for index, node in enumerate(self._spec.content)
@@ -494,7 +551,7 @@ class Document:
         previous_section_position = -1
         previous_heading_level: int | None = None
         style_issue_severity = (
-            Severity.WARNING if self._native is not None else Severity.ERROR
+            Severity.WARNING if native_projection else Severity.ERROR
         )
 
         if not self._spec.content:
@@ -571,7 +628,7 @@ class Document:
                     Diagnostic(
                         severity=(
                             Severity.WARNING
-                            if self._native is not None
+                            if native_projection
                             else Severity.ERROR
                         ),
                         code="INVALID_SECTION_ANCHOR",
@@ -633,6 +690,55 @@ class Document:
                 else:
                     used_section_anchors.add(section.start_at)
                     previous_section_position = position
+
+            bindings = section.header_footer
+            if bindings is not None:
+                even_bound = (
+                    bindings.header_even is not None
+                    or bindings.footer_even is not None
+                )
+                first_bound = (
+                    bindings.header_first is not None
+                    or bindings.footer_first is not None
+                )
+                if even_bound and not (
+                    self._spec.settings is not None
+                    and self._spec.settings.even_and_odd_headers is True
+                ):
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.WARNING,
+                            code="HEADER_FOOTER_BINDING_INACTIVE",
+                            message=(
+                                f"Section {section.id!r} has even-page bindings, "
+                                "but even_and_odd_headers is not enabled."
+                            ),
+                            node_ids=[section.id],
+                            path=f"sections.{index}.header_footer",
+                            suggested_actions=[
+                                {"action": "enable_even_and_odd_headers"}
+                            ],
+                        )
+                    )
+                if first_bound and section.layout.different_first_page is not True:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.WARNING,
+                            code="HEADER_FOOTER_BINDING_INACTIVE",
+                            message=(
+                                f"Section {section.id!r} has first-page bindings, "
+                                "but different_first_page is not enabled."
+                            ),
+                            node_ids=[section.id],
+                            path=f"sections.{index}.header_footer",
+                            suggested_actions=[
+                                {
+                                    "action": "set_section_format",
+                                    "different_first_page": True,
+                                }
+                            ],
+                        )
+                    )
 
             columns = section.layout.columns
             page_size = section.layout.page_size
@@ -734,6 +840,99 @@ class Document:
                     break
                 visiting.append(current_id)
                 current_id = named_styles[current_id].based_on
+
+        for part_index, part in enumerate(self._spec.header_footers):
+            if part.id in seen:
+                diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"Duplicate node ID {part.id!r}.",
+                        node_ids=[part.id],
+                        path=f"header_footers.{part_index}.id",
+                    )
+                )
+            else:
+                seen[part.id] = f"header_footers.{part_index}"
+            if (
+                part.revision_added > self.revision
+                or part.revision_updated > self.revision
+            ):
+                diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"Header/footer part {part.id!r} references a "
+                            "revision newer than the artifact."
+                        ),
+                        node_ids=[part.id],
+                        path=f"header_footers.{part_index}",
+                    )
+                )
+            for block_index, block in enumerate(part.content):
+                block_path = (
+                    f"header_footers.{part_index}.content.{block_index}"
+                )
+                if block.id in seen:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=f"Duplicate node ID {block.id!r}.",
+                            node_ids=[block.id],
+                            path=f"{block_path}.id",
+                        )
+                    )
+                else:
+                    seen[block.id] = block_path
+                if (
+                    block.revision_added > self.revision
+                    or block.revision_updated > self.revision
+                ):
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=(
+                                f"Header/footer block {block.id!r} references "
+                                "a revision newer than the artifact."
+                            ),
+                            node_ids=[block.id],
+                            path=block_path,
+                        )
+                    )
+                if isinstance(block, OpaqueBlock) and not native_projection:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="UNSUPPORTED_FEATURE",
+                            message=(
+                                "Opaque header/footer content can only be "
+                                "preserved from a native document."
+                            ),
+                            node_ids=[block.id],
+                            path=block_path,
+                        )
+                    )
+                if (
+                    isinstance(block, Paragraph)
+                    and block.style_ref is not None
+                    and block.style_ref not in named_styles
+                ):
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=style_issue_severity,
+                            code="STYLE_NOT_FOUND",
+                            message=(
+                                f"Header/footer paragraph {block.id!r} references "
+                                f"missing named style {block.style_ref!r}."
+                            ),
+                            node_ids=[block.id],
+                            path=f"{block_path}.style_ref",
+                            recoverable=True,
+                        )
+                    )
 
         for index, node in enumerate(self._spec.content):
             if node.id in seen:
@@ -1081,6 +1280,12 @@ class Document:
                 for section in updated._spec.sections:
                     if section.id in identity_updates:
                         section.source_ref = identity_updates[section.id]
+                for part in updated._spec.header_footers:
+                    if part.id in identity_updates:
+                        part.source_ref = identity_updates[part.id]
+                    for block in part.content:
+                        if block.id in identity_updates:
+                            block.source_ref = identity_updates[block.id]
                 updated._native = native
                 updated._import_diagnostics = self.import_diagnostics
         except _PatchFailure as error:
@@ -1175,9 +1380,17 @@ class Document:
     @staticmethod
     def _find_node(payload: dict[str, Any], target: Any) -> tuple[int, dict[str, Any]]:
         target_id = Document._target_id(target)
+        candidates = [
+            *payload["content"],
+            *(
+                block
+                for part in payload.get("header_footers", [])
+                for block in part.get("content", [])
+            ),
+        ]
         matches = [
             (index, node)
-            for index, node in enumerate(payload["content"])
+            for index, node in enumerate(candidates)
             if node.get("id") == target_id
         ]
         if not matches:
@@ -1197,6 +1410,37 @@ class Document:
                     message=f"Multiple nodes matched #{target_id}.",
                     node_ids=[target_id],
                     suggested_actions=[{"action": "repair_duplicate_ids"}],
+                )
+            )
+        return matches[0]
+
+    @staticmethod
+    def _find_content_node(
+        payload: dict[str, Any],
+        target: Any,
+    ) -> tuple[int, dict[str, Any]]:
+        target_id = Document._target_id(target)
+        matches = [
+            (index, node)
+            for index, node in enumerate(payload["content"])
+            if node.get("id") == target_id
+        ]
+        if not matches:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="TARGET_NOT_FOUND",
+                    message=f"No top-level content node matched #{target_id}.",
+                    suggested_actions=[{"action": "inspect_nodes"}],
+                )
+            )
+        if len(matches) > 1:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="AMBIGUOUS_SELECTOR",
+                    message=f"Multiple nodes matched #{target_id}.",
+                    node_ids=[target_id],
                 )
             )
         return matches[0]
@@ -1477,6 +1721,30 @@ class Document:
                         suggested_actions=[
                             {"action": "inspect_styles"},
                             {"action": "define_style", "style_id": style_ref},
+                        ],
+                    )
+                )
+            is_header_footer_block = any(
+                candidate.get("id") == node["id"]
+                for part in payload.get("header_footers", [])
+                for candidate in part.get("content", [])
+            )
+            if (
+                is_header_footer_block
+                and style_ref is not None
+                and named_style_catalog[style_ref].semantic_role == "heading"
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            "Header/footer paragraphs cannot be promoted to "
+                            "semantic headings."
+                        ),
+                        node_ids=[node["id"]],
+                        suggested_actions=[
+                            {"action": "use_paragraph_named_style"}
                         ],
                     )
                 )
@@ -2044,7 +2312,10 @@ class Document:
             }
 
         if operation_name == "node.insert_after":
-            index, node = Document._find_node(payload, operation.get("target"))
+            index, node = Document._find_content_node(
+                payload,
+                operation.get("target"),
+            )
             content = operation.get("content")
             if not isinstance(content, dict):
                 raise _PatchFailure(
@@ -2063,12 +2334,18 @@ class Document:
             }
 
         if operation_name == "node.remove":
-            index, node = Document._find_node(payload, operation.get("target"))
+            index, node = Document._find_content_node(
+                payload,
+                operation.get("target"),
+            )
             payload["content"].pop(index)
             return {"operation": "node.remove", "removed_nodes": [node["id"]]}
 
         if operation_name == "node.update":
-            _, node = Document._find_node(payload, operation.get("target"))
+            _, node = Document._find_content_node(
+                payload,
+                operation.get("target"),
+            )
             changes = operation.get("changes")
             if not isinstance(changes, dict) or not changes:
                 raise _PatchFailure(

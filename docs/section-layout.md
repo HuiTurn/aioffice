@@ -49,6 +49,10 @@ lowering changes the corresponding known OOXML values in one mapped `w:sectPr`.
 Unknown attributes, unknown children, relationship references, and all untouched
 package parts are preserved. Patch validation and lowering are atomic.
 
+Header/footer bindings are intentionally separate from `SectionLayout`: they point
+to reusable package parts and have inheritance semantics. See
+[the header/footer contract](header-footer.md).
+
 ## Preview boundary
 
 Semantic HTML uses page dimensions, margins, section breaks, and CSS multi-column
