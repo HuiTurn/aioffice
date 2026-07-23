@@ -16,12 +16,12 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev6`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev7`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
-parts, semantic diffs, render contracts, and fidelity reports. Workbook, presentation,
-PDF, native visual rendering, and MCP remain planned.
+parts, structured dynamic fields, semantic diffs, render contracts, and fidelity
+reports. Workbook, presentation, PDF, native visual rendering, and MCP remain planned.
 
 ## Install
 
@@ -112,7 +112,8 @@ commit is refused when native identity is ambiguous. The detailed invariants are
 
 Native DOCX lowering in this development version supports `text.replace`,
 `paragraph.format`, `text.format`, `node.remove`, `style.define`, `style.apply`,
-`style.format`, and `section.format`. Ask the artifact before planning an edit:
+`style.format`, `section.format`, and `field.update`. Ask the artifact before
+planning an edit:
 
 ```python
 capabilities = doc.capabilities()
@@ -236,6 +237,8 @@ doc = DocumentBuilder(
                     "spacing": {"value": 24, "unit": "pt"},
                     "separator": True,
                 },
+                "page_number_start": 1,
+                "page_number_format": "lower_roman",
             },
         },
     ]
@@ -283,7 +286,22 @@ doc = DocumentBuilder(
                 {
                     "id": "report_footer_text",
                     "type": "paragraph",
-                    "text": "AiOffice",
+                    "content": [
+                        {"text": "Page "},
+                        {
+                            "id": "current_page",
+                            "type": "field",
+                            "kind": "page_number",
+                            "cached_result": "1",
+                        },
+                        {"text": " of "},
+                        {
+                            "id": "total_pages",
+                            "type": "field",
+                            "kind": "page_count",
+                            "cached_result": "1",
+                        },
+                    ],
                 }
             ],
         },
@@ -302,9 +320,25 @@ doc = DocumentBuilder(
 
 The paragraph IDs inside a header/footer are regular edit selectors. `text.replace`,
 `text.format`, and `paragraph.format` lower directly into the referenced
-`headerN.xml` or `footerN.xml` part. Native fields, drawings, objects, tables, and
-unknown elements remain opaque and are never reconstructed from their preview text.
-See [the header/footer contract](docs/header-footer.md).
+`headerN.xml` or `footerN.xml` part. PAGE, NUMPAGES, SECTION, and SECTIONPAGES are
+structured fields with their own stable IDs. Their displayed result is explicitly a
+non-authoritative cache:
+
+```python
+result = doc.apply([
+    {
+        "op": "field.update",
+        "target": "#current_page",
+        "set": {"number_format": "upper_roman"},
+    }
+])
+```
+
+Generated fields are marked dirty and `update_fields_on_open` is enabled unless
+explicitly disabled. Unknown field instructions remain structured but read-only;
+drawings, objects, tables, and malformed field structures remain opaque. See
+[the dynamic field contract](docs/dynamic-fields.md) and
+[the header/footer contract](docs/header-footer.md).
 
 `doc.render()` currently returns a semantic HTML preview whose contract explicitly
 reports `fidelity="approximate"` and `verification_status="preview_only"`. It must
@@ -351,9 +385,9 @@ preview = result.document
 
 Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `node.append`, `node.insert_after`, `node.remove`, `node.update`, `style.define`,
-`style.apply`, `style.format`, and `section.format`. Imported DOCX documents expose
-the native-safe subset reported by `capabilities()`. Selectors are stable content or
-section IDs in this release.
+`style.apply`, `style.format`, `section.format`, and `field.update`. Imported DOCX
+documents expose the native-safe subset reported by `capabilities()`. Selectors are
+stable content, section, header/footer block, or field IDs in this release.
 
 ## CLI
 
@@ -370,6 +404,7 @@ aioffice schema --kind page-size --output page-size.schema.json
 aioffice schema --kind section-layout --output section-layout.schema.json
 aioffice schema --kind document-section --output document-section.schema.json
 aioffice schema --kind document-settings --output document-settings.schema.json
+aioffice schema --kind document-field --output document-field.schema.json
 aioffice schema --kind header-footer-bindings --output header-footer-bindings.schema.json
 aioffice schema --kind header-footer-part --output header-footer-part.schema.json
 aioffice schema --kind text-range --output text-range.schema.json

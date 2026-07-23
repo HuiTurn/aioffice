@@ -20,7 +20,14 @@ from aioffice.core.diagnostics import Diagnostic, Severity
 from aioffice.core.errors import NativePackageError
 from aioffice.core.ids import new_id
 from aioffice.native.xml import parse_xml
-from aioffice.spec.models import AiOfficeDocumentSpec, NativeRef, NodeId
+from aioffice.spec.models import (
+    AiOfficeDocumentSpec,
+    DocumentField,
+    Heading,
+    NativeRef,
+    NodeId,
+    Paragraph,
+)
 
 MANIFEST_VERSION = "0.1"
 MANIFEST_NAMESPACE = "https://schemas.aioffice.dev/manifest/0.1"
@@ -149,11 +156,32 @@ def build_identity_manifest(
     package_sha256: str | None = None,
 ) -> IdentityManifest:
     records: list[IdentityNode] = []
+    text_blocks = [
+        *(
+            node
+            for node in spec.content
+            if isinstance(node, (Heading, Paragraph))
+        ),
+        *(
+            block
+            for part in spec.header_footers
+            for block in part.content
+            if isinstance(block, Paragraph)
+        ),
+    ]
     node_groups = [
         list(spec.content),
         list(spec.sections),
         list(spec.header_footers),
         *(list(part.content) for part in spec.header_footers),
+        *(
+            [
+                inline
+                for inline in block.content
+                if isinstance(inline, DocumentField)
+            ]
+            for block in text_blocks
+        ),
     ]
     for nodes in node_groups:
         group: list[IdentityNode] = []
@@ -209,6 +237,8 @@ def serialize_identity_manifest(manifest: IdentityManifest) -> bytes:
             values["elementIndices"] = " ".join(
                 str(index) for index in source_ref.element_indices
             )
+        if source_ref.sub_index is not None:
+            values["subIndex"] = str(source_ref.sub_index)
         if source_ref.path_hint is not None:
             values["pathHint"] = source_ref.path_hint
         if source_ref.native_id is not None:
@@ -239,6 +269,11 @@ def parse_identity_manifest(payload: bytes) -> IdentityManifest:
                 if "elementIndex" in element.attrib
                 else None
             )
+            sub_index = (
+                int(element.attrib["subIndex"])
+                if "subIndex" in element.attrib
+                else None
+            )
         except ValueError as error:
             raise NativePackageError(
                 "AiOffice identity manifest contains an invalid element index."
@@ -253,6 +288,7 @@ def parse_identity_manifest(payload: bytes) -> IdentityManifest:
                     "native_kind": element.attrib.get("nativeKind", ""),
                     "element_index": element_index,
                     "element_indices": indices,
+                    "sub_index": sub_index,
                     "path_hint": element.attrib.get("pathHint"),
                     "native_id": element.attrib.get("nativeId"),
                     "fingerprint": element.attrib.get("fingerprint"),
@@ -285,6 +321,31 @@ def _candidate_ref(candidate: Mapping[str, Any]) -> NativeRef | None:
         return None
 
 
+def _neighbor_candidate_ref(
+    candidates: list[tuple[int, dict[str, Any], NativeRef | None]],
+    index: int,
+    *,
+    direction: int,
+    source_ref: NativeRef,
+) -> NativeRef | None:
+    candidate_index = index + direction
+    while 0 <= candidate_index < len(candidates):
+        candidate_ref = candidates[candidate_index][2]
+        if candidate_ref is not None:
+            same_layer = candidate_ref.part_uri == source_ref.part_uri and (
+                candidate_ref.sub_index is None
+                if source_ref.sub_index is None
+                else (
+                    candidate_ref.sub_index is not None
+                    and candidate_ref.element_index == source_ref.element_index
+                )
+            )
+            if same_layer:
+                return candidate_ref
+        candidate_index += direction
+    return None
+
+
 def apply_identity_manifest(
     content: list[dict[str, Any]],
     manifest: IdentityManifest,
@@ -294,6 +355,20 @@ def apply_identity_manifest(
     header_footers: list[dict[str, Any]] | None = None,
 ) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
+    text_blocks = [
+        *(
+            node
+            for node in content
+            if node.get("type") in {"heading", "paragraph"}
+        ),
+        *(
+            block
+            for part in (header_footers or [])
+            for block in part.get("content", [])
+            if isinstance(block, dict)
+            and block.get("type") == "paragraph"
+        ),
+    ]
     projected = [
         *content,
         *(sections or []),
@@ -303,6 +378,13 @@ def apply_identity_manifest(
             for part in (header_footers or [])
             for block in part.get("content", [])
             if isinstance(block, dict)
+        ),
+        *(
+            inline
+            for block in text_blocks
+            for inline in block.get("content", [])
+            if isinstance(inline, dict)
+            and inline.get("type") == "field"
         ),
     ]
     candidates = [
@@ -318,6 +400,7 @@ def apply_identity_manifest(
                 else 2**31
             ),
             item[2].native_kind if item[2] is not None else "",
+            item[2].sub_index if item[2] is not None else -1,
             item[0],
         )
     )
@@ -344,6 +427,7 @@ def apply_identity_manifest(
                 and candidate_ref.native_kind == source_ref.native_kind
                 and candidate_ref.element_index == source_ref.element_index
                 and candidate_ref.element_indices == source_ref.element_indices
+                and candidate_ref.sub_index == source_ref.sub_index
             ]
 
         if not matches and source_ref.native_id:
@@ -377,14 +461,21 @@ def apply_identity_manifest(
                 and candidate_ref.part_uri == source_ref.part_uri
                 and candidate_ref.native_kind == source_ref.native_kind
                 and candidate_ref.element_index == source_ref.element_index
+                and candidate_ref.sub_index == source_ref.sub_index
             ]
             for match in path_candidates:
                 index = match[0]
-                previous_ref = candidates[index - 1][2] if index > 0 else None
-                next_ref = (
-                    candidates[index + 1][2]
-                    if index + 1 < len(candidates)
-                    else None
+                previous_ref = _neighbor_candidate_ref(
+                    candidates,
+                    index,
+                    direction=-1,
+                    source_ref=source_ref,
+                )
+                next_ref = _neighbor_candidate_ref(
+                    candidates,
+                    index,
+                    direction=1,
+                    source_ref=source_ref,
                 )
                 previous_matches = (
                     record.previous_fingerprint is not None

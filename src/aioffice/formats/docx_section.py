@@ -25,6 +25,13 @@ SectionStart = Literal[
     "next_column",
 ]
 VerticalAlignment = Literal["top", "center", "both", "bottom"]
+PageNumberFormat = Literal[
+    "decimal",
+    "upper_roman",
+    "lower_roman",
+    "upper_letter",
+    "lower_letter",
+]
 
 _START_FROM_NATIVE: dict[str, SectionStart] = {
     "continuous": "continuous",
@@ -34,6 +41,16 @@ _START_FROM_NATIVE: dict[str, SectionStart] = {
     "nextColumn": "next_column",
 }
 _START_TO_NATIVE = {value: key for key, value in _START_FROM_NATIVE.items()}
+_PAGE_NUMBER_FROM_NATIVE: dict[str, PageNumberFormat] = {
+    "decimal": "decimal",
+    "upperRoman": "upper_roman",
+    "lowerRoman": "lower_roman",
+    "upperLetter": "upper_letter",
+    "lowerLetter": "lower_letter",
+}
+_PAGE_NUMBER_TO_NATIVE = {
+    value: key for key, value in _PAGE_NUMBER_FROM_NATIVE.items()
+}
 _VERTICAL_VALUES = {"top", "center", "both", "bottom"}
 _SECTION_ORDER = [
     "headerReference",
@@ -211,6 +228,27 @@ def read_section_layout(
     vertical = section.find(_q("vAlign"))
     raw_vertical = vertical.get(_q("val")) if vertical is not None else None
     title_page = section.find(_q("titlePg"))
+    page_numbering = section.find(_q("pgNumType"))
+    raw_page_number_start = (
+        page_numbering.get(_q("start"))
+        if page_numbering is not None
+        else None
+    )
+    try:
+        page_number_start = (
+            int(raw_page_number_start)
+            if raw_page_number_start is not None
+            else None
+        )
+        if page_number_start is not None and page_number_start < 0:
+            page_number_start = None
+    except ValueError:
+        page_number_start = None
+    raw_page_number_format = (
+        page_numbering.get(_q("fmt"))
+        if page_numbering is not None
+        else None
+    )
     return SectionLayout(
         start_type=start_type,
         page_size=_read_page_size(section.find(_q("pgSz"))),
@@ -255,6 +293,12 @@ def read_section_layout(
             _on_off(title_page.get(_q("val")), default=True)
             if title_page is not None
             else False
+        ),
+        page_number_start=page_number_start,
+        page_number_format=(
+            _PAGE_NUMBER_FROM_NATIVE.get(raw_page_number_format)
+            if raw_page_number_format is not None
+            else None
         ),
     )
 
@@ -364,6 +408,32 @@ def patch_section_layout(
                 else _ensure_child(section, "titlePg")
             )
             element.set(_q("val"), "1" if layout.different_first_page else "0")
+
+    page_number_fields = fields.intersection(
+        {"page_number_start", "page_number_format"}
+    )
+    if page_number_fields:
+        existing = section.find(_q("pgNumType"))
+        if existing is None and any(
+            getattr(layout, field_name) is not None
+            for field_name in page_number_fields
+        ):
+            existing = _ensure_child(section, "pgNumType")
+        if existing is not None:
+            if "page_number_start" in page_number_fields:
+                if layout.page_number_start is None:
+                    existing.attrib.pop(_q("start"), None)
+                else:
+                    existing.set(_q("start"), str(layout.page_number_start))
+            if "page_number_format" in page_number_fields:
+                if layout.page_number_format is None:
+                    existing.attrib.pop(_q("fmt"), None)
+                else:
+                    existing.set(
+                        _q("fmt"),
+                        _PAGE_NUMBER_TO_NATIVE[layout.page_number_format],
+                    )
+            _remove_if_empty(section, existing)
 
 
 def apply_section_layout(section: ET.Element, layout: SectionLayout) -> None:

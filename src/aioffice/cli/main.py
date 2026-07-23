@@ -15,6 +15,7 @@ from aioffice.operations import TextMatch, TextRange
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     DocumentDefaults,
+    DocumentField,
     DocumentSection,
     DocumentSettings,
     HeaderFooterBindings,
@@ -87,6 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "document-defaults",
             "document-section",
             "document-settings",
+            "document-field",
             "header-footer-bindings",
             "header-footer-part",
             "named-style",
@@ -340,6 +342,7 @@ def _run(args: argparse.Namespace) -> int:
             "document-defaults": DocumentDefaults,
             "document-section": DocumentSection,
             "document-settings": DocumentSettings,
+            "document-field": DocumentField,
             "header-footer-bindings": HeaderFooterBindings,
             "header-footer-part": HeaderFooterPart,
             "named-style": NamedStyle,

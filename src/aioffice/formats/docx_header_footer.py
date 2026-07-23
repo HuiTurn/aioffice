@@ -126,13 +126,34 @@ def read_even_and_odd_headers(settings_root: ET.Element | None) -> bool | None:
     return value is None or value.casefold() not in {"0", "false", "off", "no"}
 
 
-def settings_xml(*, even_and_odd_headers: bool) -> bytes:
+def read_update_fields_on_open(settings_root: ET.Element | None) -> bool | None:
+    if settings_root is None:
+        return None
+    element = settings_root.find(_q(W, "updateFields"))
+    if element is None:
+        return None
+    value = element.get(_q(W, "val"))
+    return value is None or value.casefold() not in {"0", "false", "off", "no"}
+
+
+def settings_xml(
+    *,
+    even_and_odd_headers: bool | None = None,
+    update_fields_on_open: bool | None = None,
+) -> bytes:
     root = ET.Element(_q(W, "settings"))
-    ET.SubElement(
-        root,
-        _q(W, "evenAndOddHeaders"),
-        {_q(W, "val"): "1" if even_and_odd_headers else "0"},
-    )
+    if even_and_odd_headers is not None:
+        ET.SubElement(
+            root,
+            _q(W, "evenAndOddHeaders"),
+            {_q(W, "val"): "1" if even_and_odd_headers else "0"},
+        )
+    if update_fields_on_open is not None:
+        ET.SubElement(
+            root,
+            _q(W, "updateFields"),
+            {_q(W, "val"): "1" if update_fields_on_open else "0"},
+        )
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
@@ -147,6 +168,7 @@ __all__ = [
     "binding_field",
     "native_ref_for_header_footer_part",
     "read_even_and_odd_headers",
+    "read_update_fields_on_open",
     "resolve_relationship_target",
     "settings_xml",
 ]

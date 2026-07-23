@@ -42,14 +42,16 @@ identity manifest. Unknown XML in the same part remains in place.
 
 ## Conservative projection boundary
 
-Fields such as PAGE and NUMPAGES, drawings, embedded objects, tables, and unknown
-header/footer elements are projected as non-editable opaque blocks. Their native XML
-remains authoritative. AiOffice does not turn a field's cached display result into
-plain editable text, because doing so would destroy its computation semantics.
+PAGE, NUMPAGES, SECTION, and SECTIONPAGES fields are projected as structured inline
+objects. Their cached display result is kept separate from the semantic instruction
+and never treated as authoritative text. Unknown field instructions are visible as
+read-only native fields. Malformed field containment, drawings, embedded objects,
+tables, and unknown header/footer elements remain non-editable opaque blocks.
 
 Semantic generation currently supports ordinary paragraph blocks, including rich
-text and hyperlinks. Structured fields, tables, images, and binding creation/removal
-on an already imported native package are planned behind explicit capabilities.
+text, hyperlinks, and normalized dynamic fields. Tables, images, and binding
+creation/removal on an already imported native package are planned behind explicit
+capabilities. See [the dynamic field contract](dynamic-fields.md).
 
 ## Preview boundary
 

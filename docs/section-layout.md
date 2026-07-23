@@ -26,7 +26,8 @@ inspect and patch.
 - header and footer distances;
 - equal-width or explicit unequal-width columns and an optional separator;
 - top, center, justified, or bottom vertical alignment;
-- different-first-page header/footer behavior.
+- different-first-page header/footer behavior;
+- page-number restart and decimal, Roman, or alphabetic numbering formats.
 
 All physical values carry an explicit `pt`, `in`, `cm`, `mm`, or `px` unit. The
 validator rejects impossible page geometry, unordered/missing anchors, duplicate
@@ -48,6 +49,10 @@ A no-op export therefore returns the original DOCX bytes.
 lowering changes the corresponding known OOXML values in one mapped `w:sectPr`.
 Unknown attributes, unknown children, relationship references, and all untouched
 package parts are preserved. Patch validation and lowering are atomic.
+
+`page_number_start` and `page_number_format` map to selected attributes of
+`w:pgNumType`. They define section pagination; PAGE/NUMPAGES fields remain separate
+inline content. See [the dynamic field contract](dynamic-fields.md).
 
 Header/footer bindings are intentionally separate from `SectionLayout`: they point
 to reusable package parts and have inheritance semantics. See

@@ -8,6 +8,7 @@ from typing import Any
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     BulletList,
+    DocumentField,
     Heading,
     OrderedList,
     PageBreak,
@@ -30,6 +31,15 @@ def _rich_text_markdown(text: str | None, content: list[Any]) -> str:
         return text
     rendered: list[str] = []
     for span in content:
+        if isinstance(span, DocumentField):
+            rendered.append(
+                (
+                    "{{native_field}}"
+                    if span.kind == "native"
+                    else "{{" + span.kind + "}}"
+                )
+            )
+            continue
         value = span.text
         if "code" in span.marks:
             value = f"`{value}`"

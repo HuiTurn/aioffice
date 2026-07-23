@@ -95,13 +95,24 @@ def _walk(
         )
 
 
-def _semantic_node(node: dict[str, Any], *, include_native: bool) -> dict[str, Any]:
-    value = dict(node)
-    value.pop("revision_added", None)
-    value.pop("revision_updated", None)
-    if not include_native:
-        value.pop("source_ref", None)
+def _semantic_value(value: Any, *, include_native: bool) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _semantic_value(item, include_native=include_native)
+            for key, item in value.items()
+            if key not in {"revision_added", "revision_updated"}
+            and (include_native or key != "source_ref")
+        }
+    if isinstance(value, list):
+        return [
+            _semantic_value(item, include_native=include_native)
+            for item in value
+        ]
     return value
+
+
+def _semantic_node(node: dict[str, Any], *, include_native: bool) -> dict[str, Any]:
+    return _semantic_value(node, include_native=include_native)
 
 
 def _semantic_header_footer(

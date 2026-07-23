@@ -24,6 +24,13 @@ from aioffice.formats.docx_named_styles import (
 from aioffice.formats.docx_header_footer import (
     native_ref_for_header_footer_part,
 )
+from aioffice.formats.docx_fields import (
+    FieldStructureError,
+    canonical_field_instruction,
+    field_match_at,
+    native_ref_for_field,
+    patch_field_instruction,
+)
 from aioffice.formats.docx_section import (
     native_ref_for_section,
     patch_section_layout,
@@ -40,9 +47,11 @@ from aioffice.native.xml import parse_xml, serialize_xml
 from aioffice.operations.text import resolve_text_selection
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
+    DocumentField,
     Heading,
     NamedStyle,
     NativeRef,
+    Paragraph,
     ParagraphStyle,
     SectionLayout,
     TextStyle,
@@ -90,6 +99,52 @@ def _find_source_ref(spec: AiOfficeDocumentSpec, target: Any) -> NativeRef:
             f"Semantic node {target_id!r} has no indexed DOCX element mapping."
         )
     return source_ref
+
+
+def _fields(spec: AiOfficeDocumentSpec) -> list[DocumentField]:
+    blocks = [
+        *(
+            node
+            for node in spec.content
+            if isinstance(node, (Heading, Paragraph))
+        ),
+        *(
+            block
+            for part in spec.header_footers
+            for block in part.content
+            if isinstance(block, Paragraph)
+        ),
+    ]
+    return [
+        inline
+        for block in blocks
+        for inline in block.content
+        if isinstance(inline, DocumentField)
+    ]
+
+
+def _find_field(
+    spec: AiOfficeDocumentSpec,
+    target: Any,
+) -> tuple[DocumentField, NativeRef]:
+    target_id = _target_id(target)
+    matches = [field for field in _fields(spec) if field.id == target_id]
+    if len(matches) != 1:
+        raise NativePackageError(
+            f"Native DOCX field target #{target_id} matched {len(matches)} fields."
+        )
+    document_field = matches[0]
+    source_ref = document_field.source_ref
+    if (
+        not isinstance(source_ref, NativeRef)
+        or source_ref.format != "docx"
+        or source_ref.element_index is None
+        or source_ref.sub_index is None
+    ):
+        raise NativePackageError(
+            f"Field {target_id!r} has no editable DOCX inline source reference."
+        )
+    return document_field, source_ref
 
 
 def _find_section_source_ref(
@@ -371,13 +426,15 @@ def apply_docx_operations(
         "style.define",
         "style.format",
         "section.format",
+        "field.update",
     }
     unsupported = sorted({str(operation.get("op")) for operation in operations} - supported)
     if unsupported:
         raise NativePackageError(
             "Imported DOCX V0.2 currently supports native lowering for "
             "text.replace, paragraph.format, text.format, node.remove, "
-            "style.apply, style.define, style.format, and section.format; "
+            "style.apply, style.define, style.format, section.format, and "
+            "field.update; "
             f"unsupported: {', '.join(unsupported)}."
         )
 
@@ -450,6 +507,20 @@ def apply_docx_operations(
             continue
         _, mapped_elements = elements_for_ref(source_ref)
         source_elements[node.id] = (mapped_elements, source_ref)
+    source_fields: dict[str, tuple[ET.Element, NativeRef]] = {}
+    for document_field in _fields(spec):
+        source_ref = document_field.source_ref
+        if not isinstance(source_ref, NativeRef):
+            continue
+        _, mapped_elements = elements_for_ref(source_ref)
+        if len(mapped_elements) != 1 or mapped_elements[0].tag != _q(W, "p"):
+            raise NativePackageError(
+                f"Field {document_field.id!r} is not mapped to one w:p element."
+            )
+        source_fields[document_field.id] = (
+            mapped_elements[0],
+            source_ref,
+        )
     source_sections: dict[
         str,
         tuple[ET.Element, ET.Element, str],
@@ -541,6 +612,50 @@ def apply_docx_operations(
                 source_ref,
             )
             changed_xml_parts.add("/word/document.xml")
+            continue
+        if operation_name == "field.update":
+            source_field, source_ref = _find_field(
+                spec,
+                operation.get("target"),
+            )
+            _, mapped_elements = elements_for_ref(source_ref)
+            if len(mapped_elements) != 1 or mapped_elements[0].tag != _q(W, "p"):
+                raise NativePackageError(
+                    "field.update requires a native reference to one w:p element."
+                )
+            result_field = next(
+                (
+                    candidate
+                    for candidate in _fields(result_spec)
+                    if candidate.id == source_field.id
+                ),
+                None,
+            )
+            if result_field is None:
+                raise NativePackageError(
+                    f"Patch result no longer contains field {source_field.id!r}."
+                )
+            assert source_ref.sub_index is not None
+            try:
+                match = field_match_at(
+                    mapped_elements[0],
+                    source_ref.sub_index,
+                )
+                patch_field_instruction(match, result_field)
+                result_field.metadata.update(
+                    {
+                        "native_form": match.form,
+                        "native_instruction": canonical_field_instruction(
+                            result_field
+                        ),
+                        "dirty": True,
+                    }
+                )
+            except FieldStructureError as error:
+                raise NativePackageError(
+                    f"Could not patch field {source_field.id!r}: {error}"
+                ) from error
+            changed_xml_parts.add(source_ref.part_uri)
             continue
 
         source_ref = _find_source_ref(spec, operation.get("target"))
@@ -673,6 +788,38 @@ def apply_docx_operations(
             root_path=root_path,
             native_id=original_ref.native_id,
         )
+    for field_id, (paragraph, original_ref) in source_fields.items():
+        if original_ref.sub_index is None:
+            continue
+        current_container = part_containers[original_ref.part_uri]
+        paragraph_index = next(
+            (
+                index
+                for index, element in enumerate(list(current_container))
+                if element is paragraph
+            ),
+            None,
+        )
+        if paragraph_index is None:
+            continue
+        try:
+            match = field_match_at(paragraph, original_ref.sub_index)
+        except FieldStructureError:
+            continue
+        root_path = (
+            "/w:document/w:body"
+            if original_ref.part_uri == "/word/document.xml"
+            else "/w:hdr"
+            if part_roots[original_ref.part_uri].tag == _q(W, "hdr")
+            else "/w:ftr"
+        )
+        identity_updates[field_id] = native_ref_for_field(
+            paragraph,
+            paragraph_index,
+            match,
+            part_uri=original_ref.part_uri,
+            root_path=root_path,
+        )
     for section_id, (section, container, container_kind) in source_sections.items():
         index = current_indices.get(id(container))
         if index is None:
@@ -715,6 +862,11 @@ def apply_docx_operations(
             for block in part.content:
                 if block.id in identity_updates:
                     block.source_ref = identity_updates[block.id]
+        for document_field in _fields(manifest_spec):
+            if document_field.id in identity_updates:
+                document_field.source_ref = identity_updates[
+                    document_field.id
+                ]
         updated.set_part(
             MANIFEST_PART_URI,
             serialize_identity_manifest(build_identity_manifest(manifest_spec)),

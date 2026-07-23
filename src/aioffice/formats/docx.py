@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -30,6 +30,11 @@ from aioffice.formats.docx_header_footer import (
     native_ref_for_header_footer_part,
     settings_xml,
 )
+from aioffice.formats.docx_fields import (
+    append_complex_field,
+    native_ref_for_field,
+    parse_paragraph_fields,
+)
 from aioffice.formats.docx_style import (
     apply_paragraph_mark_text_style,
     apply_paragraph_style,
@@ -43,8 +48,10 @@ from aioffice.formats.docx_section import (
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     BulletList,
+    DocumentField,
     Heading,
     HeaderFooterPart,
+    InlineContent,
     OpaqueBlock,
     OrderedList,
     PageBreak,
@@ -206,9 +213,31 @@ def _add_run(
     text.text = span.text
 
 
+def _add_inline(
+    parent: ET.Element,
+    inline: InlineContent,
+    context: _DocxContext,
+    *,
+    default_style: TextStyle | None = None,
+) -> None:
+    if isinstance(inline, TextSpan):
+        _add_run(
+            parent,
+            inline,
+            context,
+            default_style=default_style,
+        )
+        return
+    append_complex_field(
+        parent,
+        inline,
+        effective_style=_merge_text_style(default_style, inline.style),
+    )
+
+
 def _add_paragraph(
     body: ET.Element,
-    spans: list[TextSpan],
+    spans: Sequence[InlineContent],
     context: _DocxContext,
     *,
     style: str | None = None,
@@ -230,8 +259,38 @@ def _add_paragraph(
     apply_paragraph_style(paragraph, paragraph_style)
     apply_paragraph_mark_text_style(paragraph, text_style)
     for span in spans:
-        _add_run(paragraph, span, context, default_style=text_style)
+        _add_inline(
+            paragraph,
+            span,
+            context,
+            default_style=text_style,
+        )
     return paragraph
+
+
+def _register_field_refs(
+    refs: dict[str, NativeRef],
+    paragraph: ET.Element,
+    paragraph_index: int,
+    spans: Sequence[InlineContent],
+    *,
+    part_uri: str,
+    root_path: str,
+) -> None:
+    fields = [span for span in spans if isinstance(span, DocumentField)]
+    if not fields:
+        return
+    matches = parse_paragraph_fields(paragraph)
+    if len(matches) != len(fields):
+        raise ValueError("Generated DOCX field count does not match semantic fields.")
+    for document_field, match in zip(fields, matches):
+        refs[document_field.id] = native_ref_for_field(
+            paragraph,
+            paragraph_index,
+            match,
+            part_uri=part_uri,
+            root_path=root_path,
+        )
 
 
 def _add_table(body: ET.Element, table: Table, context: _DocxContext) -> ET.Element:
@@ -321,6 +380,14 @@ def _document_xml(
                 native_kind="w:p",
                 native_id=element.attrib.get(_q(W14, "paraId")),
             )
+            _register_field_refs(
+                refs,
+                element,
+                index,
+                spans,
+                part_uri="/word/document.xml",
+                root_path="/w:document/w:body",
+            )
         elif isinstance(block, Paragraph):
             spans = block.content if block.text is None else [TextSpan(text=block.text)]
             element = _add_paragraph(
@@ -338,6 +405,14 @@ def _document_xml(
                 [index],
                 native_kind="w:p",
                 native_id=element.attrib.get(_q(W14, "paraId")),
+            )
+            _register_field_refs(
+                refs,
+                element,
+                index,
+                spans,
+                part_uri="/word/document.xml",
+                root_path="/w:document/w:body",
             )
         elif isinstance(block, BulletList):
             elements = [
@@ -459,6 +534,14 @@ def _header_footer_xml(
             native_kind="w:p",
             root_path=f"/w:{root_name}",
             native_id=element.attrib.get(_q(W14, "paraId")),
+        )
+        _register_field_refs(
+            refs,
+            element,
+            index,
+            spans,
+            part_uri=part_uri,
+            root_path=f"/w:{root_name}",
         )
     refs[part.id] = native_ref_for_header_footer_part(
         root,
@@ -709,12 +792,35 @@ def compile_docx(spec: AiOfficeDocumentSpec) -> bytes:
     )
     refs.update(header_footers.refs)
     identity_manifest = build_identity_manifest(spec, refs=refs)
+    has_fields = any(
+        isinstance(inline, DocumentField)
+        for block in [
+            *spec.content,
+            *(block for part in spec.header_footers for block in part.content),
+        ]
+        if isinstance(block, (Heading, Paragraph))
+        for inline in block.content
+    )
+    even_and_odd_headers = (
+        spec.settings.even_and_odd_headers
+        if spec.settings is not None
+        else None
+    )
+    update_fields_on_open = (
+        spec.settings.update_fields_on_open
+        if spec.settings is not None
+        and spec.settings.update_fields_on_open is not None
+        else True
+        if has_fields
+        else None
+    )
     settings_payload = (
         settings_xml(
-            even_and_odd_headers=spec.settings.even_and_odd_headers,
+            even_and_odd_headers=even_and_odd_headers,
+            update_fields_on_open=update_fields_on_open,
         )
-        if spec.settings is not None
-        and spec.settings.even_and_odd_headers is not None
+        if even_and_odd_headers is not None
+        or update_fields_on_open is not None
         else None
     )
     content_type_overrides = dict(header_footers.content_types)

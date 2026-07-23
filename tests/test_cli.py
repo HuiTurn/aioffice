@@ -67,9 +67,10 @@ class CliTests(unittest.TestCase):
                     "node.remove",
                     "style.apply",
                     "style.define",
-                    "style.format",
-                    "section.format",
-                ],
+                "style.format",
+                "section.format",
+                "field.update",
+            ],
             )
             self.assertEqual(
                 capabilities["formatting"]["text_scopes"],

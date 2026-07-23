@@ -15,7 +15,13 @@ def node_plain_text(node: Mapping[str, Any]) -> str:
     if isinstance(text, str):
         return text
     return "".join(
-        str(span.get("text", ""))
+        (
+            str(span.get("text", ""))
+            if span.get("type") == "text"
+            else str(span.get("cached_result") or "")
+            if span.get("type") == "field"
+            else ""
+        )
         for span in node.get("content", [])
         if isinstance(span, Mapping)
     )
@@ -77,6 +83,8 @@ def _update_style(
 
 
 def _same_span_format(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    if left.get("type", "text") != "text" or right.get("type", "text") != "text":
+        return False
     keys = (set(left) | set(right)) - {"text"}
     return all(left.get(key) == right.get(key) for key in keys)
 
@@ -86,7 +94,7 @@ def _merge_adjacent_spans(spans: Sequence[Mapping[str, Any]]) -> list[dict[str, 
     for raw_span in spans:
         span = deepcopy(dict(raw_span))
         span.setdefault("type", "text")
-        if not span.get("text") and merged:
+        if span["type"] == "text" and not span.get("text") and merged:
             continue
         if merged and _same_span_format(merged[-1], span):
             merged[-1]["text"] += span.get("text", "")

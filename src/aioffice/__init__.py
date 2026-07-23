@@ -26,6 +26,7 @@ from .security import SecurityPolicy
 from .spec import (
     ColumnLayout,
     DocumentDefaults,
+    DocumentField,
     DocumentSection,
     DocumentSettings,
     HeaderFooterBindings,
@@ -56,6 +57,7 @@ __all__ = [
     "DocumentDiff",
     "Document",
     "DocumentBuilder",
+    "DocumentField",
     "DocumentSection",
     "DocumentSettings",
     "DocumentDefaults",

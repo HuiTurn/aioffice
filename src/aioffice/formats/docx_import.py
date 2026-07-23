@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,14 @@ from aioffice.formats.docx_header_footer import (
     binding_field,
     native_ref_for_header_footer_part,
     read_even_and_odd_headers,
+    read_update_fields_on_open,
     resolve_relationship_target,
+)
+from aioffice.formats.docx_fields import (
+    FieldMatch,
+    FieldStructureError,
+    field_payload,
+    parse_paragraph_fields,
 )
 from aioffice.formats.docx_section import (
     native_ref_for_section,
@@ -45,7 +53,7 @@ from aioffice.native import (
 )
 from aioffice.native.xml import parse_xml
 from aioffice.security import SecurityPolicy
-from aioffice.spec.models import AiOfficeDocumentSpec, NamedStyle
+from aioffice.spec.models import AiOfficeDocumentSpec, NamedStyle, TextStyle
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
@@ -153,6 +161,32 @@ def _merge_projected_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _merge_inline_content(
+    content: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for inline in content:
+        if (
+            result
+            and result[-1].get("type") == "text"
+            and inline.get("type") == "text"
+            and {
+                key: value
+                for key, value in result[-1].items()
+                if key != "text"
+            }
+            == {
+                key: value
+                for key, value in inline.items()
+                if key != "text"
+            }
+        ):
+            result[-1]["text"] += inline.get("text", "")
+        else:
+            result.append(inline)
+    return result
+
+
 def _text_projection(
     element: ET.Element,
     hyperlink_targets: dict[str, str],
@@ -186,6 +220,101 @@ def _text_projection(
     if spans:
         return {"content": spans}, common_payload or None
     return {"text": _paragraph_text(element)}, common_payload or None
+
+
+def _materialized_text_spans(
+    elements: list[ET.Element],
+    hyperlink_targets: dict[str, str],
+) -> list[dict[str, Any]]:
+    if not elements:
+        return []
+    wrapper = ET.Element(_q(W, "p"))
+    for element in elements:
+        wrapper.append(deepcopy(element))
+    projection, common_style = _text_projection(wrapper, hyperlink_targets)
+    spans = (
+        [{"type": "text", "text": projection["text"]}]
+        if "text" in projection
+        else [deepcopy(span) for span in projection.get("content", [])]
+    )
+    if common_style:
+        for span in spans:
+            style = {
+                **common_style,
+                **(
+                    span.get("style", {})
+                    if isinstance(span.get("style"), dict)
+                    else {}
+                ),
+            }
+            if style:
+                span["style"] = style
+    return spans
+
+
+def _field_result_style(match: FieldMatch) -> TextStyle | None:
+    if not match.result_elements:
+        return None
+    wrapper = ET.Element(_q(W, "p"))
+    for element in match.result_elements:
+        wrapper.append(deepcopy(element))
+    return common_text_style(wrapper)
+
+
+def _field_aware_text_projection(
+    element: ET.Element,
+    index: int,
+    seen_ids: set[str],
+    hyperlink_targets: dict[str, str],
+    *,
+    part_uri: str,
+    root_path: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    matches = parse_paragraph_fields(element)
+    if not matches:
+        return _text_projection(element, hyperlink_targets)
+    children = list(element)
+    content: list[dict[str, Any]] = []
+    cursor = 0
+    para_id = element.attrib.get(_q(W14, "paraId"), f"{index:06d}")
+    for match in matches:
+        content.extend(
+            _materialized_text_spans(
+                children[cursor : match.start_index],
+                hyperlink_targets,
+            )
+        )
+        fingerprint = hashlib.sha256(
+            b"".join(
+                ET.tostring(field_element, encoding="utf-8")
+                for field_element in match.elements
+            )
+        ).hexdigest()[:12]
+        field_id = _unique_id(
+            "field",
+            f"{para_id}_{match.ordinal}_{fingerprint}",
+            match.ordinal,
+            seen_ids,
+        )
+        content.append(
+            field_payload(
+                element,
+                index,
+                match,
+                field_id=field_id,
+                part_uri=part_uri,
+                root_path=root_path,
+                style=_field_result_style(match),
+            )
+        )
+        cursor = match.end_index + 1
+    content.extend(
+        _materialized_text_spans(
+            children[cursor:],
+            hyperlink_targets,
+        )
+    )
+    return {"content": _merge_inline_content(content)}, None
 
 
 def _source_ref(
@@ -234,7 +363,33 @@ def _paragraph_projection(
     root_path: str = "/w:document/w:body",
     allow_heading: bool = True,
 ) -> dict[str, Any]:
-    text_projection, text_style = _text_projection(element, hyperlink_targets)
+    try:
+        text_projection, text_style = _field_aware_text_projection(
+            element,
+            index,
+            seen_ids,
+            hyperlink_targets,
+            part_uri=part_uri,
+            root_path=root_path,
+        )
+    except FieldStructureError as error:
+        para_id = element.attrib.get(_q(W14, "paraId"), f"{index:06d}")
+        return {
+            "id": _unique_id("opaque", para_id, index, seen_ids),
+            "type": "opaque",
+            "summary": f"Unsupported or malformed DOCX field structure: {error}",
+            "source_ref": _source_ref(
+                [element],
+                [index],
+                "w:p",
+                native_id=element.attrib.get(_q(W14, "paraId")),
+                part_uri=part_uri,
+                root_path=root_path,
+            ),
+            "capabilities": ["inspect", "render"],
+            "editable": False,
+            "metadata": {"native_features": ["field_structure"]},
+        }
     text = _paragraph_text(element)
     para_id = element.attrib.get(_q(W14, "paraId"), f"{index:06d}")
     node_id = _unique_id("para", para_id, index, seen_ids)
@@ -250,6 +405,12 @@ def _paragraph_projection(
         else None
     )
     native_features: list[str] = []
+    if any(
+        inline.get("type") == "field"
+        for inline in text_projection.get("content", [])
+        if isinstance(inline, dict)
+    ):
+        native_features.append("field")
     if element.find(f".//{_q(W, 'drawing')}") is not None:
         native_features.append("drawing")
     if element.find(f".//{_q(W, 'object')}") is not None:
@@ -290,7 +451,9 @@ def _paragraph_projection(
             "level": heading_level,
             **text_projection,
         }
-    if not text and native_features:
+    if not text and any(
+        feature != "field" for feature in native_features
+    ):
         return {
             **common,
             "id": _unique_id("opaque", para_id, index, seen_ids),
@@ -327,8 +490,6 @@ def _header_footer_part_projection(
         complex_features = [
             feature
             for feature, query in (
-                ("field", f".//{_q(W, 'fldChar')}"),
-                ("field_code", f".//{_q(W, 'instrText')}"),
                 ("drawing", f".//{_q(W, 'drawing')}"),
                 ("object", f".//{_q(W, 'object')}"),
             )
@@ -946,6 +1107,7 @@ def import_docx(
     except NativePackageError:
         settings_root = None
     even_and_odd_headers = read_even_and_odd_headers(settings_root)
+    update_fields_on_open = read_update_fields_on_open(settings_root)
 
     spec = AiOfficeDocumentSpec.model_validate(
         {
@@ -968,8 +1130,16 @@ def import_docx(
                 else {}
             ),
             "settings": (
-                {"even_and_odd_headers": even_and_odd_headers}
+                {
+                    key: value
+                    for key, value in {
+                        "even_and_odd_headers": even_and_odd_headers,
+                        "update_fields_on_open": update_fields_on_open,
+                    }.items()
+                    if value is not None
+                }
                 if even_and_odd_headers is not None
+                or update_fields_on_open is not None
                 else None
             ),
             "styles": [

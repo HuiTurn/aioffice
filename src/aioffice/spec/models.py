@@ -16,7 +16,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.6"
+SPEC_VERSION = "0.2-draft.7"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -299,6 +299,14 @@ class SectionLayout(StrictModel):
     columns: ColumnLayout | None = None
     vertical_alignment: Literal["top", "center", "both", "bottom"] | None = None
     different_first_page: bool | None = None
+    page_number_start: int | None = Field(default=None, ge=0, strict=True)
+    page_number_format: Literal[
+        "decimal",
+        "upper_roman",
+        "lower_roman",
+        "upper_letter",
+        "lower_letter",
+    ] | None = None
 
     @model_validator(mode="after")
     def validate_page_geometry(self) -> "SectionLayout":
@@ -426,6 +434,7 @@ class NativeRef(StrictModel):
     native_kind: str
     element_index: int | None = Field(default=None, ge=0)
     element_indices: list[int] = Field(default_factory=list)
+    sub_index: int | None = Field(default=None, ge=0)
     path_hint: str | None = None
     native_id: str | None = None
     fingerprint: (
@@ -450,6 +459,8 @@ class NativeRef(StrictModel):
             and self.element_index != self.element_indices[0]
         ):
             raise ValueError("element_index must equal the first element_indices value.")
+        if self.sub_index is not None and self.element_index is None:
+            raise ValueError("sub_index requires an element_index.")
         return self
 
 
@@ -468,6 +479,7 @@ class DocumentSettings(StrictModel):
     """Document-wide layout switches that cannot be scoped to one section."""
 
     even_and_odd_headers: bool | None = None
+    update_fields_on_open: bool | None = None
 
 
 class DocumentSection(StrictModel):
@@ -509,12 +521,69 @@ class NodeBase(StrictModel):
     revision_updated: int = Field(default=1, ge=1)
 
 
+class DocumentField(StrictModel):
+    """An AI-addressable dynamic Word field with a non-authoritative cached result."""
+
+    id: NodeId = Field(default_factory=lambda: new_id("field"))
+    type: Literal["field"] = "field"
+    kind: Literal[
+        "page_number",
+        "page_count",
+        "section_number",
+        "section_page_count",
+        "native",
+    ]
+    number_format: Literal[
+        "decimal",
+        "upper_roman",
+        "lower_roman",
+        "upper_letter",
+        "lower_letter",
+    ] | None = None
+    cached_result: str | None = None
+    instruction: str | None = None
+    style: TextStyle | None = None
+    editable: bool = True
+    source_ref: NativeRef | str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    revision_added: int = Field(default=1, ge=1)
+    revision_updated: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_native_field(self) -> "DocumentField":
+        if self.kind == "native":
+            if not self.instruction:
+                raise ValueError("A native field requires its preserved instruction.")
+            if self.editable:
+                raise ValueError("A native field must be read-only.")
+            if self.number_format is not None:
+                raise ValueError("A native field cannot claim a normalized number format.")
+        elif self.instruction is not None:
+            raise ValueError(
+                "Normalized fields keep native instructions in metadata, not instruction."
+            )
+        elif not self.editable:
+            raise ValueError("A normalized field must remain editable.")
+        return self
+
+    @property
+    def display_text(self) -> str:
+        if self.cached_result is not None:
+            return self.cached_result
+        if self.kind == "native":
+            return "⟦field⟧"
+        return "1"
+
+
+InlineContent = TextSpan | DocumentField
+
+
 class Heading(NodeBase):
     id: NodeId = Field(default_factory=lambda: new_id("heading"))
     type: Literal["heading"] = "heading"
     level: int = Field(default=1, ge=1, le=6)
     text: str | None = None
-    content: list[TextSpan] = Field(default_factory=list)
+    content: list[InlineContent] = Field(default_factory=list)
     style_ref: StyleId | None = None
     paragraph_style: ParagraphStyle | None = None
     text_style: TextStyle | None = None
@@ -531,14 +600,17 @@ class Heading(NodeBase):
     def plain_text(self) -> str:
         if self.text is not None:
             return self.text
-        return "".join(span.text for span in self.content)
+        return "".join(
+            span.text if isinstance(span, TextSpan) else span.display_text
+            for span in self.content
+        )
 
 
 class Paragraph(NodeBase):
     id: NodeId = Field(default_factory=lambda: new_id("para"))
     type: Literal["paragraph"] = "paragraph"
     text: str | None = None
-    content: list[TextSpan] = Field(default_factory=list)
+    content: list[InlineContent] = Field(default_factory=list)
     style_ref: StyleId | None = None
     paragraph_style: ParagraphStyle | None = None
     text_style: TextStyle | None = None
@@ -555,7 +627,10 @@ class Paragraph(NodeBase):
     def plain_text(self) -> str:
         if self.text is not None:
             return self.text
-        return "".join(span.text for span in self.content)
+        return "".join(
+            span.text if isinstance(span, TextSpan) else span.display_text
+            for span in self.content
+        )
 
 
 class ListBase(NodeBase):
@@ -649,6 +724,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.4",
         "0.2-draft.5",
         "0.2-draft.6",
+        "0.2-draft.7",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

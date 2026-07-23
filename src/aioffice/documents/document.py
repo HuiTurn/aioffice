@@ -46,6 +46,7 @@ from aioffice.spec.models import (
     Block,
     DOCUMENT_SCHEMA_URL,
     BulletList,
+    DocumentField,
     Heading,
     LEGACY_DOCUMENT_SCHEMA_URL,
     LEGACY_SPEC_VERSION,
@@ -61,6 +62,28 @@ from aioffice.spec.models import (
 )
 from aioffice.styles import style_catalog, theme_named_styles
 from aioffice.themes import get_theme
+
+
+def _document_fields(spec: AiOfficeDocumentSpec) -> list[DocumentField]:
+    blocks = [
+        *(
+            node
+            for node in spec.content
+            if isinstance(node, (Heading, Paragraph))
+        ),
+        *(
+            block
+            for part in spec.header_footers
+            for block in part.content
+            if isinstance(block, Paragraph)
+        ),
+    ]
+    return [
+        inline
+        for block in blocks
+        for inline in block.content
+        if isinstance(inline, DocumentField)
+    ]
 
 
 def _validation_error_diagnostics(error: ValidationError) -> list[Diagnostic]:
@@ -265,6 +288,7 @@ class Document:
             "style_count": len(style_catalog(self._spec)),
             "section_count": len(self._spec.sections),
             "header_footer_count": len(self._spec.header_footers),
+            "field_count": len(_document_fields(self._spec)),
         }
         if response_format == "compact":
             style_usage: dict[str, int] = {}
@@ -294,6 +318,18 @@ class Document:
                 if isinstance(node, (Heading, Paragraph)) and node.style_ref is not None:
                     compact["style_ref"] = node.style_ref
                     style_usage[node.style_ref] = style_usage.get(node.style_ref, 0) + 1
+                if isinstance(node, (Heading, Paragraph)):
+                    compact["fields"] = [
+                        {
+                            "id": inline.id,
+                            "kind": inline.kind,
+                            "number_format": inline.number_format,
+                            "cached_result": inline.cached_result,
+                            "editable": inline.editable,
+                        }
+                        for inline in node.content
+                        if isinstance(inline, DocumentField)
+                    ]
                 nodes.append(compact)
             result["nodes"] = nodes
             result["styles"] = [
@@ -347,7 +383,20 @@ class Document:
                             "id": block.id,
                             "type": block.type,
                             **(
-                                {"text": block.plain_text}
+                                {
+                                    "text": block.plain_text,
+                                    "fields": [
+                                        {
+                                            "id": inline.id,
+                                            "kind": inline.kind,
+                                            "number_format": inline.number_format,
+                                            "cached_result": inline.cached_result,
+                                            "editable": inline.editable,
+                                        }
+                                        for inline in block.content
+                                        if isinstance(inline, DocumentField)
+                                    ],
+                                }
                                 if isinstance(block, Paragraph)
                                 else {"summary": block.summary}
                             ),
@@ -424,6 +473,7 @@ class Document:
             "style.define",
             "style.format",
             "section.format",
+            "field.update",
         ]
         if self._native is not None:
             operations = [
@@ -435,6 +485,7 @@ class Document:
                 "style.define",
                 "style.format",
                 "section.format",
+                "field.update",
             ]
         native_extension = self._spec.extensions.get("dev.aioffice.native", {})
         ambiguous_node_ids = sorted(
@@ -468,6 +519,7 @@ class Document:
                 "#node_id",
                 "#section_id",
                 "#header_footer_block_id",
+                "#field_id",
             ],
             "formatting": {
                 "length_units": ["pt", "in", "cm", "mm", "px"],
@@ -509,11 +561,23 @@ class Document:
                     "missing_binding": "inherit_previous_section",
                     "editable_blocks": ["paragraph"],
                     "opaque_native_features": [
-                        "fields",
                         "drawings",
                         "objects",
                         "tables",
                     ],
+                },
+                "field_contract": {
+                    "kinds": [
+                        "page_number",
+                        "page_count",
+                        "section_number",
+                        "section_page_count",
+                    ],
+                    "native_unknown_kind": "read_only",
+                    "cached_result": "non_authoritative",
+                    "generated_form": "complex_field",
+                    "native_forms": ["complex_field", "simple_field"],
+                    "native_patch_scope": "one field instruction",
                 },
             },
             "identity": {
@@ -1139,6 +1203,72 @@ class Document:
                                 ],
                             )
                         )
+
+        for field_index, document_field in enumerate(
+            _document_fields(self._spec)
+        ):
+            field_path = f"fields.{field_index}"
+            if document_field.id in seen:
+                diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"Duplicate node ID {document_field.id!r}.",
+                        node_ids=[document_field.id],
+                        path=f"{field_path}.id",
+                        suggested_actions=[{"action": "assign_unique_id"}],
+                    )
+                )
+            else:
+                seen[document_field.id] = field_path
+            if (
+                document_field.revision_added > self.revision
+                or document_field.revision_updated > self.revision
+            ):
+                diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"Field {document_field.id!r} references a revision "
+                            "newer than the artifact."
+                        ),
+                        node_ids=[document_field.id],
+                        path=field_path,
+                    )
+                )
+            if document_field.kind == "native" and not native_projection:
+                diagnostics.append(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            "A native-only field can only be preserved from an "
+                            "existing native document."
+                        ),
+                        node_ids=[document_field.id],
+                        path=field_path,
+                    )
+                )
+
+        if _document_fields(self._spec) and (
+            self._spec.settings is not None
+            and self._spec.settings.update_fields_on_open is False
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    severity=Severity.WARNING,
+                    code="FIELD_REFRESH_DISABLED",
+                    message=(
+                        "The document contains dynamic fields but explicitly "
+                        "disables update_fields_on_open; cached results may be stale."
+                    ),
+                    node_ids=[field.id for field in _document_fields(self._spec)],
+                    suggested_actions=[
+                        {"action": "enable_update_fields_on_open"}
+                    ],
+                )
+            )
         return ValidationResult(diagnostics=diagnostics)
 
     def export(self, target: str | Path) -> Path:
@@ -1286,6 +1416,11 @@ class Document:
                     for block in part.content:
                         if block.id in identity_updates:
                             block.source_ref = identity_updates[block.id]
+                for document_field in _document_fields(updated._spec):
+                    if document_field.id in identity_updates:
+                        document_field.source_ref = identity_updates[
+                            document_field.id
+                        ]
                 updated._native = native
                 updated._import_diagnostics = self.import_diagnostics
         except _PatchFailure as error:
@@ -1446,6 +1581,53 @@ class Document:
         return matches[0]
 
     @staticmethod
+    def _find_field(
+        payload: dict[str, Any],
+        target: Any,
+    ) -> dict[str, Any]:
+        target_id = Document._target_id(target)
+        text_blocks = [
+            *(
+                node
+                for node in payload.get("content", [])
+                if node.get("type") in {"heading", "paragraph"}
+            ),
+            *(
+                block
+                for part in payload.get("header_footers", [])
+                for block in part.get("content", [])
+                if block.get("type") == "paragraph"
+            ),
+        ]
+        matches = [
+            inline
+            for block in text_blocks
+            for inline in block.get("content", [])
+            if inline.get("type") == "field"
+            and inline.get("id") == target_id
+        ]
+        if not matches:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="TARGET_NOT_FOUND",
+                    message=f"No field matched #{target_id}.",
+                    suggested_actions=[{"action": "inspect_fields"}],
+                )
+            )
+        if len(matches) > 1:
+            raise _PatchFailure(
+                Diagnostic(
+                    severity=Severity.ERROR,
+                    code="AMBIGUOUS_SELECTOR",
+                    message=f"Multiple fields matched #{target_id}.",
+                    node_ids=[target_id],
+                    suggested_actions=[{"action": "repair_duplicate_ids"}],
+                )
+            )
+        return matches[0]
+
+    @staticmethod
     def _find_section(
         payload: dict[str, Any],
         target: Any,
@@ -1482,6 +1664,139 @@ class Document:
         payload: dict[str, Any], operation: dict[str, Any], next_revision: int
     ) -> dict[str, Any]:
         operation_name = operation.get("op")
+        if operation_name == "field.update":
+            unexpected = sorted(
+                set(operation) - {"op", "target", "set", "clear"}
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "field.update received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                    )
+                )
+            document_field = Document._find_field(
+                payload,
+                operation.get("target"),
+            )
+            if document_field.get("editable") is False:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            f"Native field {document_field['id']!r} is read-only "
+                            "because its instruction is not normalized."
+                        ),
+                        node_ids=[document_field["id"]],
+                        suggested_actions=[
+                            {"action": "preserve_native_field"}
+                        ],
+                    )
+                )
+            set_values = operation.get("set", {})
+            clear_values = operation.get("clear", [])
+            if (
+                not isinstance(set_values, dict)
+                or not isinstance(clear_values, list)
+                or any(not isinstance(value, str) for value in clear_values)
+                or len(clear_values) != len(set(clear_values))
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "field.update requires an object set and a list of "
+                            "unique clear property names."
+                        ),
+                        node_ids=[document_field["id"]],
+                    )
+                )
+            if not set_values and not clear_values:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="field.update requires at least one change.",
+                        node_ids=[document_field["id"]],
+                    )
+                )
+            known_fields = {"kind", "number_format"}
+            unknown = sorted(
+                (set(set_values) | set(clear_values)) - known_fields
+            )
+            overlap = sorted(set(set_values) & set(clear_values))
+            invalid_clear = sorted(set(clear_values) - {"number_format"})
+            has_null = any(value is None for value in set_values.values())
+            if unknown or overlap or invalid_clear or has_null:
+                detail = (
+                    f"unknown properties: {', '.join(unknown)}"
+                    if unknown
+                    else f"properties both set and cleared: {', '.join(overlap)}"
+                    if overlap
+                    else f"properties cannot be cleared: {', '.join(invalid_clear)}"
+                    if invalid_clear
+                    else "set values cannot be null"
+                )
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=f"Invalid field.update: {detail}.",
+                        node_ids=[document_field["id"]],
+                    )
+                )
+            before = deepcopy(document_field)
+            candidate = {**before, **deepcopy(set_values)}
+            for field_name in clear_values:
+                candidate.pop(field_name, None)
+            candidate["revision_updated"] = next_revision
+            try:
+                normalized = DocumentField.model_validate(
+                    candidate
+                ).model_dump(mode="json", exclude_none=True)
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message="field.update has invalid values.",
+                        node_ids=[document_field["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_field_schema",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            document_field.clear()
+            document_field.update(normalized)
+            changed_fields = sorted(set(set_values) | set(clear_values))
+            return {
+                "operation": "field.update",
+                "field_ids": [document_field["id"]],
+                "property_changes": [
+                    {
+                        "path": field_name,
+                        "before": before.get(field_name),
+                        "after": normalized.get(field_name),
+                    }
+                    for field_name in changed_fields
+                    if before.get(field_name) != normalized.get(field_name)
+                ],
+            }
+
         if operation_name == "section.format":
             unexpected = sorted(set(operation) - {"op", "target", "set", "clear"})
             if unexpected:
@@ -2057,6 +2372,23 @@ class Document:
                         node_ids=[node["id"]],
                     )
                 )
+            if any(
+                inline.get("type") == "field"
+                for inline in node.get("content", [])
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            "text.replace cannot cross or rewrite dynamic fields; "
+                            "target the field with field.update or edit a field-free "
+                            "paragraph."
+                        ),
+                        node_ids=[node["id"]],
+                        suggested_actions=[{"action": "inspect_fields"}],
+                    )
+                )
             count = replace_node_text(
                 node,
                 search=search,
@@ -2189,6 +2521,28 @@ class Document:
             selection = None
             plain_text = node_plain_text(node)
             if operation_name == "text.format":
+                if (
+                    operation.get("range") is not None
+                    or operation.get("match") is not None
+                ) and any(
+                    inline.get("type") == "field"
+                    for inline in node.get("content", [])
+                ):
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="UNSUPPORTED_FEATURE",
+                            message=(
+                                "Range or match text formatting is disabled for "
+                                "paragraphs containing dynamic fields because "
+                                "field results are not authoritative text."
+                            ),
+                            node_ids=[node["id"]],
+                            suggested_actions=[
+                                {"action": "format_whole_paragraph_text"}
+                            ],
+                        )
+                    )
                 try:
                     selection = resolve_text_selection(
                         plain_text,

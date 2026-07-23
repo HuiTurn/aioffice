@@ -51,14 +51,24 @@
   and semantic HTML preview support.
 - Extended `text.replace`, `paragraph.format`, and `text.format` native lowering to
   ordinary header/footer paragraphs while touching only the target part.
-- Added conservative opaque projection for native header/footer fields, drawings,
-  objects, tables, and unknown elements so computed content is never reconstructed
-  from display text.
+- Added conservative opaque projection for native header/footer drawings, objects,
+  tables, malformed field containment, and unknown elements so unsupported content
+  is never reconstructed from display text.
+- Added stable inline `DocumentField` objects for PAGE, NUMPAGES, SECTION, and
+  SECTIONPAGES, with cached results explicitly separated from instructions.
+- Added complex-field generation, `w:fldSimple`/complex-field projection,
+  `update_fields_on_open`, semantic HTML hints, and part-scoped field identities.
+- Added `field.update` native lowering that changes one field instruction, marks its
+  result dirty, and preserves cached results and unknown surrounding XML.
+- Added section page-number restart and decimal, Roman, or alphabetic formats through
+  selective `w:pgNumType` projection and Patch.
+- Changed unknown native fields from lossy display-text projection to structured,
+  read-only preservation; malformed field containment remains opaque.
 - Serialized OPC content-type and relationship control parts with default package
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.6`.
+- Advanced the AiOffice Document Spec to `0.2-draft.7`.
 
 ## 0.1.0
 

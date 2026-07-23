@@ -7,6 +7,7 @@ from html import escape
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     BulletList,
+    DocumentField,
     DocumentSection,
     Heading,
     HeaderFooterPart,
@@ -223,7 +224,15 @@ def _header_footer_html(
     for block in part.content:
         block_id = escape(block.id, quote=True)
         if isinstance(block, Paragraph):
-            lines.append(f'<p id="{block_id}">{escape(block.plain_text)}</p>')
+            value = (
+                escape(block.text)
+                if block.text is not None
+                else "".join(
+                    _span_html(inline, block.text_style)
+                    for inline in block.content
+                )
+            )
+            lines.append(f'<p id="{block_id}">{value}</p>')
         elif isinstance(block, OpaqueBlock):
             lines.append(
                 f'<div id="{block_id}" class="opaque-header-footer">'
@@ -233,7 +242,27 @@ def _header_footer_html(
     return lines
 
 
-def _span_html(span: TextSpan, inherited_style: TextStyle | None = None) -> str:
+def _span_html(
+    span: TextSpan | DocumentField,
+    inherited_style: TextStyle | None = None,
+) -> str:
+    if isinstance(span, DocumentField):
+        value = escape(span.display_text)
+        css = _text_css(_merge_text_style(inherited_style, span.style))
+        editable = "true" if span.editable else "false"
+        title = (
+            span.instruction or "native field"
+            if span.kind == "native"
+            else span.kind.replace("_", " ")
+        )
+        return (
+            '<span class="document-field" '
+            f'id="{escape(span.id, quote=True)}" '
+            f'data-aioffice-field-kind="{escape(span.kind, quote=True)}" '
+            f'data-aioffice-field-editable="{editable}" '
+            f'title="{escape(title, quote=True)}"'
+            f"{_style_attribute(css)}>{value}</span>"
+        )
     value = escape(span.text)
     css = _text_css(_merge_text_style(inherited_style, span.style))
     if css:
@@ -327,6 +356,10 @@ def export_html(
             "padding-top:6pt;color:#59636e}"
         ),
         ".opaque-header-footer{font-style:italic;color:#7a828a}",
+        (
+            ".document-field{display:inline-block;min-width:.7em;"
+            "border-bottom:1px dotted #74808c}"
+        ),
         "</style>",
     ]
     if include_document_metadata:
