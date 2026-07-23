@@ -1008,6 +1008,7 @@ class Document:
         elif detached_native_projection:
             operations.remove("node.move_after")
             operations.remove("node.move_before")
+            operations.remove("node.remove")
         ambiguous_node_ids = sorted(
             {
                 node_id
@@ -1336,6 +1337,7 @@ class Document:
                     "after": "node.move_after",
                     "before": "node.move_before",
                 },
+                "remove_operation": "node.remove",
                 "selectors": "stable_top_level_content_ids",
                 "position": "after_complete_anchor_range",
                 "positions": [
@@ -1348,6 +1350,13 @@ class Document:
                 "section_start_anchor_movable": False,
                 "prepend_to_section": "rebind_section_start_at",
                 "native_section_carrier_movable": False,
+                "native_section_carrier_removable": False,
+                "native_remove_identity_manifest": (
+                    "attach_on_first_successful_structural_edit"
+                ),
+                "native_remove_orphan_policy": (
+                    "preserve_unreferenced_relationships_and_parts"
+                ),
                 "third_party_identity_manifest": (
                     "attach_on_first_successful_structural_edit"
                 ),
@@ -2768,7 +2777,7 @@ class Document:
                 diagnostics=[diagnostic],
                 idempotency_key=idempotency_key,
             )
-        detached_native_move = (
+        detached_native_structure = (
             self._native is None
             and self._spec.extensions.get("dev.aioffice.native", {}).get(
                 "authority"
@@ -2776,19 +2785,23 @@ class Document:
             == "native"
             and any(
                 operation.get("op")
-                in {"node.move_after", "node.move_before"}
+                in {
+                    "node.move_after",
+                    "node.move_before",
+                    "node.remove",
+                }
                 for operation in operations
             )
         )
-        if detached_native_move:
+        if detached_native_structure:
             diagnostic = Diagnostic(
                 severity=Severity.ERROR,
                 code="UNSUPPORTED_FEATURE",
                 message=(
-                    "node.move_after and node.move_before require the attached "
-                    "native DOCX package for a native-authority projection; "
-                    "detached JSON cannot prove or relocate the complete XML "
-                    "element range."
+                    "node.move_after, node.move_before, and node.remove "
+                    "require the attached native DOCX package for a "
+                    "native-authority projection; detached JSON cannot prove "
+                    "or mutate the complete XML element range."
                 ),
                 node_ids=[self.id],
                 suggested_actions=[

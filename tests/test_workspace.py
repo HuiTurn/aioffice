@@ -399,6 +399,24 @@ class WorkspaceTests(unittest.TestCase):
                 patch["changes"][0]["moved_nodes"],
                 ["c"],
             )
+            removed = workspace.apply(
+                document.id,
+                [{"op": "node.remove", "target": "#b"}],
+                base_revision=result.result_revision,
+            )
+            self.assertTrue(removed.success, removed.model_dump())
+            after_remove = workspace.open_document(document.id)
+            self.assertEqual(
+                [
+                    node["id"]
+                    for node in after_remove.to_spec()["content"]
+                ],
+                ["c", "a"],
+            )
+            self.assertEqual(
+                removed.changes[0]["removed_nodes"],
+                ["b"],
+            )
 
 
 if __name__ == "__main__":

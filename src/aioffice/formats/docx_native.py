@@ -844,6 +844,7 @@ def apply_docx_operations(
             )
     inserted_images: dict[str, ET.Element] = {}
     moved_nodes: set[str] = set()
+    removed_nodes: set[str] = set()
 
     for operation in operations:
         operation_name = operation.get("op")
@@ -1503,10 +1504,20 @@ def apply_docx_operations(
                 )
             changed_xml_parts.add(source_ref.part_uri)
         elif operation_name == "node.remove":
+            if any(
+                element.tag == _q(W, "sectPr")
+                or element.find(f".//{_q(W, 'sectPr')}") is not None
+                for element in elements
+            ):
+                raise NativePackageError(
+                    "node.remove refuses elements that carry a native "
+                    "section boundary."
+                )
             for element in elements:
                 if element not in list(container):
                     raise NativePackageError("DOCX node has already been removed by this patch.")
                 container.remove(element)
+            removed_nodes.add(target_id)
             changed_xml_parts.add(source_ref.part_uri)
 
     current_indices = {id(element): index for index, element in enumerate(list(body))}
@@ -1762,7 +1773,7 @@ def apply_docx_operations(
         assert styles_root is not None
         updated.set_part("/word/styles.xml", serialize_xml(styles_root))
     structural_identity_required = bool(
-        inserted_images or moved_nodes
+        inserted_images or moved_nodes or removed_nodes
     )
     if structural_identity_required:
         _ensure_identity_manifest_parts(updated)

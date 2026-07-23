@@ -1,6 +1,6 @@
 # Stable-ID structural editing
 
-AiOffice structural edits address semantic nodes, not array positions. The dev20
+AiOffice structural edits address semantic nodes, not array positions. The dev21
 contract exposes a deliberately narrow pair of relative operations:
 
 ```json
@@ -25,6 +25,20 @@ anchor and receives the new document revision. Together the operations can reach
 first and last position without exposing an array index. The source `Document`
 remains immutable; dry run, diff, optimistic revision checks, idempotency, CLI
 application, and Workspace persistence use the ordinary Patch transaction.
+
+Deletion uses the same stable selector and transaction boundary:
+
+```json
+{
+  "op": "node.remove",
+  "target": "#obsolete_appendix"
+}
+```
+
+For an imported DOCX, the complete mapped XML range is removed. A multi-paragraph
+list is deleted as one group; a projected image removes its complete host paragraph.
+AiOffice deliberately keeps relationships and package parts that become unreferenced
+because another unknown native consumer may still depend on them.
 
 ## Why movement is distinct from insertion
 
@@ -53,7 +67,7 @@ move has already invalidated.
 
 Word section semantics depend on the position of `w:sectPr`. A move that casually
 crosses one of those boundaries can silently change page size, margins, columns,
-headers, footers, numbering, or vertical alignment. Dev20 therefore requires:
+headers, footers, numbering, or vertical alignment. Dev21 therefore requires:
 
 - target and anchor belong to the same semantic section;
 - the target is not the `start_at` node of a later section;
@@ -65,7 +79,7 @@ carrier remains in place and the semantic section's `start_at` is rebound to the
 moved node. The change evidence records the section ID and old/new anchors. A
 text-bearing paragraph that itself carries `w:sectPr` is refused. Cross-section
 movement will require an explicit future operation that updates section ownership
-and proves header/footer semantics together; dev20 does not approximate it.
+and proves header/footer semantics together; dev21 does not approximate it.
 
 ## Identity and third-party packages
 
@@ -74,10 +88,10 @@ identical. AiOffice refreshes identity records for all mapped content, fields,
 sections, tables, cells, and header/footer blocks.
 
 If a third-party DOCX has no embedded AiOffice identity manifest, the first
-successful move attaches one root relationship, the manifest part, and a valid
-content type before export. Stable IDs then survive standalone reopen rather than
-depending on the new ordinal positions. Workspace identity evidence continues to be
-written alongside each revision.
+successful move or removal attaches one root relationship, the manifest part, and a
+valid content type before export. Stable IDs then survive standalone reopen rather
+than depending on the new ordinal positions. Workspace identity evidence continues
+to be written alongside each revision.
 
 ## Diagnostics
 
@@ -90,11 +104,13 @@ The operations fail atomically with actionable diagnostics for:
 - detached or non-top-level native ranges;
 - overlapping, missing, or non-contiguous native ranges;
 - target or anchor elements carrying a native section boundary;
+- removal targets carrying a native section boundary;
 - any result that fails semantic validation or native identity refresh.
 
-The machine-readable `structural_editing` capability reports both operation names,
-placement rules, selector type, native scope, multi-element behavior, section policy,
-section-prepend behavior, identity behavior, source immutability, and dry-run support.
+The machine-readable `structural_editing` capability reports both move operations,
+the remove operation, placement rules, selector type, native scope, multi-element
+behavior, section policy, section-prepend behavior, identity behavior, conservative
+orphan policy, source immutability, and dry-run support.
 
 ## CLI and Workspace
 
@@ -138,8 +154,10 @@ A section-prepend move additionally reports:
 It is audit evidence, not a selector to be cached for later edits.
 
 For a document whose JSON extension declares native authority, keep the native DOCX
-package attached while applying either operation. AiOffice refuses a move against a
-detached native projection because JSON alone cannot prove the complete XML range.
-Its capability response reports structural editing as unavailable and omits both
-operations from the executable operation list. Documents created as semantic
-AiOffice specs do not have this restriction.
+package attached while applying any structural operation. AiOffice refuses a move
+against a detached native projection because JSON alone cannot prove the complete
+XML range. The same rule applies to `node.remove`: deleting only the projection
+would rebuild rather than edit the native authority. Its capability response reports
+structural editing as unavailable and omits all three operations from the executable
+operation list. Documents created as semantic AiOffice specs do not have this
+restriction.

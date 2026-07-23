@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev20`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev21`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -749,10 +749,15 @@ For imported DOCX, AiOffice moves the target's complete mapped XML range. A
 multi-paragraph list remains one contiguous unit, DrawingML and unknown XML stay in
 their original elements, and every native reference is reindexed. `node.move_after`
 and `node.move_before` cover every relative position without array indexes. The
-conservative dev20 boundary permits moves only within one semantic section, refuses
+conservative dev21 boundary permits moves only within one semantic section, refuses
 moving a section start anchor, and rebinds `section.start_at` when prepending within
 a later section. Native elements carrying `w:sectPr` remain immovable. See
 [the structural editing contract](docs/structural-editing.md).
+
+`node.remove` uses the same native-authority boundary. It removes the complete mapped
+XML range, refuses native section carriers, attaches an identity manifest on the
+first structural edit to a third-party DOCX, and preserves now-unreferenced
+relationships or parts rather than guessing that they are safe to delete.
 
 Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `node.append`, `node.insert_after`, `node.move_after`, `node.move_before`,

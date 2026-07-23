@@ -275,7 +275,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.20")
+        self.assertEqual(spec["spec_version"], "0.2-draft.21")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -504,9 +504,8 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(document.to_bytes("docx"), source)
 
     def test_native_patch_reindexes_image_reference_and_preserves_identity(self) -> None:
-        document = Document.from_docx(
-            _image_document(preceding_text="Before")
-        )
+        source = _image_document(preceding_text="Before")
+        document = Document.from_docx(source)
         image_id = next(
             node["id"]
             for node in document.to_spec()["content"]
@@ -529,6 +528,37 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(reopened_image["id"], image_id)
         self.assertEqual(reopened.image_bytes(image_id), PNG)
+
+        image_removed = document.apply(
+            [{"op": "node.remove", "target": image_id}]
+        )
+        self.assertTrue(image_removed.success, image_removed.model_dump())
+        assert image_removed.document is not None
+        self.assertEqual(
+            [node["id"] for node in image_removed.document.to_spec()["content"]],
+            ["before"],
+        )
+        removed_output = image_removed.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(removed_output)) as after,
+        ):
+            self.assertEqual(
+                after.read("word/media/image1.png"),
+                before.read("word/media/image1.png"),
+            )
+            self.assertEqual(
+                after.read("word/_rels/document.xml.rels"),
+                before.read("word/_rels/document.xml.rels"),
+            )
+        removed_reopened = Document.from_docx(removed_output)
+        self.assertEqual(
+            [
+                node["id"]
+                for node in removed_reopened.to_spec()["content"]
+            ],
+            ["before"],
+        )
 
     def test_image_update_patches_metadata_and_both_native_extents(self) -> None:
         source = _image_document(preceding_text="Before")

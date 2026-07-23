@@ -84,7 +84,12 @@ ranges can cross multiple runs and hyperlinks; boundary runs are split only arou
 selected `w:t` content. If a partial boundary run contains unsupported inline
 children, the complete Patch is refused rather than duplicating or dropping them.
 List nodes may reference multiple native paragraphs, and removing a list removes
-that complete native range atomically.
+that complete native range atomically. Native removal refuses any mapped range that
+carries `w:sectPr`. The first successful removal from a third-party package attaches
+an identity manifest before export so surviving stable IDs do not drift when their
+native indices change. Relationships and parts made unreferenced by removal are
+preserved until a future explicit package-garbage-collection operation can prove
+they have no other consumers.
 
 `node.move_after` and `node.move_before` reorder an existing top-level semantic node
 by stable ID. The native layer moves the exact mapped element objects after or before

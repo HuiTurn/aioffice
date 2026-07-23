@@ -128,6 +128,19 @@ def _semantic_header_footer(
     return value
 
 
+def _relative_order_changed(
+    before: list[str],
+    after: list[str],
+) -> bool:
+    """Return whether identities present on both sides changed relative order."""
+
+    common = set(before).intersection(after)
+    return (
+        [node_id for node_id in before if node_id in common]
+        != [node_id for node_id in after if node_id in common]
+    )
+
+
 def compute_document_diff(
     before: AiOfficeDocumentSpec,
     after: AiOfficeDocumentSpec,
@@ -169,7 +182,7 @@ def compute_document_diff(
     }
     before_order = [node.id for node in before.content]
     after_order = [node.id for node in after.content]
-    if before_order != after_order:
+    if _relative_order_changed(before_order, after_order):
         entries.append(
             DiffEntry(
                 path="content.order",
@@ -223,7 +236,10 @@ def compute_document_diff(
     }
     before_section_order = [section.id for section in before.sections]
     after_section_order = [section.id for section in after.sections]
-    if before_section_order != after_section_order:
+    if _relative_order_changed(
+        before_section_order,
+        after_section_order,
+    ):
         entries.append(
             DiffEntry(
                 path="sections.order",
@@ -277,7 +293,7 @@ def compute_document_diff(
     }
     before_part_order = [part.id for part in before.header_footers]
     after_part_order = [part.id for part in after.header_footers]
-    if before_part_order != after_part_order:
+    if _relative_order_changed(before_part_order, after_part_order):
         entries.append(
             DiffEntry(
                 path="header_footers.order",

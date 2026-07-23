@@ -394,7 +394,8 @@ class CliTests(unittest.TestCase):
                             "op": "node.move_before",
                             "target": "#c",
                             "before": "#a",
-                        }
+                        },
+                        {"op": "node.remove", "target": "#b"},
                     ]
                 ),
                 encoding="utf-8",
@@ -419,13 +420,17 @@ class CliTests(unittest.TestCase):
                 report["changes"][0]["operation"],
                 "node.move_before",
             )
+            self.assertEqual(
+                report["changes"][1]["operation"],
+                "node.remove",
+            )
             reopened = Document.from_docx(output)
             self.assertEqual(
                 [
                     node["id"]
                     for node in reopened.to_spec()["content"]
                 ],
-                ["c", "a", "b"],
+                ["c", "a"],
             )
 
 

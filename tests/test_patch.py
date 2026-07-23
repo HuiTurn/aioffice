@@ -117,6 +117,14 @@ class PatchTests(unittest.TestCase):
             structural_capabilities["prepend_to_section"],
             "rebind_section_start_at",
         )
+        self.assertEqual(
+            structural_capabilities["remove_operation"],
+            "node.remove",
+        )
+        self.assertEqual(
+            structural_capabilities["native_remove_orphan_policy"],
+            "preserve_unreferenced_relationships_and_parts",
+        )
         result = document.apply(
             [
                 {

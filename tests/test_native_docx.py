@@ -12,12 +12,14 @@ from aioffice.documents import Document, DocumentBuilder
 from aioffice.formats.docx import compile_docx
 from aioffice.native import (
     FidelityLevel,
+    MANIFEST_PART_URI,
     MANIFEST_RELATIONSHIP_TYPE,
 )
 from aioffice.native.xml import parse_xml, serialize_xml
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 
 
 def _q(namespace: str, local: str) -> str:
@@ -201,6 +203,140 @@ class NativeDocxTests(unittest.TestCase):
                 if node["type"] in {"heading", "paragraph"}
             ]
             self.assertIn("Alpha Delta Gamma", texts)
+
+    def test_third_party_remove_attaches_identity_and_preserves_payloads(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("A", id="a")
+            .paragraph("B", id="b")
+            .paragraph("C", id="c")
+            .build()
+            .to_bytes("docx")
+        )
+        with ZipFile(io.BytesIO(source)) as archive:
+            root_relationships = parse_xml(
+                archive.read("_rels/.rels")
+            )
+            content_types = parse_xml(
+                archive.read("[Content_Types].xml")
+            )
+        for relationship in list(root_relationships):
+            if (
+                relationship.get("Type")
+                == MANIFEST_RELATIONSHIP_TYPE
+            ):
+                root_relationships.remove(relationship)
+        for override in list(content_types):
+            if (
+                override.tag == _q(CT, "Override")
+                and override.get("PartName") == MANIFEST_PART_URI
+            ):
+                content_types.remove(override)
+        source = _rewrite_package(
+            source,
+            {
+                "_rels/.rels": serialize_xml(root_relationships),
+                "[Content_Types].xml": serialize_xml(content_types),
+            },
+            deletions={MANIFEST_PART_URI.lstrip("/")},
+        )
+        document = Document.from_docx(source)
+        before_spec = document.to_spec()
+        ids = {
+            _semantic_text(node): str(node["id"])
+            for node in before_spec["content"]
+        }
+        detached = Document.from_spec(before_spec)
+        self.assertNotIn(
+            "node.remove",
+            detached.capabilities()["operations"],
+        )
+        detached_result = detached.apply(
+            [{"op": "node.remove", "target": ids["B"]}]
+        )
+        self.assertFalse(detached_result.success)
+        self.assertEqual(
+            detached_result.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+
+        before_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        before_body = before_root.find(_q(W, "body"))
+        assert before_body is not None
+        before_payloads = {
+            str(node["id"]): ET.tostring(
+                list(before_body)[
+                    int(node["source_ref"]["element_index"])
+                ]
+            )
+            for node in before_spec["content"]
+        }
+        result = document.apply(
+            [{"op": "node.remove", "target": ids["B"]}]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.diff is not None
+        self.assertEqual(result.diff.summary["removed"], 1)
+        self.assertEqual(result.diff.summary["moved"], 0)
+        self.assertNotIn(
+            "content.order",
+            [entry.path for entry in result.diff.entries],
+        )
+        self.assertEqual(
+            result.fidelity.affected_parts if result.fidelity else None,
+            [
+                "/[Content_Types].xml",
+                "/_rels/.rels",
+                "/customXml/aioffice-manifest.xml",
+                "/word/document.xml",
+            ],
+        )
+        assert result.document is not None
+        self.assertEqual(
+            [
+                node["id"]
+                for node in result.document.to_spec()["content"]
+            ],
+            [ids["A"], ids["C"]],
+        )
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            for name in before.namelist():
+                if name not in {
+                    "[Content_Types].xml",
+                    "_rels/.rels",
+                    "word/document.xml",
+                }:
+                    self.assertEqual(after.read(name), before.read(name), name)
+            self.assertIn(
+                MANIFEST_PART_URI.lstrip("/"),
+                after.namelist(),
+            )
+            after_root = parse_xml(after.read("word/document.xml"))
+        after_body = after_root.find(_q(W, "body"))
+        assert after_body is not None
+        for node in result.document.to_spec()["content"]:
+            self.assertEqual(
+                ET.tostring(
+                    list(after_body)[
+                        int(node["source_ref"]["element_index"])
+                    ]
+                ),
+                before_payloads[str(node["id"])],
+            )
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            [node["id"] for node in reopened.to_spec()["content"]],
+            [ids["A"], ids["C"]],
+        )
 
     def test_native_move_after_tracks_objects_across_sequential_moves(
         self,
@@ -530,6 +666,27 @@ class NativeDocxTests(unittest.TestCase):
             anchor_move.diagnostics[0].code,
             "UNSUPPORTED_FEATURE",
         )
+        carrier_remove = document.apply(
+            [
+                {
+                    "op": "node.remove",
+                    "target": ids["Front end"],
+                }
+            ]
+        )
+        self.assertFalse(carrier_remove.success)
+        self.assertEqual(
+            carrier_remove.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "section boundary",
+            carrier_remove.diagnostics[0].message,
+        )
+        section_start_remove = document.apply(
+            [{"op": "node.remove", "target": ids["Body"]}]
+        )
+        self.assertFalse(section_start_remove.success)
         self.assertEqual(document.to_bytes("docx"), source)
 
         successful = document.apply(

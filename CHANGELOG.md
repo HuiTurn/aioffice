@@ -212,6 +212,19 @@
   `section.start_at` is rebound to the moved node with explicit change evidence.
 - Kept detached native projections fail-closed and made capabilities omit both
   structural operations when their XML authority package is unavailable.
+- Upgraded `node.remove` to a proven native structural edit: third-party packages
+  now receive an identity manifest on first removal so surviving stable IDs persist
+  after their native indices change.
+- Added atomic refusal for removal ranges carrying `w:sectPr`, preventing deletion
+  from silently collapsing Word section layout, header/footer, or numbering state.
+- Made detached native-authority projections omit and reject `node.remove` instead
+  of rebuilding a lossy DOCX from JSON after deletion.
+- Defined a conservative removal orphan policy that preserves unreferenced
+  relationships and package parts until future graph-wide garbage collection can
+  prove they have no unknown consumers.
+- Corrected semantic Diff ordering evidence so pure additions or removals no longer
+  masquerade as moves; `moved` now requires a relative-order change among identities
+  present in both revisions.
 - Changed mixed text/drawing paragraphs and complex image cases to explicit opaque
   projections so the semantic layer can no longer hide a picture inside an ordinary
   text node.
@@ -224,7 +237,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.20`.
+- Advanced the AiOffice Document Spec to `0.2-draft.21`.
 
 ## 0.1.0
 
