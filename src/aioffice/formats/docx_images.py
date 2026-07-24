@@ -24,6 +24,9 @@ from aioffice.spec.models import (
     FloatingImageEffectExtent,
     FloatingImageHorizontalPosition,
     FloatingImageLayout,
+    FloatingImageRelativeHeight,
+    FloatingImageRelativeSize,
+    FloatingImageRelativeWidth,
     FloatingImageTextDistances,
     FloatingImageTextWrap,
     FloatingImageVerticalPosition,
@@ -152,6 +155,22 @@ VerticalRelativeTo: TypeAlias = Literal[
     "paragraph",
     "top_margin",
 ]
+RelativeWidthTo: TypeAlias = Literal[
+    "inside_margin",
+    "left_margin",
+    "margin",
+    "outside_margin",
+    "page",
+    "right_margin",
+]
+RelativeHeightTo: TypeAlias = Literal[
+    "bottom_margin",
+    "inside_margin",
+    "margin",
+    "outside_margin",
+    "page",
+    "top_margin",
+]
 WrapSide: TypeAlias = Literal["both_sides", "largest", "left", "right"]
 WrapMode: TypeAlias = Literal[
     "square",
@@ -195,6 +214,22 @@ _VERTICAL_RELATIVE_FROM: dict[str, VerticalRelativeTo] = {
     "paragraph": "paragraph",
     "topMargin": "top_margin",
 }
+_RELATIVE_WIDTH_FROM: dict[str, RelativeWidthTo] = {
+    "insideMargin": "inside_margin",
+    "leftMargin": "left_margin",
+    "margin": "margin",
+    "outsideMargin": "outside_margin",
+    "page": "page",
+    "rightMargin": "right_margin",
+}
+_RELATIVE_HEIGHT_FROM: dict[str, RelativeHeightTo] = {
+    "bottomMargin": "bottom_margin",
+    "insideMargin": "inside_margin",
+    "margin": "margin",
+    "outsideMargin": "outside_margin",
+    "page": "page",
+    "topMargin": "top_margin",
+}
 _WRAP_SIDES: dict[str, WrapSide] = {
     "bothSides": "both_sides",
     "largest": "largest",
@@ -222,6 +257,12 @@ _HORIZONTAL_RELATIVE_TO_NATIVE = {
 }
 _VERTICAL_RELATIVE_TO_NATIVE = {
     value: key for key, value in _VERTICAL_RELATIVE_FROM.items()
+}
+_RELATIVE_WIDTH_TO_NATIVE = {
+    value: key for key, value in _RELATIVE_WIDTH_FROM.items()
+}
+_RELATIVE_HEIGHT_TO_NATIVE = {
+    value: key for key, value in _RELATIVE_HEIGHT_FROM.items()
 }
 _WRAP_SIDE_TO_NATIVE = {
     value: key for key, value in _WRAP_SIDES.items()
@@ -569,6 +610,48 @@ def _native_wrap_value(
     return element
 
 
+def _native_relative_size(
+    relative_size: FloatingImageRelativeSize | None,
+) -> list[ET.Element] | None:
+    elements: list[ET.Element] = []
+    if relative_size is None:
+        return elements
+    for axis, tag, child_tag, native_frames in (
+        (
+            relative_size.width,
+            "sizeRelH",
+            "pctWidth",
+            _RELATIVE_WIDTH_TO_NATIVE,
+        ),
+        (
+            relative_size.height,
+            "sizeRelV",
+            "pctHeight",
+            _RELATIVE_HEIGHT_TO_NATIVE,
+        ),
+    ):
+        if axis is None:
+            continue
+        native_frame = native_frames.get(axis.relative_to)
+        native_percentage = round(axis.percentage * 1_000)
+        if (
+            native_frame is None
+            or native_percentage < 0
+            or native_percentage > 2**31 - 1
+        ):
+            return None
+        element = ET.Element(
+            _q(WP14, tag),
+            {"relativeFrom": native_frame},
+        )
+        ET.SubElement(
+            element,
+            _q(WP14, child_tag),
+        ).text = str(native_percentage)
+        elements.append(element)
+    return elements or None
+
+
 def floating_image_layout_matches(
     left: FloatingImageLayout | None,
     right: FloatingImageLayout | None,
@@ -688,6 +771,7 @@ def floating_image_layout_matches(
             right.wrap.effect_extent,
         )
         and left.wrap.polygon == right.wrap.polygon
+        and left.relative_size == right.relative_size
         and left.relative_height == right.relative_height
         and left.behind_text == right.behind_text
         and left.locked == right.locked
@@ -761,6 +845,12 @@ def _floating_image_layout(
     optional_frame_properties = anchor.find(
         f"./{_q(WP, 'cNvGraphicFramePr')}"
     )
+    relative_width_element = anchor.find(
+        f"./{_q(WP14, 'sizeRelH')}"
+    )
+    relative_height_element = anchor.find(
+        f"./{_q(WP14, 'sizeRelV')}"
+    )
     expected_children = [
         _q(WP, "simplePos"),
         _q(WP, "positionH"),
@@ -779,6 +869,16 @@ def _floating_image_layout(
             else []
         ),
         _q(A, "graphic"),
+        *(
+            [_q(WP14, "sizeRelH")]
+            if relative_width_element is not None
+            else []
+        ),
+        *(
+            [_q(WP14, "sizeRelV")]
+            if relative_height_element is not None
+            else []
+        ),
     ]
     if [child.tag for child in anchor] != expected_children:
         return None
@@ -856,6 +956,48 @@ def _floating_image_layout(
         "pctPosVOffset",
     )
     if horizontal_position is None or vertical_position is None:
+        return None
+
+    def relative_axis(
+        element: ET.Element | None,
+        *,
+        frames: Mapping[str, RelativeWidthTo | RelativeHeightTo],
+        percentage_tag: str,
+    ) -> tuple[RelativeWidthTo | RelativeHeightTo, float] | None:
+        if element is None:
+            return None
+        if (
+            set(element.attrib) != {"relativeFrom"}
+            or (element.text or "").strip()
+            or len(element) != 1
+        ):
+            raise ValueError("Relative-size axis has invalid structure.")
+        relative_to = frames.get(element.attrib["relativeFrom"])
+        child = element[0]
+        if (
+            relative_to is None
+            or child.tag != _q(WP14, percentage_tag)
+            or child.attrib
+            or len(child)
+        ):
+            raise ValueError("Relative-size axis has invalid metadata.")
+        percentage = int(child.text or "")
+        if percentage < 0 or percentage > 2**31 - 1:
+            raise ValueError("Relative-size percentage is outside Int32.")
+        return relative_to, percentage / 1_000
+
+    try:
+        relative_width = relative_axis(
+            relative_width_element,
+            frames=_RELATIVE_WIDTH_FROM,
+            percentage_tag="pctWidth",
+        )
+        relative_size_height = relative_axis(
+            relative_height_element,
+            frames=_RELATIVE_HEIGHT_FROM,
+            percentage_tag="pctHeight",
+        )
+    except ValueError:
         return None
 
     wrap_side: WrapSide | None = None
@@ -1033,6 +1175,34 @@ def _floating_image_layout(
                     else {}
                 ),
             }
+        ),
+        relative_size=(
+            FloatingImageRelativeSize(
+                width=(
+                    FloatingImageRelativeWidth(
+                        relative_to=cast(RelativeWidthTo, relative_width[0]),
+                        percentage=relative_width[1],
+                    )
+                    if relative_width is not None
+                    else None
+                ),
+                height=(
+                    FloatingImageRelativeHeight(
+                        relative_to=cast(
+                            RelativeHeightTo,
+                            relative_size_height[0],
+                        ),
+                        percentage=relative_size_height[1],
+                    )
+                    if relative_size_height is not None
+                    else None
+                ),
+            )
+            if (
+                relative_width is not None
+                or relative_size_height is not None
+            )
+            else None
         ),
         relative_height=relative_height,
         behind_text=bool(booleans["behind_text"]),
@@ -1683,6 +1853,30 @@ def patch_simple_native_image_anchor(
         wrap_index = list(anchor).index(wrap)
         anchor.remove(wrap)
         anchor.insert(wrap_index, native_wrap)
+    if "relative_size" in fields:
+        for tag in ("sizeRelH", "sizeRelV"):
+            existing = anchor.find(f"./{_q(WP14, tag)}")
+            if existing is not None:
+                anchor.remove(existing)
+        native_relative_size = _native_relative_size(
+            layout.relative_size
+        )
+        if (
+            layout.relative_size is not None
+            and native_relative_size is None
+        ):
+            raise NativePackageError(
+                "image.anchor.update relative size is outside the "
+                "supported range."
+            )
+        for element in native_relative_size or []:
+            anchor.append(element)
+        if native_relative_size:
+            _ensure_wp14_compatibility(
+                package,
+                part_root,
+                source_part=source_part,
+            )
     if "anchor_distances" in fields or "wrap" in fields:
         native_distances = _native_text_distance_attributes(
             layout.anchor_distances,
@@ -2252,6 +2446,27 @@ def insert_simple_native_image_after(
         {"prst": "rect"},
     )
     ET.SubElement(geometry, _q(A, "avLst"))
+    if image.placement == "floating":
+        assert image.floating is not None
+        native_relative_size = _native_relative_size(
+            image.floating.relative_size
+        )
+        if (
+            image.floating.relative_size is not None
+            and native_relative_size is None
+        ):
+            raise NativePackageError(
+                "Floating image insertion relative size is outside the "
+                "supported range."
+            )
+        for element in native_relative_size or []:
+            placement.append(element)
+        if native_relative_size:
+            _ensure_wp14_compatibility(
+                package,
+                part_root,
+                source_part=source_part,
+            )
 
     insert_index = max(
         list(container).index(element)

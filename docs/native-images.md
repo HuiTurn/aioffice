@@ -189,8 +189,9 @@ An image becomes an `image` block only when all of these conditions hold:
 
 For `wp:anchor`, the proof additionally requires `simplePos="0"` with zero simple
 coordinates; one horizontal and vertical position, each containing exactly one
-recognized `wp:posOffset` or `wp:align`; recognized `relativeFrom` values; zero or
-more optional non-negative native anchor distances; an optional strict parent
+recognized `wp:posOffset`, `wp:align`, or axis-correct Office 2010 percentage
+child; recognized `relativeFrom` values; zero or more optional non-negative native
+anchor distances; an optional strict parent
 `wp:effectExtent`; exactly one empty `wp:wrapNone`, or a `wp:wrapTopAndBottom` /
 `wp:wrapSquare` carrying only its schema-defined optional distances and at most one
 strict child `wp:effectExtent`, or one `wp:wrapTight` / `wp:wrapThrough` with a
@@ -199,7 +200,10 @@ recognized side, optional left/right distances, and exactly one strict
 `wp:start`, and 2–4096 ordered `wp:lineTo` points whose signed coordinates fit
 OOXML `ST_Coordinate`. `relativeHeight` is bounded and `behindDoc`, `locked`,
 `layoutInCell`, and `allowOverlap` are strict booleans. Child order must match the
-native anchor schema.
+native anchor schema. After `a:graphic`, the anchor may additionally contain one
+strict `wp14:sizeRelH`, one strict `wp14:sizeRelV`, or both, in that order. Each
+axis contains its axis-correct percentage child, an allowed reference frame, and a
+non-negative signed-Int32 native percentage.
 
 Microsoft's Open XML contracts distinguish
 [`wp:inline`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.inline?view=openxml-3.0.1)
@@ -282,6 +286,32 @@ as thousandths of a percent, so native `37500` projects as
 AiOffice writes the Office 2010 namespace into `mc:Ignorable` when it introduces
 this mode, but does not invent optional `wp14:anchorId` or `wp14:editId` values.
 
+The same Office 2010 namespace defines optional `wp14:sizeRelH` and
+`wp14:sizeRelV` rules after `a:graphic`. AiOffice projects them as:
+
+```json
+{
+  "relative_size": {
+    "width": {"relative_to": "margin", "percentage": 75},
+    "height": {"relative_to": "page", "percentage": 40}
+  }
+}
+```
+
+Width and height are independent and at least one axis is required. Width accepts
+`inside_margin`, `left_margin`, `margin`, `outside_margin`, `page`, or
+`right_margin`; height accepts `bottom_margin`, `inside_margin`, `margin`,
+`outside_margin`, `page`, or `top_margin`. Values are human-facing percentage
+points with native `0.001` precision, cannot be negative, and must fit signed
+Int32 after multiplying by 1,000.
+
+Relative size is a layout rule, not a replacement for native geometry. The image
+node's `width` and `height` continue to project the positive absolute `wp:extent`
+fallback. `image.update` can change that fallback without changing
+`relative_size`; `image.anchor.update` can change the rule without changing the
+fallback. This dual representation avoids guessing page geometry, section margins,
+or the producer's compatibility behavior.
+
 `image.anchor.update` selectively changes that projected layout:
 
 ```json
@@ -319,6 +349,12 @@ this mode, but does not invent optional `wp14:anchorId` or `wp14:editId` values.
         "left": {"value": 3, "unit": "pt"}
       }
     },
+    "relative_size": {
+      "width": {
+        "relative_to": "right_margin",
+        "percentage": 62.345
+      }
+    },
     "relative_height": 2048,
     "behind_text": true,
     "locked": false,
@@ -329,38 +365,46 @@ this mode, but does not invent optional `wp14:anchorId` or `wp14:editId` values.
 ```
 
 Every top-level field is optional, but `set` must contain at least one non-null
-change. `horizontal`, `vertical`, `anchor_distances`, `anchor_effect_extent`, and
-`wrap` are complete grouped values. Position callers keep the reference frame with
-exactly one of `offset`, `alignment`, or `percentage_offset`. `side` is required
+change. `horizontal`, `vertical`, `anchor_distances`, `anchor_effect_extent`,
+`wrap`, and `relative_size` are complete grouped values. Position callers keep the
+reference frame with exactly one of `offset`, `alignment`, or
+`percentage_offset`. `side` is required
 and non-null exactly for
 `square`, `tight`, and `through`; it must be omitted for `none` and
 `top_and_bottom`. No-wrap forbids wrap-local distances, effect extent, and polygon.
 Top-and-bottom forbids left/right local distances and polygons. Tight/through
 require a 2–4096-segment polygon, allow only left/right local distances, and forbid
 a child effect extent. Use `clear: ["anchor_distances"]`,
-`clear: ["anchor_effect_extent"]`, or both to remove those optional parent-native
-values. A wrap update omitting its optional `distances` or `effect_extent` removes
-them as part of the complete wrap replacement. Signed offsets must fit OOXML Int64
+`clear: ["anchor_effect_extent"]`, or `clear: ["relative_size"]` to remove those
+optional native groups. A relative-size set replaces both axes, so a width-only
+payload removes an existing height rule. A wrap update omitting its optional
+`distances` or `effect_extent` removes them as part of the complete wrap replacement.
+Signed offsets must fit OOXML Int64
 EMUs; percentage offsets are quantized to `0.001` percentage points and must fit
-signed Int32; text distances and `relative_height` must fit UInt32; effect extents
+signed Int32; relative-size percentages use the same precision but must be
+non-negative; text distances and `relative_height` must fit UInt32; effect extents
 must fit OOXML `ST_Coordinate`; polygon coordinates fit the same signed range but remain raw
 integers; booleans are strict JSON booleans.
 `aioffice schema --kind floating-image-layout-update` exposes the same contract,
 including machine-readable `oneOf` constraints for position and wrap modes.
+`aioffice schema --kind floating-image-relative-size` exposes the axis rule, and
+the `floating-image-relative-width` and `floating-image-relative-height` schema
+kinds expose their distinct frame vocabularies.
 
-For example, removing both optional parent-native groups without changing the wrap
-child is a clear-only operation:
+For example, removing both optional parent-native groups and the relative-size rule
+without changing the wrap child is a clear-only operation:
 
 ```json
 {
   "op": "image.anchor.update",
   "target": "#image_3A17C04E",
-  "clear": ["anchor_distances", "anchor_effect_extent"]
+  "clear": ["anchor_distances", "anchor_effect_extent", "relative_size"]
 }
 ```
 
 Native lowering changes only the selected `wp:positionH`, `wp:positionV`,
-the one selected wrap child, and `wp:anchor` attributes in the already-proven tree.
+the one selected wrap child, optional `wp14:sizeRelH` / `wp14:sizeRelV`, and
+`wp:anchor` attributes in the already-proven tree.
 It preserves the drawing, extents, crop, image relationship and bytes, accessibility
 metadata, host paragraph, unknown surrounding XML, and present `wp14:anchorId` /
 `wp14:editId`. A wrap update may replace `wp:wrapSquare`, `wp:wrapNone`,
@@ -389,7 +433,7 @@ unknown field, invalid unit/range/alignment, or non-boolean flag fails closed. T
 operation does not convert an inline picture to floating and does not create or
 reconstruct an anchor.
 
-Active simple positioning, relative-size extensions, malformed or out-of-range
+Active simple positioning, malformed or out-of-range relative-size,
 distance/effect/polygon metadata, missing or
 unknown compatibility values, extra position/wrap children, and mixed text plus
 drawing paragraphs stay opaque. This is a deliberate protocol boundary, not an
@@ -422,6 +466,13 @@ exact no-op and preserves their signed Int32 values through unrelated edits.
 LibreOffice 26.8 currently rewrites those children to absolute `wp:posOffset`
 values on save. AiOffice therefore projects that new absolute state after an
 external save instead of claiming the percentage rule survived.
+
+The dev42 relative-size fixture preserves `wp14:sizeRelH` and `wp14:sizeRelV`
+byte-for-byte on exact no-op and through unrelated AiOffice edits. LibreOffice 26.8
+currently lays out the picture from `wp:extent`, then removes both relative-size
+rules on save while retaining that absolute fallback. AiOffice therefore reopens
+the saved file as an absolute-size picture instead of claiming the removed rules
+survived.
 
 ## Verified binary access
 
@@ -610,8 +661,9 @@ The operation uses ordinary model-authored JSON, so the existing
 channel. Capability metadata exposes `native_layout_operation`,
 `native_layout_fields`, and `native_layout_target` for host-paragraph planning.
 Floating planning separately exposes `floating_layout_update_operation`,
-`floating_layout_update_fields`, group-replacement semantics, the two clearable
-parent fields, native distance-layer authority, and effect-extent precedence.
+`floating_layout_update_fields`, group-replacement semantics, three clearable
+fields, relative-size frames/precision/fallback authority, native distance-layer
+authority, and effect-extent precedence.
 
 ## Out-of-band binary replacement
 
@@ -774,6 +826,16 @@ result = document.insert_image_after(
             "mode": "square",
             "side": "both_sides"
         },
+        "relative_size": {
+            "width": {
+                "relative_to": "margin",
+                "percentage": 75
+            },
+            "height": {
+                "relative_to": "page",
+                "percentage": 40
+            }
+        },
         "relative_height": 1024,
         "behind_text": False,
         "locked": False,
@@ -798,11 +860,14 @@ The contract is deliberately explicit:
   placement and must validate as one complete `FloatingImageLayout`;
 - every horizontal and vertical position must select exactly one explicit `offset`,
   allowed semantic `alignment`, or signed `percentage_offset`;
+- optional `relative_size` must contain width, height, or both; each axis selects an
+  allowed frame and a non-negative percentage, while the required top-level
+  `width` and `height` remain the absolute fallback extent;
 - `wrap.mode` must be `square`, `none`, `top_and_bottom`, `tight`, or `through`;
   `side` is required for square/tight/through; tight/through also require a native
   ordered polygon; parent distances are optional and separate from schema-defined
   wrap-local geometry;
-- active simple-position anchors, relative-size extensions, malformed polygons, crop,
+- active simple-position anchors, malformed relative-size rules or polygons, crop,
   rotation, effects, and other drawing features are not silently inferred.
 
 The native lowering adds or reuses the content-addressed image part, creates a fresh
@@ -812,8 +877,9 @@ relationship ID, creates a `w:p/w:r/w:drawing` tree with `wp:inline` or canonica
 inserts at the proven body position, and then re-runs the conservative projection
 proof. The generated anchor uses inactive zero `simplePos`, horizontal and vertical
 positions expressed by the caller's selected offset, alignment, or percentage mode,
-the caller's selected supported wrap child, and explicit flags. Percentage
-insertion also emits the namespace compatibility declaration. Optional Office 2010
+the caller's selected supported wrap child, optional relative-size rules, and
+explicit flags. Percentage-position or relative-size insertion also emits the
+namespace compatibility declaration. Optional Office 2010
 anchor IDs are not invented. The operation either returns a fully readable and
 subsequently editable `ImageBlock` or leaves the original document unchanged.
 
@@ -873,8 +939,8 @@ transaction while leaving the operation metadata explainable to an AI.
 These cases remain native and explicit `opaque`/read-only projections:
 
 - text plus a drawing in one paragraph;
-- active-simple-position, unsupported wrap-specific effects, relative-size,
-  malformed, or otherwise unsupported floating anchors;
+- active-simple-position, unsupported wrap-specific effects, malformed
+  relative-size rules, or otherwise unsupported floating anchors;
 - non-default picture black-and-white modes or non-neutral shape fills;
 - multiple pictures or alternate representations;
 - linked or external images;

@@ -1223,6 +1223,7 @@ class Document:
                     "anchor_distances",
                     "anchor_effect_extent",
                     "wrap",
+                    "relative_size",
                     "relative_height",
                     "behind_text",
                     "locked",
@@ -1247,6 +1248,39 @@ class Document:
                     "minimum": -(2**31) / 1_000,
                     "maximum": (2**31 - 1) / 1_000,
                 },
+                "floating_relative_size_schema": (
+                    "floating-image-relative-size"
+                ),
+                "floating_relative_size_axes": ["width", "height"],
+                "floating_relative_size_unit": "percentage_points",
+                "floating_relative_size_precision": 0.001,
+                "floating_relative_size_native_type": (
+                    "non_negative_int32_a_st_positive_percentage"
+                ),
+                "floating_relative_size_bounds": {
+                    "minimum": 0,
+                    "maximum": (2**31 - 1) / 1_000,
+                },
+                "floating_relative_width_frames": [
+                    "inside_margin",
+                    "left_margin",
+                    "margin",
+                    "outside_margin",
+                    "page",
+                    "right_margin",
+                ],
+                "floating_relative_height_frames": [
+                    "bottom_margin",
+                    "inside_margin",
+                    "margin",
+                    "outside_margin",
+                    "page",
+                    "top_margin",
+                ],
+                "floating_relative_size_authority": (
+                    "relative_rule_with_image_width_and_height_retained_as_"
+                    "absolute_native_fallback_extent"
+                ),
                 "floating_horizontal_alignments": [
                     "left",
                     "right",
@@ -1309,6 +1343,7 @@ class Document:
                 "floating_layout_clearable_fields": [
                     "anchor_distances",
                     "anchor_effect_extent",
+                    "relative_size",
                 ],
                 "floating_layout_authority": "native_docx_and_render",
                 "crop_unit": "percentage_points",
@@ -1383,7 +1418,8 @@ class Document:
                     (
                         "inline placement or conservative floating offset/"
                         "alignment/percentage placement with square, none, "
-                        "top-and-bottom, tight, or through text wrap"
+                        "top-and-bottom, tight, or through text wrap, plus "
+                        "optional Office 2010 relative width/height rules"
                     ),
                     "explicit positive extent",
                     "rectangular stretch fill",
@@ -1403,8 +1439,8 @@ class Document:
                 ],
                 "opaque_native_cases": [
                     (
-                        "active simple-position, relative-size, unsupported "
-                        "wrap-specific effects, or malformed anchor"
+                        "active simple-position, unsupported wrap-specific "
+                        "effects, or malformed anchor/relative-size rule"
                     ),
                     "text and drawing in one paragraph",
                     "multiple pictures",
@@ -4552,6 +4588,7 @@ class Document:
             clearable_fields = {
                 "anchor_distances",
                 "anchor_effect_extent",
+                "relative_size",
             }
             valid_set_shape = isinstance(set_values, dict)
             valid_clear_shape = (

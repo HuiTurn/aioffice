@@ -24,6 +24,9 @@ from aioffice.spec.models import (
     FloatingImageHorizontalPosition,
     FloatingImageLayout,
     FloatingImageLayoutUpdate,
+    FloatingImageRelativeHeight,
+    FloatingImageRelativeSize,
+    FloatingImageRelativeWidth,
     FloatingImageTextDistances,
     FloatingImageTextWrap,
     FloatingImageVerticalPosition,
@@ -298,6 +301,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "floating-image-horizontal-position",
             "floating-image-layout",
             "floating-image-layout-update",
+            "floating-image-relative-height",
+            "floating-image-relative-size",
+            "floating-image-relative-width",
             "floating-image-text-distances",
             "floating-image-text-wrap",
             "floating-image-vertical-position",
@@ -885,6 +891,11 @@ def _run(args: argparse.Namespace) -> int:
             ),
             "floating-image-layout": FloatingImageLayout,
             "floating-image-layout-update": FloatingImageLayoutUpdate,
+            "floating-image-relative-height": (
+                FloatingImageRelativeHeight
+            ),
+            "floating-image-relative-size": FloatingImageRelativeSize,
+            "floating-image-relative-width": FloatingImageRelativeWidth,
             "floating-image-text-distances": FloatingImageTextDistances,
             "floating-image-text-wrap": FloatingImageTextWrap,
             "floating-image-vertical-position": (

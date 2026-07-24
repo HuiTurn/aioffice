@@ -18,7 +18,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.41"
+SPEC_VERSION = "0.2-draft.42"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1039,6 +1039,107 @@ class ImageCrop(StrictModel):
         return self
 
 
+class FloatingImageRelativeWidth(StrictModel):
+    """Office 2010 width rule layered over the absolute fallback extent."""
+
+    relative_to: Literal[
+        "inside_margin",
+        "left_margin",
+        "margin",
+        "outside_margin",
+        "page",
+        "right_margin",
+    ]
+    percentage: float = Field(
+        ge=0,
+        le=(2**31 - 1) / 1_000,
+        strict=True,
+        description=(
+            "Width in percentage points of the selected frame; quantized "
+            "to the native OOXML 0.001-percentage-point unit."
+        ),
+    )
+
+    @field_validator("percentage", mode="before")
+    @classmethod
+    def normalize_percentage(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError(
+                "Floating image relative width cannot be a boolean."
+            )
+        if isinstance(value, (int, float)):
+            return round(float(value), 3)
+        return value
+
+
+class FloatingImageRelativeHeight(StrictModel):
+    """Office 2010 height rule layered over the absolute fallback extent."""
+
+    relative_to: Literal[
+        "bottom_margin",
+        "inside_margin",
+        "margin",
+        "outside_margin",
+        "page",
+        "top_margin",
+    ]
+    percentage: float = Field(
+        ge=0,
+        le=(2**31 - 1) / 1_000,
+        strict=True,
+        description=(
+            "Height in percentage points of the selected frame; quantized "
+            "to the native OOXML 0.001-percentage-point unit."
+        ),
+    )
+
+    @field_validator("percentage", mode="before")
+    @classmethod
+    def normalize_percentage(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError(
+                "Floating image relative height cannot be a boolean."
+            )
+        if isinstance(value, (int, float)):
+            return round(float(value), 3)
+        return value
+
+
+class FloatingImageRelativeSize(StrictModel):
+    """Optional axis rules that retain the picture's absolute fallback size."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "anyOf": [
+                {
+                    "required": ["width"],
+                    "properties": {
+                        "width": {"not": {"type": "null"}},
+                    },
+                },
+                {
+                    "required": ["height"],
+                    "properties": {
+                        "height": {"not": {"type": "null"}},
+                    },
+                },
+            ]
+        },
+    )
+
+    width: FloatingImageRelativeWidth | None = None
+    height: FloatingImageRelativeHeight | None = None
+
+    @model_validator(mode="after")
+    def validate_axes(self) -> "FloatingImageRelativeSize":
+        if self.width is None and self.height is None:
+            raise ValueError(
+                "Floating image relative size requires width, height, or both."
+            )
+        return self
+
+
 class FloatingImageHorizontalPosition(StrictModel):
     """Horizontal position of a floating image relative to a Word layout frame."""
 
@@ -1685,6 +1786,7 @@ class FloatingImageLayout(StrictModel):
     anchor_distances: FloatingImageTextDistances | None = None
     anchor_effect_extent: FloatingImageEffectExtent | None = None
     wrap: FloatingImageTextWrap
+    relative_size: FloatingImageRelativeSize | None = None
     relative_height: int = Field(ge=0, le=2**32 - 1, strict=True)
     behind_text: bool = Field(strict=True)
     locked: bool = Field(strict=True)
@@ -1714,6 +1816,7 @@ class FloatingImageLayoutUpdate(StrictModel):
     anchor_distances: FloatingImageTextDistances | None = None
     anchor_effect_extent: FloatingImageEffectExtent | None = None
     wrap: FloatingImageTextWrap | None = None
+    relative_size: FloatingImageRelativeSize | None = None
     relative_height: int | None = Field(
         default=None,
         ge=0,
@@ -2004,6 +2107,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.39",
         "0.2-draft.40",
         "0.2-draft.41",
+        "0.2-draft.42",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

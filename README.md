@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev41`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev42`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -26,6 +26,7 @@ background/border surfaces, conservative body and header/footer image projection
 verified asset extraction, selective native image metadata and geometry updates,
 bounded rectangular source cropping,
 conservative offset/alignment/percentage floating-image anchor projection,
+optional Office 2010 relative width/height rules with absolute extent fallbacks,
 square/no-wrap/top-and-bottom/tight/through text wrapping, selective floating-anchor layout
 updates plus positioning and wrapping-mode switches,
 occurrence-scoped copy-on-write image replacement, addressable native inline and
@@ -311,6 +312,25 @@ floating = {
 }
 ```
 
+Floating pictures may also carry independent Office 2010 relative-size rules:
+
+```python
+floating = {
+    "horizontal": {"relative_to": "page", "alignment": "center"},
+    "vertical": {"relative_to": "page", "alignment": "center"},
+    "relative_size": {
+        "width": {"relative_to": "margin", "percentage": 75},
+        "height": {"relative_to": "page", "percentage": 40},
+    },
+    # The same complete wrap and flag fields shown above are still required.
+}
+```
+
+`relative_size.width` and `.height` are independent; at least one is required.
+Percentages use `0.001`-percentage-point native precision and cannot be negative.
+The image node's ordinary `width` and `height` remain the exact `wp:extent`
+fallback, so a relative rule never destroys the producer's absolute geometry.
+
 `wrap.mode` accepts `square`, `none`, `top_and_bottom`, `tight`, or `through`.
 Square, tight, and through require `side`; the other modes must omit it.
 Tight/through additionally require an ordered polygon whose coordinates remain raw
@@ -347,7 +367,7 @@ revision log.
 The read path re-resolves the trusted native paragraph and its story-local OPC
 relationship, then verifies the asset record, media type, size, and content hash
 before returning bytes. Mixed text/picture paragraphs, active simple-position
-anchors, relative-size extensions, unsupported wrap-specific effects, linked images,
+anchors, malformed relative-size rules, unsupported wrap-specific effects, linked images,
 multiple pictures, negative or overconstrained crop rectangles, transforms,
 effects, drawings in tables, complex header/footer drawings, VML, OLE, and embedded
 objects remain explicit opaque native content. They are preserved losslessly and

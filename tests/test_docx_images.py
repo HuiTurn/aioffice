@@ -92,11 +92,12 @@ def _image_document(
     anchored: bool = False,
     aligned: bool = False,
     percentage_position: bool = False,
+    relative_size: bool = False,
     wrap_mode: str = "square",
     cropped: bool = False,
     alt_text: str | None = "A compact expert workflow diagram",
 ) -> bytes:
-    if (aligned or percentage_position) and not anchored:
+    if (aligned or percentage_position or relative_size) and not anchored:
         raise ValueError(
             "Alternative positioning requires a floating anchor."
         )
@@ -324,6 +325,25 @@ def _image_document(
         {"prst": "rect"},
     )
     ET.SubElement(geometry, _q(A, "avLst"))
+    if relative_size:
+        relative_width = ET.SubElement(
+            placement,
+            _q(WP14, "sizeRelH"),
+            {"relativeFrom": "margin"},
+        )
+        ET.SubElement(
+            relative_width,
+            _q(WP14, "pctWidth"),
+        ).text = "50000"
+        relative_height = ET.SubElement(
+            placement,
+            _q(WP14, "sizeRelV"),
+            {"relativeFrom": "page"},
+        )
+        ET.SubElement(
+            relative_height,
+            _q(WP14, "pctHeight"),
+        ).text = "25000"
 
     ET.SubElement(
         relationships,
@@ -372,6 +392,7 @@ def _header_image_document(
     anchored: bool = False,
     aligned: bool = False,
     percentage_position: bool = False,
+    relative_size: bool = False,
     wrap_mode: str = "square",
 ) -> bytes:
     assert kind in {"header", "footer"}
@@ -380,6 +401,7 @@ def _header_image_document(
         anchored=anchored,
         aligned=aligned,
         percentage_position=percentage_position,
+        relative_size=relative_size,
         wrap_mode=wrap_mode,
     )
     with ZipFile(io.BytesIO(body_image)) as archive:
@@ -536,6 +558,7 @@ class DocxImageTests(unittest.TestCase):
                     "anchor_distances",
                     "anchor_effect_extent",
                     "wrap",
+                    "relative_size",
                     "relative_height",
                     "behind_text",
                     "locked",
@@ -551,12 +574,25 @@ class DocxImageTests(unittest.TestCase):
                     "anchor_distances",
                     "anchor_effect_extent",
                     "wrap",
+                    "relative_size",
                     "relative_height",
                     "behind_text",
                     "locked",
                     "layout_in_cell",
                     "allow_overlap",
                 },
+            ),
+            (
+                "floating-image-relative-width",
+                {"relative_to", "percentage"},
+            ),
+            (
+                "floating-image-relative-height",
+                {"relative_to", "percentage"},
+            ),
+            (
+                "floating-image-relative-size",
+                {"width", "height"},
             ),
             (
                 "asset-ref",
@@ -681,6 +717,28 @@ class DocxImageTests(unittest.TestCase):
                             ]
                         },
                     )
+            if kind == "floating-image-relative-size":
+                self.assertEqual(
+                    schema["anyOf"],
+                    [
+                        {
+                            "required": ["width"],
+                            "properties": {
+                                "width": {
+                                    "not": {"type": "null"},
+                                }
+                            },
+                        },
+                        {
+                            "required": ["height"],
+                            "properties": {
+                                "height": {
+                                    "not": {"type": "null"},
+                                }
+                            },
+                        },
+                    ],
+                )
             if kind == "header-footer-image-block":
                 capabilities = schema["properties"]["capabilities"]
                 self.assertEqual(
@@ -700,7 +758,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.41")
+        self.assertEqual(spec["spec_version"], "0.2-draft.42")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -1642,7 +1700,11 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(
             capabilities["floating_layout_clearable_fields"],
-            ["anchor_distances", "anchor_effect_extent"],
+            [
+                "anchor_distances",
+                "anchor_effect_extent",
+                "relative_size",
+            ],
         )
 
         switched = document.apply(
@@ -1876,6 +1938,166 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             ET.tostring(metadata_horizontal),
             ET.tostring(horizontal),
+        )
+
+    def test_floating_relative_size_projects_updates_and_clears(self) -> None:
+        source = _image_document(
+            anchored=True,
+            relative_size=True,
+            cropped=True,
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(
+            image["floating"]["relative_size"],
+            {
+                "width": {
+                    "relative_to": "margin",
+                    "percentage": 50.0,
+                },
+                "height": {
+                    "relative_to": "page",
+                    "percentage": 25.0,
+                },
+            },
+        )
+        self.assertEqual(image["width"], {"value": 144.0, "unit": "pt"})
+        self.assertEqual(image["height"], {"value": 72.0, "unit": "pt"})
+        self.assertEqual(document.to_bytes("docx"), source)
+
+        capabilities = document.capabilities()["assets"]
+        self.assertIn(
+            "relative_size",
+            capabilities["floating_layout_update_fields"],
+        )
+        self.assertIn(
+            "relative_size",
+            capabilities["floating_layout_clearable_fields"],
+        )
+        self.assertEqual(
+            capabilities["floating_relative_size_axes"],
+            ["width", "height"],
+        )
+        self.assertEqual(
+            capabilities["floating_relative_size_unit"],
+            "percentage_points",
+        )
+        self.assertEqual(
+            capabilities["floating_relative_size_precision"],
+            0.001,
+        )
+        self.assertEqual(
+            capabilities["floating_relative_size_bounds"],
+            {"minimum": 0, "maximum": 2147483.647},
+        )
+        self.assertIn(
+            "absolute_native_fallback_extent",
+            capabilities["floating_relative_size_authority"],
+        )
+
+        updated = document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": {
+                        "relative_size": {
+                            "width": {
+                                "relative_to": "right_margin",
+                                "percentage": 62.3454,
+                            }
+                        }
+                    },
+                },
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "width": {"value": 180, "unit": "pt"},
+                        "height": {"value": 90, "unit": "pt"},
+                    },
+                },
+            ]
+        )
+        self.assertTrue(updated.success, updated.model_dump())
+        assert updated.document is not None
+        updated_image = updated.document.to_spec()["content"][0]
+        self.assertEqual(
+            updated_image["floating"]["relative_size"],
+            {
+                "width": {
+                    "relative_to": "right_margin",
+                    "percentage": 62.345,
+                }
+            },
+        )
+        self.assertEqual(
+            updated_image["width"],
+            {"value": 180.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            updated_image["height"],
+            {"value": 90.0, "unit": "pt"},
+        )
+        output = updated.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            native_xml = package.read("word/document.xml")
+            root = parse_xml(native_xml)
+        anchor = root.find(f".//{_q(WP, 'anchor')}")
+        assert anchor is not None
+        self.assertEqual(anchor[-1].tag, _q(WP14, "sizeRelH"))
+        self.assertIsNone(anchor.find(f"./{_q(WP14, 'sizeRelV')}"))
+        relative_width = anchor.find(f"./{_q(WP14, 'sizeRelH')}")
+        assert relative_width is not None
+        self.assertEqual(
+            relative_width.attrib,
+            {"relativeFrom": "rightMargin"},
+        )
+        self.assertEqual(relative_width[0].tag, _q(WP14, "pctWidth"))
+        self.assertEqual(relative_width[0].text, "62345")
+        extent = anchor.find(f"./{_q(WP, 'extent')}")
+        assert extent is not None
+        self.assertEqual(
+            (extent.get("cx"), extent.get("cy")),
+            ("2286000", "1143000"),
+        )
+        self.assertIn(
+            "wp14",
+            (root.get(_q(MC, "Ignorable")) or "").split(),
+        )
+        self.assertIn(b"xmlns:wp14=", native_xml)
+
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            reopened.to_spec()["content"][0]["floating"][
+                "relative_size"
+            ],
+            updated_image["floating"]["relative_size"],
+        )
+        cleared = reopened.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "clear": ["relative_size"],
+                }
+            ]
+        )
+        self.assertTrue(cleared.success, cleared.model_dump())
+        assert cleared.document is not None
+        self.assertNotIn(
+            "relative_size",
+            cleared.document.to_spec()["content"][0]["floating"],
+        )
+        with ZipFile(
+            io.BytesIO(cleared.document.to_bytes("docx"))
+        ) as package:
+            cleared_root = parse_xml(package.read("word/document.xml"))
+        self.assertIsNone(
+            cleared_root.find(f".//{_q(WP14, 'sizeRelH')}")
+        )
+        self.assertIsNone(
+            cleared_root.find(f".//{_q(WP14, 'sizeRelV')}")
         )
 
     def test_libreoffice_neutral_picture_normalization_is_editable(
@@ -2230,6 +2452,61 @@ class DocxImageTests(unittest.TestCase):
                 "op": "image.anchor.update",
                 "target": image["id"],
                 "set": {
+                    "relative_size": {},
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "relative_size": {
+                        "width": {
+                            "relative_to": "margin",
+                            "percentage": True,
+                        }
+                    },
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "relative_size": {
+                        "height": {
+                            "relative_to": "page",
+                            "percentage": "50",
+                        }
+                    },
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "relative_size": {
+                        "width": {
+                            "relative_to": "top_margin",
+                            "percentage": 50,
+                        }
+                    },
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "relative_size": {
+                        "height": {
+                            "relative_to": "page",
+                            "percentage": 2147483.648,
+                        }
+                    },
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
                     "vertical": {
                         "relative_to": "page",
                         "alignment": "middle",
@@ -2484,6 +2761,13 @@ class DocxImageTests(unittest.TestCase):
             "percentage_non_integer",
             "percentage_out_of_range",
             "percentage_wrong_axis",
+            "relative_size_attribute",
+            "relative_size_unknown_frame",
+            "relative_size_wrong_child",
+            "relative_size_non_integer",
+            "relative_size_negative",
+            "relative_size_out_of_range",
+            "relative_size_duplicate_axis",
             "simple_position",
             "tight_wrap",
             "tight_top_distance",
@@ -2509,6 +2793,7 @@ class DocxImageTests(unittest.TestCase):
                     and case != "tight_wrap"
                     else "square"
                 ),
+                relative_size=case.startswith("relative_size_"),
             )
             with ZipFile(io.BytesIO(source)) as archive:
                 root = parse_xml(archive.read("word/document.xml"))
@@ -2549,6 +2834,30 @@ class DocxImageTests(unittest.TestCase):
                 )
                 if case == "percentage_attribute":
                     percentage.set("unexpected", "1")
+            elif case.startswith("relative_size_"):
+                relative_width = anchor.find(
+                    f"./{_q(WP14, 'sizeRelH')}"
+                )
+                assert relative_width is not None
+                percentage = relative_width.find(
+                    f"./{_q(WP14, 'pctWidth')}"
+                )
+                assert percentage is not None
+                if case == "relative_size_attribute":
+                    relative_width.set("unexpected", "1")
+                elif case == "relative_size_unknown_frame":
+                    relative_width.set("relativeFrom", "column")
+                elif case == "relative_size_wrong_child":
+                    percentage.tag = _q(WP14, "pctHeight")
+                elif case == "relative_size_non_integer":
+                    percentage.text = "12.5"
+                elif case == "relative_size_negative":
+                    percentage.text = "-1"
+                elif case == "relative_size_out_of_range":
+                    percentage.text = "2147483648"
+                else:
+                    duplicate = copy.deepcopy(relative_width)
+                    anchor.append(duplicate)
             elif case == "simple_position":
                 anchor.attrib["simplePos"] = "1"
             elif case == "tight_wrap":
@@ -3905,6 +4214,7 @@ class DocxImageTests(unittest.TestCase):
             anchored=True,
             wrap_mode="none",
             cropped=True,
+            relative_size=True,
         )
         document = Document.from_docx(source)
         image = document.to_spec()["header_footers"][0]["content"][0]
@@ -3966,6 +4276,12 @@ class DocxImageTests(unittest.TestCase):
                                     "unit": "pt",
                                 },
                             },
+                        },
+                        "relative_size": {
+                            "height": {
+                                "relative_to": "top_margin",
+                                "percentage": 35.5,
+                            }
                         },
                         "behind_text": True,
                         "allow_overlap": False,
@@ -4036,6 +4352,14 @@ class DocxImageTests(unittest.TestCase):
             anchor.get(_q(WP14, "anchorId")),
             "A1B2C3D4",
         )
+        self.assertIsNone(anchor.find(f"./{_q(WP14, 'sizeRelH')}"))
+        relative_height = anchor.find(f"./{_q(WP14, 'sizeRelV')}")
+        assert relative_height is not None
+        self.assertEqual(
+            relative_height.attrib,
+            {"relativeFrom": "topMargin"},
+        )
+        self.assertEqual(relative_height[0].text, "35500")
 
         reopened = Document.from_docx(output)
         reopened_image = reopened.to_spec()["header_footers"][0][
@@ -4050,6 +4374,15 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertTrue(reopened_image["floating"]["behind_text"])
         self.assertFalse(reopened_image["floating"]["allow_overlap"])
+        self.assertEqual(
+            reopened_image["floating"]["relative_size"],
+            {
+                "height": {
+                    "relative_to": "top_margin",
+                    "percentage": 35.5,
+                }
+            },
+        )
         self.assertEqual(
             reopened_image["floating"]["wrap"],
             {
@@ -4173,6 +4506,7 @@ class DocxImageTests(unittest.TestCase):
         source = _header_image_document(
             anchored=True,
             percentage_position=True,
+            relative_size=True,
             wrap_mode="none",
         )
         document = Document.from_docx(source)
@@ -4226,6 +4560,12 @@ class DocxImageTests(unittest.TestCase):
                             "relative_to": "page",
                             "percentage_offset": 75.25,
                         },
+                        "relative_size": {
+                            "width": {
+                                "relative_to": "page",
+                                "percentage": 80,
+                            }
+                        },
                     },
                 }
             ]
@@ -4251,6 +4591,23 @@ class DocxImageTests(unittest.TestCase):
                 "percentage_offset": 75.25,
             },
         )
+        self.assertEqual(
+            updated_parts[source_part["id"]]["content"][0]["floating"][
+                "relative_size"
+            ],
+            source_image["floating"]["relative_size"],
+        )
+        self.assertEqual(
+            updated_parts["percentage_clone_header"]["content"][0][
+                "floating"
+            ]["relative_size"],
+            {
+                "width": {
+                    "relative_to": "page",
+                    "percentage": 80.0,
+                }
+            },
+        )
 
         output = updated.document.to_bytes("docx")
         with ZipFile(io.BytesIO(output)) as package:
@@ -4266,6 +4623,22 @@ class DocxImageTests(unittest.TestCase):
         assert clone_percentage is not None
         self.assertEqual(source_percentage.text, "37500")
         self.assertEqual(clone_percentage.text, "75250")
+        source_relative_width = source_root.find(
+            f".//{_q(WP14, 'pctWidth')}"
+        )
+        clone_relative_width = clone_root.find(
+            f".//{_q(WP14, 'pctWidth')}"
+        )
+        assert source_relative_width is not None
+        assert clone_relative_width is not None
+        self.assertEqual(source_relative_width.text, "50000")
+        self.assertEqual(clone_relative_width.text, "80000")
+        self.assertIsNotNone(
+            source_root.find(f".//{_q(WP14, 'pctHeight')}")
+        )
+        self.assertIsNone(
+            clone_root.find(f".//{_q(WP14, 'pctHeight')}")
+        )
         self.assertIn(
             "wp14",
             (clone_root.get(_q(MC, "Ignorable")) or "").split(),
@@ -4277,6 +4650,7 @@ class DocxImageTests(unittest.TestCase):
         source = _header_image_document(
             cropped=True,
             anchored=True,
+            relative_size=True,
             wrap_mode="tight",
         )
         document = Document.from_docx(source)
@@ -4408,6 +4782,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_clone_image["crop"],
             reopened_source_image["crop"],
+        )
+        self.assertEqual(
+            reopened_clone_image["floating"]["relative_size"],
+            reopened_source_image["floating"]["relative_size"],
         )
         self.assertEqual(reopened.to_bytes("docx"), output)
 
@@ -5118,6 +5496,16 @@ class DocxImageTests(unittest.TestCase):
                 "percentage_offset": -7.5,
             },
             "wrap": {"mode": "none"},
+            "relative_size": {
+                "width": {
+                    "relative_to": "margin",
+                    "percentage": 75.125,
+                },
+                "height": {
+                    "relative_to": "page",
+                    "percentage": 40,
+                },
+            },
             "relative_height": 8192,
             "behind_text": True,
             "locked": False,
@@ -5159,6 +5547,30 @@ class DocxImageTests(unittest.TestCase):
             _q(WP14, "pctPosVOffset"),
         )
         self.assertEqual(vertical[0].text, "-7500")
+        relative_width = anchor.find(f"./{_q(WP14, 'sizeRelH')}")
+        relative_height = anchor.find(f"./{_q(WP14, 'sizeRelV')}")
+        assert relative_width is not None
+        assert relative_height is not None
+        self.assertEqual(
+            relative_width.attrib,
+            {"relativeFrom": "margin"},
+        )
+        self.assertEqual(relative_width[0].tag, _q(WP14, "pctWidth"))
+        self.assertEqual(relative_width[0].text, "75125")
+        self.assertEqual(
+            relative_height.attrib,
+            {"relativeFrom": "page"},
+        )
+        self.assertEqual(relative_height[0].tag, _q(WP14, "pctHeight"))
+        self.assertEqual(relative_height[0].text, "40000")
+        self.assertEqual(
+            [child.tag for child in anchor[-3:]],
+            [
+                _q(A, "graphic"),
+                _q(WP14, "sizeRelH"),
+                _q(WP14, "sizeRelV"),
+            ],
+        )
         self.assertIn(
             "wp14",
             (root.get(_q(MC, "Ignorable")) or "").split(),

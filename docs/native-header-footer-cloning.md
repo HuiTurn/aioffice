@@ -71,6 +71,11 @@ In `0.2.0.dev41`, clone-safe horizontal and vertical positions may also use Offi
 values, and a later story-local `image.anchor.update` may switch among physical
 offset, alignment, and percentage modes without changing the source story.
 
+In `0.2.0.dev42`, a clone-safe floating picture may additionally carry independent
+Office 2010 relative width and height rules. The clone retains those rules together
+with its absolute `wp:extent` fallback. A story-local update can replace or clear
+the complete relative-size group without changing the source story.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

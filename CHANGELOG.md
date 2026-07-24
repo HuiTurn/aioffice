@@ -121,6 +121,17 @@
 - Documented that LibreOffice 26.8 currently normalizes Office 2010 percentage
   positions to absolute offsets on save; AiOffice reports the producer's new native
   state instead of claiming the original rule survived.
+- Added conservative Office 2010 `wp14:sizeRelH` / `wp14:sizeRelV` projection in
+  body, header, and footer stories, with independent width/height reference frames
+  and non-negative percentage rules.
+- Kept `ImageBlock.width` and `height` as exact `wp:extent` fallback evidence instead
+  of overwriting absolute geometry with a relative-size calculation.
+- Added strict relative-size schemas, selective set/clear lowering, canonical
+  insertion, story-local header editing, clone isolation, compatibility metadata,
+  native Int32 bounds, and fail-closed malformed-rule handling.
+- Documented that LibreOffice 26.8 currently ignores these Office 2010 rules for
+  layout and removes them on save while retaining the absolute fallback extent;
+  AiOffice preserves them exactly until another producer rewrites the package.
 - Accepted LibreOffice's visually neutral picture normalization
   (`pic:spPr/@bwMode="auto"` and at most one empty `a:noFill`) so aligned pictures
   remain projected and editable after an Office-compatible open/save cycle, while
@@ -524,6 +535,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.38`.
 - Advanced the AiOffice Document Spec to `0.2-draft.40`.
 - Advanced the AiOffice Document Spec to `0.2-draft.41`.
+- Advanced the AiOffice Document Spec to `0.2-draft.42`.
 
 ## 0.1.0
 
