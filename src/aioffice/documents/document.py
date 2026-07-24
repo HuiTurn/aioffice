@@ -748,6 +748,11 @@ class Document:
                         placement=node.placement,
                         width=node.width.model_dump(mode="json"),
                         height=node.height.model_dump(mode="json"),
+                        crop=(
+                            node.crop.model_dump(mode="json")
+                            if node.crop is not None
+                            else None
+                        ),
                         name=node.name,
                         alt_text=node.alt_text,
                         title=node.title,
@@ -870,6 +875,13 @@ class Document:
                                         ),
                                         "height": block.height.model_dump(
                                             mode="json"
+                                        ),
+                                        "crop": (
+                                            block.crop.model_dump(
+                                                mode="json"
+                                            )
+                                            if block.crop is not None
+                                            else None
                                         ),
                                         "name": block.name,
                                         "alt_text": block.alt_text,
@@ -1120,10 +1132,12 @@ class Document:
                 "native_update_fields": [
                     "width",
                     "height",
+                    "crop",
                     "alt_text",
                     "title",
                 ],
                 "clearable_update_fields": [
+                    "crop",
                     "alt_text",
                     "title",
                 ],
@@ -1132,7 +1146,11 @@ class Document:
                 "native_geometry_patch": [
                     "wp:inline/wp:extent",
                     "pic:spPr/a:xfrm/a:ext",
+                    "pic:blipFill/a:srcRect",
                 ],
+                "crop_unit": "percentage_points",
+                "crop_precision": 0.001,
+                "crop_visible_area_required": True,
                 "native_replace_api": (
                     "Document.replace_image(image_id, source, media_type=None)"
                 ),
@@ -1150,6 +1168,7 @@ class Document:
                 "replacement_preserves": [
                     "image_occurrence_id",
                     "display_extent",
+                    "source_crop",
                     "alternative_text",
                     "title",
                     "unrelated_occurrences",
@@ -1186,7 +1205,11 @@ class Document:
                     "inline placement",
                     "explicit positive extent",
                     "rectangular stretch fill",
-                    "no crop, rotation, flip, visible outline, or visual effect",
+                    (
+                        "optional non-negative rectangular source crop that "
+                        "leaves visible width and height"
+                    ),
+                    "no rotation, flip, visible outline, or visual effect",
                     (
                         "body, header, or footer paragraph with no other "
                         "visible content"
@@ -1197,7 +1220,10 @@ class Document:
                     "text and drawing in one paragraph",
                     "multiple pictures",
                     "linked or external image",
-                    "cropped, transformed, outlined, or effected picture",
+                    (
+                        "negative, overconstrained, transformed, outlined, "
+                        "or effected picture"
+                    ),
                     "picture in table",
                     "VML, OLE, or embedded object",
                 ],
@@ -4109,7 +4135,9 @@ class Document:
                 else []
             )
             invalid_clear = (
-                sorted(set(clear_values) - {"alt_text", "title"})
+                sorted(
+                    set(clear_values) - {"crop", "alt_text", "title"}
+                )
                 if valid_shape
                 else []
             )

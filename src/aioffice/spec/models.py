@@ -17,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.32"
+SPEC_VERSION = "0.2-draft.33"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -996,6 +996,48 @@ class PageBreak(NodeBase):
     type: Literal["page_break"] = "page_break"
 
 
+class ImageCrop(StrictModel):
+    """Rectangular source crop in percentage points of the original image."""
+
+    left: float = Field(default=0, ge=0, lt=100)
+    top: float = Field(default=0, ge=0, lt=100)
+    right: float = Field(default=0, ge=0, lt=100)
+    bottom: float = Field(default=0, ge=0, lt=100)
+
+    @field_validator("left", "top", "right", "bottom", mode="before")
+    @classmethod
+    def normalize_percentage(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("Image crop percentages cannot be booleans.")
+        if isinstance(value, (int, float)):
+            return round(float(value), 3)
+        return value
+
+    @model_validator(mode="after")
+    def validate_visible_area(self) -> "ImageCrop":
+        if not any(
+            (
+                self.left,
+                self.top,
+                self.right,
+                self.bottom,
+            )
+        ):
+            raise ValueError(
+                "Image crop must remove at least one non-zero edge; "
+                "clear crop to show the complete source."
+            )
+        if self.left + self.right >= 100:
+            raise ValueError(
+                "Image left and right crop must leave visible source width."
+            )
+        if self.top + self.bottom >= 100:
+            raise ValueError(
+                "Image top and bottom crop must leave visible source height."
+            )
+        return self
+
+
 class ImageBlock(NodeBase):
     """One AI-addressable image occurrence backed by a native binary asset."""
 
@@ -1005,6 +1047,7 @@ class ImageBlock(NodeBase):
     placement: Literal["inline"] = "inline"
     width: Length
     height: Length
+    crop: ImageCrop | None = None
     name: str | None = None
     alt_text: str | None = None
     title: str | None = None
@@ -1082,6 +1125,7 @@ class ImageUpdate(StrictModel):
 
     width: Length | None = None
     height: Length | None = None
+    crop: ImageCrop | None = None
     alt_text: str | None = Field(default=None, min_length=1, max_length=4096)
     title: str | None = Field(default=None, min_length=1, max_length=1024)
 
@@ -1232,6 +1276,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.30",
         "0.2-draft.31",
         "0.2-draft.32",
+        "0.2-draft.33",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev32`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev33`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -24,6 +24,7 @@ parts, structured dynamic fields, explicit table geometry, logical merged cells,
 rich table-cell paragraphs, explicit table/cell border control, paragraph
 background/border surfaces, conservative body and header/footer image projection,
 verified asset extraction, selective native image metadata and geometry updates,
+bounded rectangular source cropping,
 occurrence-scoped copy-on-write image replacement, addressable native inline image
 insertion, direct image-paragraph layout formatting, semantic diffs, isolated
 LibreOffice/Poppler native rendering, safe reusable native header/footer creation,
@@ -92,8 +93,8 @@ preserves untouched part payloads.
 
 Image bytes deliberately stay out of the JSON Spec. A simple body, header, or footer
 paragraph containing exactly one embedded inline DrawingML picture is projected as
-an AI-addressable `image` block with physical extent, alternative text, media type,
-filename, byte count, and SHA-256 asset identity:
+an AI-addressable `image` block with physical extent, optional rectangular source
+crop, alternative text, media type, filename, byte count, and SHA-256 asset identity:
 
 ```python
 image = next(
@@ -112,8 +113,8 @@ verified read, update, replacement, and paragraph-layout APIs. Header/footer
 insertion and deletion are not advertised: create or clone the complete reusable
 part first, then update or replace its projected image in a subsequent Patch.
 
-Supported projected images can be resized or given accessible metadata without
-rewriting their binary part or relationship:
+Supported projected images can be resized, cropped, or given accessible metadata
+without rewriting their binary part or relationship:
 
 ```python
 result = doc.apply([
@@ -122,6 +123,12 @@ result = doc.apply([
         "target": f"#{image['id']}",
         "set": {
             "width": {"value": 3, "unit": "in"},
+            "crop": {
+                "left": 12.5,
+                "top": 5,
+                "right": 12.5,
+                "bottom": 5,
+            },
             "alt_text": "Quarterly revenue by region",
             "title": "Revenue chart",
         },
@@ -132,10 +139,13 @@ result.document.export("updated.docx")
 ```
 
 Setting one dimension preserves the current aspect ratio; setting both applies the
-exact requested extent. `alt_text` and `title` may be removed with
-`"clear": ["alt_text", "title"]`. The native patch updates both DrawingML extent
-records while preserving image bytes and package relationships. It requires the
-attached native DOCX, so a detached JSON snapshot cannot perform this operation.
+exact requested extent. Crop edges are percentage points of the original source,
+quantized to Word's `0.001`-percentage-point precision. The crop object is replaced
+as a whole; omitted edges mean zero. Use `"clear": ["crop"]` to reveal the complete
+source. `alt_text` and `title` are also clearable. The native patch updates the
+minimal DrawingML geometry while preserving image bytes and package relationships.
+It requires the attached native DOCX, so a detached JSON snapshot cannot perform
+this operation.
 
 The projected image ID also addresses its native host paragraph. Reuse
 `paragraph.format` to control layout around an existing picture without touching its
@@ -176,8 +186,9 @@ result.document.export("replaced.docx")
 
 AiOffice signature-checks and bounds the raster input, creates a content-addressed
 native image part and a new relationship for only that occurrence, and preserves its
-stable image ID, displayed extent, alternative text, and title. Other occurrences
-that shared the old image remain unchanged. Raw JSON Patch cannot carry the binary.
+stable image ID, displayed extent, source crop, alternative text, and title. Other
+occurrences that shared the old image remain unchanged. Raw JSON Patch cannot carry
+the binary.
 
 New inline pictures use the same bounded asset channel and require explicit layout:
 
@@ -219,10 +230,11 @@ revision log.
 The read path re-resolves the trusted native paragraph and its story-local OPC
 relationship, then verifies the asset record, media type, size, and content hash
 before returning bytes. Mixed text/picture paragraphs, floating anchors, linked
-images, multiple pictures, crops, transforms, effects, drawings in tables, complex
-header/footer drawings, VML, OLE, and embedded objects remain explicit opaque native
-content. They are preserved losslessly and rendered through the native provider
-rather than flattened into a misleading image model. See
+images, multiple pictures, negative or overconstrained crop rectangles, transforms,
+effects, drawings in tables, complex header/footer drawings, VML, OLE, and embedded
+objects remain explicit opaque native content. They are preserved losslessly and
+rendered through the native provider rather than flattened into a misleading image
+model. See
 [the native image and asset contract](docs/native-images.md).
 
 AiOffice-generated DOCX files embed a versioned identity manifest. Artifact IDs,

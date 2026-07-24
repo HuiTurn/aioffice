@@ -16,6 +16,7 @@ from aioffice.native.xml import parse_xml, serialize_xml
 from aioffice.spec.models import (
     AssetRef,
     ImageBlock,
+    ImageCrop,
     ImageInsert,
     Length,
     NativeRef,
@@ -100,6 +101,7 @@ class SimpleInlineImage:
     size_bytes: int
     width: Length
     height: Length
+    crop: ImageCrop | None
     name: str | None
     alt_text: str | None
     title: str | None
@@ -226,13 +228,25 @@ def simple_inline_image(
     assert blip_fill is not None
     assert shape_properties is not None
     blips = blip_fill.findall(f"./{_q(A, 'blip')}")
+    source_rectangles = blip_fill.findall(f"./{_q(A, 'srcRect')}")
     stretch = blip_fill.find(f"./{_q(A, 'stretch')}")
+    expected_blip_fill_children = [
+        _q(A, "blip"),
+        *(
+            [_q(A, "srcRect")]
+            if source_rectangles
+            else []
+        ),
+        _q(A, "stretch"),
+    ]
     if (
         len(blips) != 1
+        or len(source_rectangles) > 1
         or stretch is None
         or len(stretch) != 1
         or stretch[0].tag != _q(A, "fillRect")
-        or len(blip_fill) != 2
+        or [child.tag for child in blip_fill]
+        != expected_blip_fill_children
     ):
         return None
     blip = blips[0]
@@ -240,8 +254,47 @@ def simple_inline_image(
     if not relationship_id or blip.attrib.get(_q(R, "link")):
         return None
 
-    if picture.find(f".//{_q(A, 'srcRect')}") is not None:
-        return None
+    crop: ImageCrop | None = None
+    if source_rectangles:
+        source_rectangle = source_rectangles[0]
+        if (
+            len(source_rectangle)
+            or any(
+                attribute not in {"l", "t", "r", "b"}
+                for attribute in source_rectangle.attrib
+            )
+        ):
+            return None
+        try:
+            crop_values = {
+                edge: int(source_rectangle.get(attribute, "0"))
+                for edge, attribute in (
+                    ("left", "l"),
+                    ("top", "t"),
+                    ("right", "r"),
+                    ("bottom", "b"),
+                )
+            }
+        except ValueError:
+            return None
+        if (
+            any(
+                value < 0 or value >= 100_000
+                for value in crop_values.values()
+            )
+            or crop_values["left"] + crop_values["right"]
+            >= 100_000
+            or crop_values["top"] + crop_values["bottom"]
+            >= 100_000
+        ):
+            return None
+        if any(crop_values.values()):
+            crop = ImageCrop(
+                **{
+                    edge: value / 1_000
+                    for edge, value in crop_values.items()
+                }
+            )
     if shape_properties.attrib:
         return None
     preset_geometry = shape_properties.find(
@@ -351,6 +404,7 @@ def simple_inline_image(
             value=round(height_emu / EMU_PER_POINT, 6),
             unit="pt",
         ),
+        crop=crop,
         name=optional_attribute("name"),
         alt_text=optional_attribute("descr"),
         title=optional_attribute("title"),
@@ -476,11 +530,58 @@ def patch_simple_inline_image(
         else:
             document_properties.set(attribute_name, value)
 
-    if simple_inline_image(
+    if "crop" in fields:
+        blip_fill = inline.find(
+            f"./{_q(A, 'graphic')}/{_q(A, 'graphicData')}/"
+            f"{_q(PIC, 'pic')}/{_q(PIC, 'blipFill')}"
+        )
+        if blip_fill is None:
+            raise NativePackageError(
+                "Supported native image has no pic:blipFill element."
+            )
+        source_rectangles = blip_fill.findall(f"./{_q(A, 'srcRect')}")
+        if len(source_rectangles) > 1:
+            raise NativePackageError(
+                "Supported native image has duplicate source crop rectangles."
+            )
+        if result.crop is None:
+            if source_rectangles:
+                blip_fill.remove(source_rectangles[0])
+        else:
+            source_rectangle = (
+                source_rectangles[0]
+                if source_rectangles
+                else ET.Element(_q(A, "srcRect"))
+            )
+            if not source_rectangles:
+                stretch = blip_fill.find(f"./{_q(A, 'stretch')}")
+                if stretch is None:
+                    raise NativePackageError(
+                        "Supported native image has no stretch fill."
+                    )
+                blip_fill.insert(
+                    list(blip_fill).index(stretch),
+                    source_rectangle,
+                )
+            source_rectangle.attrib.clear()
+            for field_name, attribute_name in (
+                ("left", "l"),
+                ("top", "t"),
+                ("right", "r"),
+                ("bottom", "b"),
+            ):
+                value = round(
+                    getattr(result.crop, field_name) * 1_000
+                )
+                if value:
+                    source_rectangle.set(attribute_name, str(value))
+
+    verified = simple_inline_image(
         package,
         paragraph,
         source_part=source_part,
-    ) is None:
+    )
+    if verified is None or verified.crop != result.crop:
         raise NativePackageError(
             "image.update would leave the picture outside the supported subset."
         )
@@ -668,6 +769,7 @@ def replace_simple_inline_image(
         or replaced.media_type != asset.media_type
         or replaced.sha256 != asset.sha256
         or replaced.size_bytes != asset.size_bytes
+        or replaced.crop != original.crop
     ):
         raise NativePackageError(
             "image.replace would leave the picture outside the supported subset."

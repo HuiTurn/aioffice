@@ -27,6 +27,12 @@ otherwise empty body, header, or footer paragraph. A body occurrence lives in
       "placement": "inline",
       "width": {"value": 144, "unit": "pt"},
       "height": {"value": 72, "unit": "pt"},
+      "crop": {
+        "left": 12.5,
+        "top": 5,
+        "right": 12.5,
+        "bottom": 5
+      },
       "name": "Expert diagram",
       "alt_text": "A compact expert workflow diagram",
       "title": "Workflow",
@@ -83,9 +89,10 @@ An image becomes an `image` block only when all of these conditions hold:
 7. that relationship is one internal image relationship from the containing body,
    header, or footer part;
 8. the target exists and has an `image/*` OPC content type;
-9. the picture uses one rectangular stretch fill;
-10. the picture has no crop, rotation, flip, visible outline, non-zero effect
-    extent, or recognized visual effect.
+9. the picture uses one rectangular stretch fill, optionally preceded by one
+   non-negative, non-overconstrained `a:srcRect`;
+10. the picture has no rotation, flip, visible outline, non-zero effect extent, or
+    recognized visual effect.
 
 Microsoft's Open XML contracts distinguish
 [`wp:inline`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.inline?view=openxml-3.0.1)
@@ -139,8 +146,8 @@ filename, size, SHA-256, and output path as JSON.
 
 ## Selective native updates
 
-`image.update` changes only the supported inline picture's accessibility metadata
-and/or displayed extent:
+`image.update` changes only the supported inline picture's accessibility metadata,
+displayed extent, and/or rectangular source crop:
 
 ```python
 result = document.apply([
@@ -149,6 +156,12 @@ result = document.apply([
         "target": "#image_3A17C04E",
         "set": {
             "width": {"value": 3, "unit": "in"},
+            "crop": {
+                "left": 12.5,
+                "top": 5,
+                "right": 12.5,
+                "bottom": 5
+            },
             "alt_text": "Expert workflow with three approval stages",
             "title": "Expert workflow",
         },
@@ -157,14 +170,14 @@ result = document.apply([
 assert result.success
 ```
 
-The operation accepts `width`, `height`, `alt_text`, and `title` in `set`.
-`alt_text` and `title` are the only clearable fields:
+The operation accepts `width`, `height`, `crop`, `alt_text`, and `title` in `set`.
+`crop`, `alt_text`, and `title` are clearable:
 
 ```json
 {
   "op": "image.update",
   "target": "#image_3A17C04E",
-  "clear": ["alt_text", "title"]
+  "clear": ["crop", "alt_text", "title"]
 }
 ```
 
@@ -177,6 +190,45 @@ the former follows the Wordprocessing Drawing
 [`Extent`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.extent?view=openxml-3.0.1)
 contract. A picture is projected as editable by this operation only when both native
 extent records exist once and agree before the patch.
+
+### Rectangular source crop
+
+`crop.left`, `crop.top`, `crop.right`, and `crop.bottom` are percentage points of the
+original source image. Each edge is in `[0, 100)`, left plus right must be below
+`100`, and top plus bottom must be below `100`, so some source area always remains
+visible. At least one edge must be non-zero; use `clear` to remove the crop.
+
+AiOffice rounds every edge to three decimal places, matching DrawingML's integer
+thousandths of one percent. For example, `12.3454` becomes the native value `12345`
+and reopens as `12.345`. Setting `crop` replaces the complete rectangle; an omitted
+edge defaults to zero rather than inheriting its previous value:
+
+```json
+{
+  "op": "image.update",
+  "target": "#image_3A17C04E",
+  "set": {
+    "crop": {"left": 15, "right": 15}
+  }
+}
+```
+
+The native lowering creates or minimally updates `pic:blipFill/a:srcRect`, before
+the existing `a:stretch`, and emits only non-zero `l`, `t`, `r`, or `b` attributes.
+Clearing `crop` removes only that element. It never rewrites the raster, changes the
+displayed extent, or adjusts the relationship. Binary replacement and header/footer
+cloning preserve the occurrence's current crop.
+
+Compact inspection reports the normalized crop and advertises
+`crop_unit: "percentage_points"`, `crop_precision: 0.001`, and
+`crop_visible_area_required: true`. Semantic HTML exposes the four normalized edges
+as `data-aioffice-crop-*` evidence on its placeholder, but does not simulate native
+cropping. DOCX rendering remains the visual authority.
+
+An empty or all-zero native `a:srcRect` has no semantic crop and is preserved by
+unrelated edits. Negative values, values outside the bounded range, overconstrained
+edge sums, duplicate crop elements, unknown attributes, alternate fill structures,
+or malformed child order fail the conservative proof and remain opaque.
 
 The native lowering re-proves the conservative image shape before and after mutation.
 It does not decode, resample, replace, or recompress the image, and it does not change
@@ -295,10 +347,11 @@ unchanged. This is the intended copy-on-write workflow:
 3. call `replace_image()` for that ID in a subsequent transaction;
 4. reopen and render affected pages through the native provider.
 
-The image occurrence ID, displayed width/height, alternative text, title, paragraph
-formatting, and surrounding layout remain stable. The asset ID, media type, native
-filename, byte count, and SHA-256 change to describe the replacement. No decode,
-resample, recompression, automatic resizing, or orphan cleanup occurs.
+The image occurrence ID, displayed width/height, source crop, alternative text,
+title, paragraph formatting, and surrounding layout remain stable. The asset ID,
+media type, native filename, byte count, and SHA-256 change to describe the
+replacement. No decode, resample, recompression, automatic resizing, or orphan
+cleanup occurs.
 
 The CLI uses the same binary channel and refuses output overwrite by default:
 
@@ -437,7 +490,8 @@ These cases remain native and explicit `opaque`/read-only projections:
 - floating or anchored drawings;
 - multiple pictures or alternate representations;
 - linked or external images;
-- crops, rotations, flips, outlines, or effects;
+- negative, overconstrained, malformed, or otherwise unsupported crop rectangles;
+- rotations, flips, outlines, or effects;
 - drawings inside tables;
 - complex header/footer drawings that do not satisfy the same one-picture proof;
 - VML pictures, OLE objects, embedded files, charts, SmartArt, and other graphic
@@ -452,9 +506,10 @@ release.
 
 ## Preview and visual authority
 
-Semantic HTML emits an accessible, dimensioned placeholder with the asset ID and
-media type. Markdown emits an `aioffice-asset:` reference. Neither exporter embeds
-binary data or claims to reproduce the picture.
+Semantic HTML emits an accessible, dimensioned placeholder with the asset ID, media
+type, and normalized crop evidence. Markdown emits an `aioffice-asset:` reference.
+Neither exporter embeds binary data or claims to reproduce the native crop or
+picture.
 
 Use the native LibreOffice PDF/PNG provider to judge the actual picture, cropping,
 position, pagination, and surrounding layout. Native rendering remains the visual

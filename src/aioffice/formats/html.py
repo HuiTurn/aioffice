@@ -377,6 +377,15 @@ def _effective_header_footers(
     return result
 
 
+def _image_crop_attributes(image: ImageBlock) -> str:
+    if image.crop is None:
+        return ""
+    return "".join(
+        f' data-aioffice-crop-{edge}="{getattr(image.crop, edge):g}"'
+        for edge in ("left", "top", "right", "bottom")
+    )
+
+
 def _header_footer_html(
     spec: AiOfficeDocumentSpec,
     part: HeaderFooterPart | None,
@@ -456,6 +465,7 @@ def _header_footer_html(
                 f'{escape(block.asset_id, quote=True)}" '
                 f'data-aioffice-media-type="'
                 f'{escape(media_type, quote=True)}" '
+                f"{_image_crop_attributes(block)}"
                 f"{figure_style}>"
                 '<div class="native-image-placeholder" role="img" '
                 f'aria-label="{escape(label, quote=True)}" '
@@ -935,6 +945,7 @@ def export_html(
                 f'{escape(block.asset_id, quote=True)}" '
                 f'data-aioffice-media-type="'
                 f'{escape(media_type, quote=True)}"'
+                f"{_image_crop_attributes(block)}"
                 f"{_style_attribute(figure_css)}>"
             )
             lines.append(

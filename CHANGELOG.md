@@ -61,6 +61,12 @@
 - Extended verified image read/extraction, accessibility and geometry updates,
   paragraph layout, occurrence-scoped binary replacement, compact inspection, CLI,
   and Workspace persistence to projected header/footer images.
+- Added strict `ImageCrop` semantics and conservative projection, update, clearing,
+  inspection, schema, HTML evidence, and native round-trip support for DrawingML
+  `a:srcRect`, using percentage-point units and Word's `0.001` precision.
+- Kept crop edits story-local for body and header/footer images, preserved crop
+  through occurrence-scoped binary replacement and native part cloning, and retained
+  image bytes and OPC relationships byte-for-byte.
 - Preserved story-local relationship semantics while replacing a cloned header or
   footer logo copy-on-write, leaving the source story, relationship, media, body, and
   unrelated pages untouched.
@@ -412,6 +418,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.29`.
 - Advanced the AiOffice Document Spec to `0.2-draft.31`.
 - Advanced the AiOffice Document Spec to `0.2-draft.32`.
+- Advanced the AiOffice Document Spec to `0.2-draft.33`.
 
 ## 0.1.0
 

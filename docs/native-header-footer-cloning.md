@@ -36,6 +36,11 @@ is immediately readable and inspectable. Use `image.update`, `paragraph.format`,
 the out-of-band `replace_image()` API in a subsequent transaction. Binary replacement
 then forks only that occurrence through the cloned part's local relationship graph.
 
+In `0.2.0.dev33`, `image.update` can also set or clear a bounded rectangular source
+crop on the clone. The crop changes only the cloned story's `a:srcRect`; its
+relationship and shared source media remain unchanged, and the source story stays
+byte-exact.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

@@ -434,6 +434,11 @@ def _paragraph_projection(
             "placement": "inline",
             "width": native_image.width.model_dump(mode="json"),
             "height": native_image.height.model_dump(mode="json"),
+            "crop": (
+                native_image.crop.model_dump(mode="json")
+                if native_image.crop is not None
+                else None
+            ),
             "name": native_image.name,
             "alt_text": native_image.alt_text,
             "title": native_image.title,

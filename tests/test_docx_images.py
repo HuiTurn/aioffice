@@ -168,13 +168,22 @@ def _image_document(
     )
     ET.SubElement(non_visual, _q(PIC, "cNvPicPr"))
     blip_fill = ET.SubElement(picture, _q(PIC, "blipFill"))
-    if cropped:
-        ET.SubElement(blip_fill, _q(A, "srcRect"), {"l": "1000"})
     ET.SubElement(
         blip_fill,
         _q(A, "blip"),
         {_q(R, "embed"): "rIdImage1"},
     )
+    if cropped:
+        ET.SubElement(
+            blip_fill,
+            _q(A, "srcRect"),
+            {
+                "l": "1000",
+                "t": "2000",
+                "r": "3000",
+                "b": "4000",
+            },
+        )
     stretch = ET.SubElement(blip_fill, _q(A, "stretch"))
     ET.SubElement(stretch, _q(A, "fillRect"))
     shape = ET.SubElement(picture, _q(PIC, "spPr"))
@@ -232,9 +241,13 @@ def _image_document(
     )
 
 
-def _header_image_document(*, kind: str = "header") -> bytes:
+def _header_image_document(
+    *,
+    kind: str = "header",
+    cropped: bool = False,
+) -> bytes:
     assert kind in {"header", "footer"}
-    body_image = _image_document()
+    body_image = _image_document(cropped=cropped)
     with ZipFile(io.BytesIO(body_image)) as archive:
         image_document = parse_xml(
             archive.read("word/document.xml")
@@ -334,6 +347,10 @@ class DocxImageTests(unittest.TestCase):
                 {"asset_id", "placement", "width", "height", "editable"},
             ),
             (
+                "image-crop",
+                {"left", "top", "right", "bottom"},
+            ),
+            (
                 "asset-ref",
                 {"id", "sha256", "media_type", "size_bytes"},
             ),
@@ -349,7 +366,7 @@ class DocxImageTests(unittest.TestCase):
             ),
             (
                 "image-update",
-                {"width", "height", "alt_text", "title"},
+                {"width", "height", "crop", "alt_text", "title"},
             ),
         ):
             stdout = io.StringIO()
@@ -382,7 +399,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.32")
+        self.assertEqual(spec["spec_version"], "0.2-draft.33")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -465,11 +482,11 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(
             capabilities["native_update_fields"],
-            ["width", "height", "alt_text", "title"],
+            ["width", "height", "crop", "alt_text", "title"],
         )
         self.assertEqual(
             capabilities["clearable_update_fields"],
-            ["alt_text", "title"],
+            ["crop", "alt_text", "title"],
         )
         self.assertEqual(
             capabilities["single_dimension_resize"],
@@ -568,11 +585,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(document.image_bytes(images[0]["id"]), PNG)
         self.assertEqual(document.image_bytes(images[1]["id"]), PNG)
 
-    def test_mixed_floating_and_cropped_images_remain_opaque(self) -> None:
+    def test_mixed_and_floating_images_remain_opaque(self) -> None:
         for source in (
             _image_document(mixed_text="Caption"),
             _image_document(anchored=True),
-            _image_document(cropped=True),
         ):
             with self.subTest():
                 document = Document.from_docx(source)
@@ -584,6 +600,177 @@ class DocxImageTests(unittest.TestCase):
             _image_document(mixed_text="Caption")
         ).to_spec()["content"][0]
         self.assertIn("with text", mixed["summary"])
+
+    def test_rectangular_source_crop_projects_updates_and_clears(
+        self,
+    ) -> None:
+        source = _image_document(cropped=True)
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(
+            image["crop"],
+            {
+                "left": 1.0,
+                "top": 2.0,
+                "right": 3.0,
+                "bottom": 4.0,
+            },
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+        capabilities = document.capabilities()["assets"]
+        self.assertIn("crop", capabilities["native_update_fields"])
+        self.assertIn("crop", capabilities["clearable_update_fields"])
+        self.assertEqual(capabilities["crop_unit"], "percentage_points")
+        self.assertEqual(capabilities["crop_precision"], 0.001)
+        html = document.to_bytes("html").decode()
+        self.assertIn('data-aioffice-crop-left="1"', html)
+        self.assertIn('data-aioffice-crop-bottom="4"', html)
+
+        updated = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "crop": {
+                            "left": 12.3454,
+                            "top": 6.25,
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(updated.success, updated.model_dump())
+        self.assertEqual(
+            updated.changes[0]["property_changes"],
+            [
+                {
+                    "path": "crop",
+                    "before": {
+                        "left": 1.0,
+                        "top": 2.0,
+                        "right": 3.0,
+                        "bottom": 4.0,
+                    },
+                    "after": {
+                        "left": 12.345,
+                        "top": 6.25,
+                        "right": 0.0,
+                        "bottom": 0.0,
+                    },
+                }
+            ],
+        )
+        assert updated.document is not None
+        updated_output = updated.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(updated_output)) as after,
+        ):
+            self.assertEqual(
+                before.read("word/media/image1.png"),
+                after.read("word/media/image1.png"),
+            )
+            self.assertEqual(
+                before.read("word/_rels/document.xml.rels"),
+                after.read("word/_rels/document.xml.rels"),
+            )
+            updated_root = parse_xml(after.read("word/document.xml"))
+        source_rectangle = updated_root.find(f".//{_q(A, 'srcRect')}")
+        assert source_rectangle is not None
+        self.assertEqual(
+            source_rectangle.attrib,
+            {"l": "12345", "t": "6250"},
+        )
+        reopened_updated = Document.from_docx(updated_output)
+        self.assertEqual(
+            reopened_updated.to_spec()["content"][0]["crop"],
+            {
+                "left": 12.345,
+                "top": 6.25,
+                "right": 0.0,
+                "bottom": 0.0,
+            },
+        )
+        self.assertEqual(
+            reopened_updated.to_bytes("docx"),
+            updated_output,
+        )
+
+        cleared = reopened_updated.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "clear": ["crop"],
+                }
+            ]
+        )
+        self.assertTrue(cleared.success, cleared.model_dump())
+        assert cleared.document is not None
+        cleared_output = cleared.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(cleared_output)) as package:
+            cleared_root = parse_xml(package.read("word/document.xml"))
+            self.assertEqual(
+                package.read("word/media/image1.png"),
+                PNG,
+            )
+        self.assertIsNone(cleared_root.find(f".//{_q(A, 'srcRect')}"))
+        reopened_cleared = Document.from_docx(cleared_output)
+        self.assertNotIn(
+            "crop",
+            reopened_cleared.to_spec()["content"][0],
+        )
+        self.assertEqual(
+            reopened_cleared.to_bytes("docx"),
+            cleared_output,
+        )
+
+    def test_invalid_native_source_crops_remain_opaque(self) -> None:
+        for attributes, duplicate in (
+            ({"l": "-1"}, False),
+            ({"l": "90000", "r": "10000"}, False),
+            ({"l": "1000", "unexpected": "1"}, False),
+            ({"l": "1000"}, True),
+        ):
+            source = _image_document(cropped=True)
+            with ZipFile(io.BytesIO(source)) as archive:
+                document_root = parse_xml(
+                    archive.read("word/document.xml")
+                )
+            source_rectangle = document_root.find(
+                f".//{_q(A, 'srcRect')}"
+            )
+            assert source_rectangle is not None
+            source_rectangle.attrib.clear()
+            source_rectangle.attrib.update(attributes)
+            if duplicate:
+                parent = document_root.find(
+                    f".//{_q(PIC, 'blipFill')}"
+                )
+                assert parent is not None
+                parent.insert(
+                    list(parent).index(source_rectangle) + 1,
+                    copy.deepcopy(source_rectangle),
+                )
+            source = _rewrite_package(
+                source,
+                replacements={
+                    "word/document.xml": serialize_xml(document_root),
+                },
+                additions={},
+            )
+            with self.subTest(
+                attributes=attributes,
+                duplicate=duplicate,
+            ):
+                document = Document.from_docx(source)
+                self.assertEqual(
+                    document.to_spec()["content"][0]["type"],
+                    "opaque",
+                )
+                self.assertEqual(document.to_spec()["assets"], [])
+                self.assertEqual(document.to_bytes("docx"), source)
 
     def test_mismatched_picture_extents_remain_opaque(self) -> None:
         source = _image_document()
@@ -1178,6 +1365,26 @@ class DocxImageTests(unittest.TestCase):
                 "target": image["id"],
                 "set": {"width": {"value": 0, "unit": "pt"}},
             },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"crop": {}},
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "crop": {
+                        "left": 60,
+                        "right": 40,
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"crop": {"top": -0.001}},
+            },
         ]
         for operation in invalid_operations:
             with self.subTest(operation=operation):
@@ -1202,7 +1409,7 @@ class DocxImageTests(unittest.TestCase):
         )
 
     def test_image_replace_is_occurrence_scoped_copy_on_write(self) -> None:
-        source = _image_document()
+        source = _image_document(cropped=True)
         with ZipFile(io.BytesIO(source)) as archive:
             document_root = parse_xml(
                 archive.read("word/document.xml")
@@ -1327,6 +1534,19 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_images[0]["height"],
             {"value": 72.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            reopened_images[0]["crop"],
+            {
+                "left": 1.0,
+                "top": 2.0,
+                "right": 3.0,
+                "bottom": 4.0,
+            },
+        )
+        self.assertEqual(
+            reopened_images[1]["crop"],
+            reopened_images[0]["crop"],
         )
         self.assertEqual(
             reopened_images[0]["alt_text"],
@@ -1507,10 +1727,86 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(reopened.image_bytes(image["id"]), PNG)
 
+    def test_header_image_crop_is_story_local(self) -> None:
+        source = _header_image_document(cropped=True)
+        document = Document.from_docx(source)
+        image = document.to_spec()["header_footers"][0]["content"][0]
+        self.assertEqual(
+            image["crop"],
+            {
+                "left": 1.0,
+                "top": 2.0,
+                "right": 3.0,
+                "bottom": 4.0,
+            },
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "crop": {
+                            "left": 8,
+                            "right": 12,
+                            "top": 5,
+                            "bottom": 5,
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            self.assertEqual(
+                before.read("word/document.xml"),
+                after.read("word/document.xml"),
+            )
+            self.assertEqual(
+                before.read("word/_rels/header1.xml.rels"),
+                after.read("word/_rels/header1.xml.rels"),
+            )
+            self.assertEqual(
+                before.read("word/media/image1.png"),
+                after.read("word/media/image1.png"),
+            )
+            header_root = parse_xml(after.read("word/header1.xml"))
+        source_rectangle = header_root.find(f".//{_q(A, 'srcRect')}")
+        assert source_rectangle is not None
+        self.assertEqual(
+            source_rectangle.attrib,
+            {
+                "l": "8000",
+                "t": "5000",
+                "r": "12000",
+                "b": "5000",
+            },
+        )
+        reopened = Document.from_docx(output)
+        reopened_image = reopened.to_spec()["header_footers"][0][
+            "content"
+        ][0]
+        self.assertEqual(
+            reopened_image["crop"],
+            {
+                "left": 8.0,
+                "top": 5.0,
+                "right": 12.0,
+                "bottom": 5.0,
+            },
+        )
+        self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
     def test_cloned_header_image_can_be_replaced_copy_on_write(
         self,
     ) -> None:
-        source = _header_image_document()
+        source = _header_image_document(cropped=True)
         document = Document.from_docx(source)
         spec = document.to_spec()
         source_part = spec["header_footers"][0]
@@ -1546,6 +1842,7 @@ class DocxImageTests(unittest.TestCase):
             cloned_image["asset_id"],
             source_image["asset_id"],
         )
+        self.assertEqual(cloned_image["crop"], source_image["crop"])
 
         replaced = cloned.document.replace_image(
             cloned_image["id"],
@@ -1602,6 +1899,24 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened.image_bytes(source_image["id"]),
             PNG,
+        )
+        reopened_parts = {
+            part["id"]: part
+            for part in reopened.to_spec()["header_footers"]
+        }
+        reopened_source_image = next(
+            block
+            for block in reopened_parts[source_part["id"]]["content"]
+            if block["id"] == source_image["id"]
+        )
+        reopened_clone_image = next(
+            block
+            for block in reopened_parts[cloned_part["id"]]["content"]
+            if block["id"] == cloned_image["id"]
+        )
+        self.assertEqual(
+            reopened_clone_image["crop"],
+            reopened_source_image["crop"],
         )
         self.assertEqual(reopened.to_bytes("docx"), output)
 

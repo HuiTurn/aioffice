@@ -71,7 +71,7 @@ class DocumentTests(unittest.TestCase):
                 "content": [{"type": "paragraph", "text": "Legacy"}],
             }
         )
-        self.assertEqual(document.spec_version, "0.2-draft.32")
+        self.assertEqual(document.spec_version, "0.2-draft.33")
         self.assertEqual(
             document.to_spec()["$schema"],
             "https://schemas.aioffice.dev/spec/draft/0.2/document.json",

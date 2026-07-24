@@ -148,14 +148,19 @@ objects. Their cached display result is kept separate from the semantic instruct
 and never treated as authoritative text. Unknown field instructions are visible as
 read-only native fields. A paragraph containing exactly one conservative embedded
 inline DrawingML picture is projected as a stable `ImageBlock`: its bytes can be
-verified or extracted, and its accessibility metadata, extent, paragraph layout, or
-binary can be changed through the same native image APIs as a body picture.
+verified or extracted, and its accessibility metadata, extent, bounded rectangular
+source crop, paragraph layout, or binary can be changed through the same native
+image APIs as a body picture.
 
 Image replacement is occurrence-scoped copy-on-write and allocates the new
 relationship in the containing header/footer part. This makes the expert workflow
 safe: clone and bind a shared header in one Patch, then replace only the cloned logo
 in a subsequent transaction. The source story, source relationship, original media,
 and unrelated sections remain unchanged.
+
+The same story-local rule applies to `image.update`: changing or clearing a cloned
+logo's `crop` mutates only that cloned header/footer XML. The source story,
+relationship, and media payload remain byte-exact.
 
 Malformed field containment, complex drawings, embedded objects, tables, and unknown
 header/footer elements remain non-editable opaque blocks.
