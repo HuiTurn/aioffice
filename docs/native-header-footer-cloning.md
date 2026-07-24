@@ -54,6 +54,11 @@ cloned floating occurrence. The patch remains local to the cloned story and keep
 its rebased `wp14` identities, relationship graph, media, crop, extent, and source
 story unchanged.
 
+In `0.2.0.dev37`, the projected and clone-safe floating subset also accepts
+`wp:align` positioning. A later `image.anchor.update` can switch either complete
+position group between alignment and physical offset while preserving the cloned
+story's rebased native identities and local relationship graph.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

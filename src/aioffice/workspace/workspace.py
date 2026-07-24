@@ -182,7 +182,7 @@ class Workspace:
                     "recorded_binary": False,
                     "placements": [
                         "inline",
-                        "floating_offset_square_wrap",
+                        "floating_offset_or_alignment_square_wrap",
                     ],
                     "default_placement": "inline",
                 }

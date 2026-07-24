@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev36`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev37`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -25,8 +25,8 @@ rich table-cell paragraphs, explicit table/cell border control, paragraph
 background/border surfaces, conservative body and header/footer image projection,
 verified asset extraction, selective native image metadata and geometry updates,
 bounded rectangular source cropping,
-conservative floating-image anchor projection,
-selective floating-anchor layout updates,
+conservative offset/alignment floating-image anchor projection,
+selective floating-anchor layout updates and positioning-mode switches,
 occurrence-scoped copy-on-write image replacement, addressable native inline and
 floating image insertion, direct image-paragraph layout formatting, semantic diffs,
 isolated LibreOffice/Poppler native rendering, safe reusable native header/footer
@@ -281,6 +281,18 @@ result = doc.insert_image_after(
 )
 ```
 
+Each horizontal or vertical position uses exactly one mode: an explicit-unit
+`offset`, as above, or a semantic `alignment`. For example, a picture centered
+within the margins and the physical page uses:
+
+```python
+floating = {
+    "horizontal": {"relative_to": "margin", "alignment": "center"},
+    "vertical": {"relative_to": "page", "alignment": "center"},
+    # The same complete wrap and flag fields shown above are still required.
+}
+```
+
 The target must be a mapped top-level body node. AiOffice inserts after its last
 native element, which keeps multi-paragraph lists addressable as one semantic node.
 The new paragraph, DrawingML geometry, relationship, asset and identity manifest are
@@ -305,13 +317,13 @@ revision log.
 
 The read path re-resolves the trusted native paragraph and its story-local OPC
 relationship, then verifies the asset record, media type, size, and content hash
-before returning bytes. Mixed text/picture paragraphs, floating alignment or
-simple-position anchors, non-square or polygon wrapping, linked images, multiple
-pictures, negative or overconstrained crop rectangles, transforms, effects,
-drawings in tables, complex header/footer drawings, VML, OLE, and embedded objects
-remain explicit opaque native content. They are preserved losslessly and rendered
-through the native provider rather than flattened into a misleading image model. See
-[the native image and asset contract](docs/native-images.md).
+before returning bytes. Mixed text/picture paragraphs, active simple-position or
+percentage-position anchors, non-square or polygon wrapping, linked images,
+multiple pictures, negative or overconstrained crop rectangles, transforms,
+effects, drawings in tables, complex header/footer drawings, VML, OLE, and embedded
+objects remain explicit opaque native content. They are preserved losslessly and
+rendered through the native provider rather than flattened into a misleading image
+model. See [the native image and asset contract](docs/native-images.md).
 
 AiOffice-generated DOCX files embed a versioned identity manifest. Artifact IDs,
 semantic node IDs, native anchors, and revisions therefore survive export and reopen.

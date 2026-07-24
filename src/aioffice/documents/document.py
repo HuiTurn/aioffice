@@ -779,7 +779,10 @@ class Document:
                             else None
                         ),
                         floating=(
-                            node.floating.model_dump(mode="json")
+                            node.floating.model_dump(
+                                mode="json",
+                                exclude_none=True,
+                            )
                             if node.floating is not None
                             else None
                         ),
@@ -921,7 +924,8 @@ class Document:
                                         "placement": block.placement,
                                         "floating": (
                                             block.floating.model_dump(
-                                                mode="json"
+                                                mode="json",
+                                                exclude_none=True,
                                             )
                                             if block.floating is not None
                                             else None
@@ -1204,7 +1208,7 @@ class Document:
                 ],
                 "projected_placements": [
                     "inline",
-                    "floating_offset_square_wrap",
+                    "floating_offset_or_alignment_square_wrap",
                 ],
                 "floating_layout_editable": True,
                 "floating_layout_update_operation": (
@@ -1223,6 +1227,24 @@ class Document:
                 "floating_layout_group_update": (
                     "horizontal_vertical_and_wrap_are_complete_objects"
                 ),
+                "floating_position_modes": [
+                    "offset",
+                    "alignment",
+                ],
+                "floating_horizontal_alignments": [
+                    "left",
+                    "right",
+                    "center",
+                    "inside",
+                    "outside",
+                ],
+                "floating_vertical_alignments": [
+                    "top",
+                    "bottom",
+                    "center",
+                    "inside",
+                    "outside",
+                ],
                 "floating_layout_clearable_fields": [],
                 "floating_layout_authority": "native_docx_and_render",
                 "crop_unit": "percentage_points",
@@ -1258,12 +1280,13 @@ class Document:
                 ),
                 "native_insert_operation": "image.insert_after",
                 "insert_placement": (
-                    "caller_selected_inline_or_floating_offset_square_wrap"
+                    "caller_selected_inline_or_floating_"
+                    "offset_or_alignment_square_wrap"
                 ),
                 "insert_default_placement": "inline",
                 "insert_placements": [
                     "inline",
-                    "floating_offset_square_wrap",
+                    "floating_offset_or_alignment_square_wrap",
                 ],
                 "insert_floating_layout_schema": (
                     "floating-image-layout"
@@ -1291,8 +1314,8 @@ class Document:
                 "supported_native_subset": [
                     "one embedded DrawingML picture",
                     (
-                        "inline placement or conservative floating offset "
-                        "placement with square text wrap"
+                        "inline placement or conservative floating offset/"
+                        "alignment placement with square text wrap"
                     ),
                     "explicit positive extent",
                     "rectangular stretch fill",
@@ -1302,14 +1325,18 @@ class Document:
                     ),
                     "no rotation, flip, visible outline, or visual effect",
                     (
+                        "optional LibreOffice-neutral bwMode auto and empty "
+                        "shape no-fill"
+                    ),
+                    (
                         "body, header, or footer paragraph with no other "
                         "visible content"
                     ),
                 ],
                 "opaque_native_cases": [
                     (
-                        "floating alignment, simple-position, non-square wrap, "
-                        "relative-size, or malformed anchor"
+                        "active simple-position, non-square wrap, relative-"
+                        "size, percentage-position, or malformed anchor"
                     ),
                     "text and drawing in one paragraph",
                     "multiple pictures",

@@ -98,6 +98,20 @@
 - Kept floating insertion on the existing bounded out-of-band binary channel,
   persisted only placement/layout and verified asset metadata, and made every
   inserted floating occurrence immediately readable and anchor-editable.
+- Extended the conservative floating picture projection to native `wp:align`
+  positioning in body, header, and footer stories, covering the complete horizontal
+  and vertical alignment vocabularies without weakening the existing anchor proof.
+- Made each position object require exactly one of physical `offset` or semantic
+  `alignment`, published that constraint as machine-readable JSON Schema `oneOf`,
+  and taught `image.anchor.update` to switch the native child safely in either
+  direction.
+- Extended floating insertion, compact inspection, capability discovery, Workspace
+  metadata, cloning, image update, and binary replacement to preserve and re-prove
+  alignment-positioned anchors.
+- Accepted LibreOffice's visually neutral picture normalization
+  (`pic:spPr/@bwMode="auto"` and at most one empty `a:noFill`) so aligned pictures
+  remain projected and editable after an Office-compatible open/save cycle, while
+  refusing non-default black-and-white modes and ambiguous fill structures.
 - Preserved story-local relationship semantics while replacing a cloned header or
   footer logo copy-on-write, leaving the source story, relationship, media, body, and
   unrelated pages untouched.
@@ -453,6 +467,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.34`.
 - Advanced the AiOffice Document Spec to `0.2-draft.35`.
 - Advanced the AiOffice Document Spec to `0.2-draft.36`.
+- Advanced the AiOffice Document Spec to `0.2-draft.37`.
 
 ## 0.1.0
 

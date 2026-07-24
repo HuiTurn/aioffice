@@ -440,7 +440,10 @@ def _paragraph_projection(
                 else None
             ),
             "floating": (
-                native_image.floating.model_dump(mode="json")
+                native_image.floating.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
                 if native_image.floating is not None
                 else None
             ),

@@ -142,6 +142,20 @@ VerticalRelativeTo: TypeAlias = Literal[
     "top_margin",
 ]
 WrapSide: TypeAlias = Literal["both_sides", "largest", "left", "right"]
+HorizontalAlignment: TypeAlias = Literal[
+    "left",
+    "right",
+    "center",
+    "inside",
+    "outside",
+]
+VerticalAlignment: TypeAlias = Literal[
+    "top",
+    "bottom",
+    "center",
+    "inside",
+    "outside",
+]
 
 _HORIZONTAL_RELATIVE_FROM: dict[str, HorizontalRelativeTo] = {
     "character": "character",
@@ -169,6 +183,12 @@ _WRAP_SIDES: dict[str, WrapSide] = {
     "left": "left",
     "right": "right",
 }
+_HORIZONTAL_ALIGNMENTS: frozenset[str] = frozenset(
+    {"left", "right", "center", "inside", "outside"}
+)
+_VERTICAL_ALIGNMENTS: frozenset[str] = frozenset(
+    {"top", "bottom", "center", "inside", "outside"}
+)
 _HORIZONTAL_RELATIVE_TO_NATIVE = {
     value: key for key, value in _HORIZONTAL_RELATIVE_FROM.items()
 }
@@ -195,6 +215,24 @@ def _emu_length(value: int) -> Length:
     )
 
 
+def _native_position_value(
+    *,
+    offset: Length | None,
+    alignment: str | None,
+    allowed_alignments: frozenset[str],
+) -> tuple[str, str] | None:
+    if (offset is None) == (alignment is None):
+        return None
+    if offset is not None:
+        offset_emu = round(offset.to_points() * EMU_PER_POINT)
+        if offset_emu < -(2**63) or offset_emu > 2**63 - 1:
+            return None
+        return "posOffset", str(offset_emu)
+    if alignment not in allowed_alignments:
+        return None
+    return "align", alignment
+
+
 def floating_image_layout_matches(
     left: FloatingImageLayout | None,
     right: FloatingImageLayout | None,
@@ -207,11 +245,33 @@ def floating_image_layout_matches(
     def emu(length: Length) -> int:
         return round(length.to_points() * EMU_PER_POINT)
 
+    def position_matches(
+        left_offset: Length | None,
+        left_alignment: str | None,
+        right_offset: Length | None,
+        right_alignment: str | None,
+    ) -> bool:
+        if left_alignment != right_alignment:
+            return False
+        if left_offset is None or right_offset is None:
+            return left_offset is right_offset
+        return emu(left_offset) == emu(right_offset)
+
     return (
         left.horizontal.relative_to == right.horizontal.relative_to
-        and emu(left.horizontal.offset) == emu(right.horizontal.offset)
+        and position_matches(
+            left.horizontal.offset,
+            left.horizontal.alignment,
+            right.horizontal.offset,
+            right.horizontal.alignment,
+        )
         and left.vertical.relative_to == right.vertical.relative_to
-        and emu(left.vertical.offset) == emu(right.vertical.offset)
+        and position_matches(
+            left.vertical.offset,
+            left.vertical.alignment,
+            right.vertical.offset,
+            right.vertical.alignment,
+        )
         and left.wrap.mode == right.wrap.mode
         and left.wrap.side == right.wrap.side
         and emu(left.wrap.distance_top)
@@ -332,7 +392,8 @@ def _floating_image_layout(
     def position(
         element: ET.Element,
         relative_values: Mapping[str, str],
-    ) -> tuple[str, Length] | None:
+        allowed_alignments: frozenset[str],
+    ) -> tuple[str, Length | None, str | None] | None:
         if set(element.attrib) != {"relativeFrom"}:
             return None
         relative_to = relative_values.get(element.attrib["relativeFrom"])
@@ -340,21 +401,36 @@ def _floating_image_layout(
         if (
             relative_to is None
             or len(children) != 1
-            or children[0].tag != _q(WP, "posOffset")
             or children[0].attrib
             or len(children[0])
         ):
             return None
+        child = children[0]
+        if child.tag == _q(WP, "align"):
+            alignment = child.text or ""
+            if alignment not in allowed_alignments:
+                return None
+            return relative_to, None, alignment
+        if child.tag != _q(WP, "posOffset"):
+            return None
         try:
-            offset = int(children[0].text or "")
+            offset = int(child.text or "")
         except ValueError:
             return None
         if offset < -(2**63) or offset > 2**63 - 1:
             return None
-        return relative_to, _emu_length(offset)
+        return relative_to, _emu_length(offset), None
 
-    horizontal_position = position(horizontal, _HORIZONTAL_RELATIVE_FROM)
-    vertical_position = position(vertical, _VERTICAL_RELATIVE_FROM)
+    horizontal_position = position(
+        horizontal,
+        _HORIZONTAL_RELATIVE_FROM,
+        _HORIZONTAL_ALIGNMENTS,
+    )
+    vertical_position = position(
+        vertical,
+        _VERTICAL_RELATIVE_FROM,
+        _VERTICAL_ALIGNMENTS,
+    )
     if horizontal_position is None or vertical_position is None:
         return None
 
@@ -397,19 +473,41 @@ def _floating_image_layout(
         return None
 
     return FloatingImageLayout(
-        horizontal=FloatingImageHorizontalPosition(
-            relative_to=cast(
-                HorizontalRelativeTo,
-                horizontal_position[0],
-            ),
-            offset=horizontal_position[1],
+        horizontal=FloatingImageHorizontalPosition.model_validate(
+            {
+                "relative_to": cast(
+                    HorizontalRelativeTo,
+                    horizontal_position[0],
+                ),
+                **(
+                    {"offset": horizontal_position[1]}
+                    if horizontal_position[1] is not None
+                    else {
+                        "alignment": cast(
+                            HorizontalAlignment,
+                            horizontal_position[2],
+                        )
+                    }
+                ),
+            }
         ),
-        vertical=FloatingImageVerticalPosition(
-            relative_to=cast(
-                VerticalRelativeTo,
-                vertical_position[0],
-            ),
-            offset=vertical_position[1],
+        vertical=FloatingImageVerticalPosition.model_validate(
+            {
+                "relative_to": cast(
+                    VerticalRelativeTo,
+                    vertical_position[0],
+                ),
+                **(
+                    {"offset": vertical_position[1]}
+                    if vertical_position[1] is not None
+                    else {
+                        "alignment": cast(
+                            VerticalAlignment,
+                            vertical_position[2],
+                        )
+                    }
+                ),
+            }
         ),
         wrap=FloatingImageTextWrap(
             side=cast(WrapSide, wrap_side),
@@ -634,7 +732,10 @@ def simple_native_image(
                     for edge, value in crop_values.items()
                 }
             )
-    if shape_properties.attrib:
+    if any(
+        attribute != "bwMode"
+        for attribute in shape_properties.attrib
+    ) or shape_properties.attrib.get("bwMode") not in {None, "auto"}:
         return None
     preset_geometry = shape_properties.find(
         f"./{_q(A, 'prstGeom')}"
@@ -648,11 +749,18 @@ def simple_native_image(
     allowed_shape_children = {
         _q(A, "xfrm"),
         _q(A, "prstGeom"),
+        _q(A, "noFill"),
         _q(A, "ln"),
     }
     if any(
         child.tag not in allowed_shape_children
         for child in shape_properties
+    ):
+        return None
+    no_fills = shape_properties.findall(f"./{_q(A, 'noFill')}")
+    if (
+        len(no_fills) > 1
+        or any(no_fill.attrib or len(no_fill) for no_fill in no_fills)
     ):
         return None
     transforms = shape_properties.findall(f"./{_q(A, 'xfrm')}")
@@ -977,31 +1085,32 @@ def patch_simple_native_image_anchor(
         name: str,
         *,
         relative_to: str,
-        offset: Length,
+        offset: Length | None,
+        alignment: str | None,
         native_frames: Mapping[str, str],
+        allowed_alignments: frozenset[str],
     ) -> None:
         element = anchor.find(f"./{_q(WP, name)}")
-        offset_element = (
-            element.find(f"./{_q(WP, 'posOffset')}")
-            if element is not None
-            else None
-        )
-        if element is None or offset_element is None:
+        if element is None or len(element) != 1:
             raise NativePackageError(
-                f"Supported floating picture has no wp:{name}/wp:posOffset."
+                f"Supported floating picture has invalid wp:{name}."
             )
         native_frame = native_frames.get(relative_to)
-        offset_emu = round(offset.to_points() * EMU_PER_POINT)
-        if (
-            native_frame is None
-            or offset_emu < -(2**63)
-            or offset_emu > 2**63 - 1
-        ):
+        native_value = _native_position_value(
+            offset=offset,
+            alignment=alignment,
+            allowed_alignments=allowed_alignments,
+        )
+        if native_frame is None or native_value is None:
             raise NativePackageError(
                 f"image.anchor.update {name} is outside the supported range."
             )
         element.set("relativeFrom", native_frame)
-        offset_element.text = str(offset_emu)
+        element.remove(element[0])
+        ET.SubElement(
+            element,
+            _q(WP, native_value[0]),
+        ).text = native_value[1]
 
     layout = result.floating
     if "horizontal" in fields:
@@ -1009,14 +1118,18 @@ def patch_simple_native_image_anchor(
             "positionH",
             relative_to=layout.horizontal.relative_to,
             offset=layout.horizontal.offset,
+            alignment=layout.horizontal.alignment,
             native_frames=_HORIZONTAL_RELATIVE_TO_NATIVE,
+            allowed_alignments=_HORIZONTAL_ALIGNMENTS,
         )
     if "vertical" in fields:
         position(
             "positionV",
             relative_to=layout.vertical.relative_to,
             offset=layout.vertical.offset,
+            alignment=layout.vertical.alignment,
             native_frames=_VERTICAL_RELATIVE_TO_NATIVE,
+            allowed_alignments=_VERTICAL_ALIGNMENTS,
         )
     if "wrap" in fields:
         native_wrap_side = _WRAP_SIDE_TO_NATIVE.get(layout.wrap.side)
@@ -1397,11 +1510,15 @@ def insert_simple_native_image_after(
             layout.vertical.relative_to
         )
         wrap_side = _WRAP_SIDE_TO_NATIVE.get(layout.wrap.side)
-        horizontal_offset = round(
-            layout.horizontal.offset.to_points() * EMU_PER_POINT
+        horizontal_value = _native_position_value(
+            offset=layout.horizontal.offset,
+            alignment=layout.horizontal.alignment,
+            allowed_alignments=_HORIZONTAL_ALIGNMENTS,
         )
-        vertical_offset = round(
-            layout.vertical.offset.to_points() * EMU_PER_POINT
+        vertical_value = _native_position_value(
+            offset=layout.vertical.offset,
+            alignment=layout.vertical.alignment,
+            allowed_alignments=_VERTICAL_ALIGNMENTS,
         )
         distances = {
             attribute_name: round(
@@ -1419,10 +1536,8 @@ def insert_simple_native_image_after(
             horizontal_frame is None
             or vertical_frame is None
             or wrap_side is None
-            or horizontal_offset < -(2**63)
-            or horizontal_offset > 2**63 - 1
-            or vertical_offset < -(2**63)
-            or vertical_offset > 2**63 - 1
+            or horizontal_value is None
+            or vertical_value is None
             or any(
                 value < 0 or value > 2**32 - 1
                 for value in distances.values()
@@ -1464,8 +1579,8 @@ def insert_simple_native_image_after(
         )
         ET.SubElement(
             horizontal,
-            _q(WP, "posOffset"),
-        ).text = str(horizontal_offset)
+            _q(WP, horizontal_value[0]),
+        ).text = horizontal_value[1]
         vertical = ET.SubElement(
             placement,
             _q(WP, "positionV"),
@@ -1473,8 +1588,8 @@ def insert_simple_native_image_after(
         )
         ET.SubElement(
             vertical,
-            _q(WP, "posOffset"),
-        ).text = str(vertical_offset)
+            _q(WP, vertical_value[0]),
+        ).text = vertical_value[1]
     else:
         placement = ET.SubElement(drawing, _q(WP, "inline"))
     ET.SubElement(

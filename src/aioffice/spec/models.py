@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -17,7 +18,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.36"
+SPEC_VERSION = "0.2-draft.37"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1041,6 +1042,30 @@ class ImageCrop(StrictModel):
 class FloatingImageHorizontalPosition(StrictModel):
     """Horizontal position of a floating image relative to a Word layout frame."""
 
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+        allow_inf_nan=False,
+        json_schema_extra={
+            "oneOf": [
+                {
+                    "required": ["offset"],
+                    "properties": {
+                        "offset": {"not": {"type": "null"}},
+                    },
+                    "not": {"required": ["alignment"]},
+                },
+                {
+                    "required": ["alignment"],
+                    "properties": {
+                        "alignment": {"not": {"type": "null"}},
+                    },
+                    "not": {"required": ["offset"]},
+                },
+            ]
+        },
+    )
+
     relative_to: Literal[
         "character",
         "column",
@@ -1051,20 +1076,77 @@ class FloatingImageHorizontalPosition(StrictModel):
         "page",
         "right_margin",
     ]
-    offset: Length
+    offset: Length | None = None
+    alignment: Literal[
+        "left",
+        "right",
+        "center",
+        "inside",
+        "outside",
+    ] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_position_mode(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            modes = {
+                field_name
+                for field_name in ("offset", "alignment")
+                if field_name in value
+            }
+            if (
+                len(modes) != 1
+                or value[next(iter(modes))] is None
+            ):
+                raise ValueError(
+                    "Floating image horizontal position requires exactly "
+                    "one non-null offset or alignment."
+                )
+        return value
 
     @model_validator(mode="after")
     def validate_offset(self) -> "FloatingImageHorizontalPosition":
-        emu = round(self.offset.to_points() * 12_700)
-        if emu < -(2**63) or emu > 2**63 - 1:
+        if (self.offset is None) == (self.alignment is None):
             raise ValueError(
-                "Floating image horizontal offset must fit an OOXML Int64 EMU."
+                "Floating image horizontal position requires exactly one of "
+                "offset or alignment."
             )
+        if self.offset is not None:
+            emu = round(self.offset.to_points() * 12_700)
+            if emu < -(2**63) or emu > 2**63 - 1:
+                raise ValueError(
+                    "Floating image horizontal offset must fit an OOXML "
+                    "Int64 EMU."
+                )
         return self
 
 
 class FloatingImageVerticalPosition(StrictModel):
     """Vertical position of a floating image relative to a Word layout frame."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+        allow_inf_nan=False,
+        json_schema_extra={
+            "oneOf": [
+                {
+                    "required": ["offset"],
+                    "properties": {
+                        "offset": {"not": {"type": "null"}},
+                    },
+                    "not": {"required": ["alignment"]},
+                },
+                {
+                    "required": ["alignment"],
+                    "properties": {
+                        "alignment": {"not": {"type": "null"}},
+                    },
+                    "not": {"required": ["offset"]},
+                },
+            ]
+        },
+    )
 
     relative_to: Literal[
         "bottom_margin",
@@ -1076,15 +1158,48 @@ class FloatingImageVerticalPosition(StrictModel):
         "paragraph",
         "top_margin",
     ]
-    offset: Length
+    offset: Length | None = None
+    alignment: Literal[
+        "top",
+        "bottom",
+        "center",
+        "inside",
+        "outside",
+    ] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_position_mode(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            modes = {
+                field_name
+                for field_name in ("offset", "alignment")
+                if field_name in value
+            }
+            if (
+                len(modes) != 1
+                or value[next(iter(modes))] is None
+            ):
+                raise ValueError(
+                    "Floating image vertical position requires exactly "
+                    "one non-null offset or alignment."
+                )
+        return value
 
     @model_validator(mode="after")
     def validate_offset(self) -> "FloatingImageVerticalPosition":
-        emu = round(self.offset.to_points() * 12_700)
-        if emu < -(2**63) or emu > 2**63 - 1:
+        if (self.offset is None) == (self.alignment is None):
             raise ValueError(
-                "Floating image vertical offset must fit an OOXML Int64 EMU."
+                "Floating image vertical position requires exactly one of "
+                "offset or alignment."
             )
+        if self.offset is not None:
+            emu = round(self.offset.to_points() * 12_700)
+            if emu < -(2**63) or emu > 2**63 - 1:
+                raise ValueError(
+                    "Floating image vertical offset must fit an OOXML "
+                    "Int64 EMU."
+                )
         return self
 
 
@@ -1117,7 +1232,7 @@ class FloatingImageTextWrap(StrictModel):
 
 
 class FloatingImageLayout(StrictModel):
-    """Read-only, lossless evidence for one conservative Word floating anchor."""
+    """Lossless layout for one conservative Word floating anchor."""
 
     horizontal: FloatingImageHorizontalPosition
     vertical: FloatingImageVerticalPosition
@@ -1415,6 +1530,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.34",
         "0.2-draft.35",
         "0.2-draft.36",
+        "0.2-draft.37",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

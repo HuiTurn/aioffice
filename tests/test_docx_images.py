@@ -89,9 +89,12 @@ def _image_document(
     preceding_text: str | None = None,
     mixed_text: str | None = None,
     anchored: bool = False,
+    aligned: bool = False,
     cropped: bool = False,
     alt_text: str | None = "A compact expert workflow diagram",
 ) -> bytes:
+    if aligned and not anchored:
+        raise ValueError("Aligned positioning requires a floating anchor.")
     builder = DocumentBuilder()
     if preceding_text is not None:
         builder.paragraph(preceding_text, id="before")
@@ -151,15 +154,21 @@ def _image_document(
         horizontal = ET.SubElement(
             placement,
             _q(WP, "positionH"),
-            {"relativeFrom": "column"},
+            {"relativeFrom": "margin" if aligned else "column"},
         )
-        ET.SubElement(horizontal, _q(WP, "posOffset")).text = "457200"
+        ET.SubElement(
+            horizontal,
+            _q(WP, "align" if aligned else "posOffset"),
+        ).text = "center" if aligned else "457200"
         vertical = ET.SubElement(
             placement,
             _q(WP, "positionV"),
-            {"relativeFrom": "paragraph"},
+            {"relativeFrom": "page" if aligned else "paragraph"},
         )
-        ET.SubElement(vertical, _q(WP, "posOffset")).text = "5080"
+        ET.SubElement(
+            vertical,
+            _q(WP, "align" if aligned else "posOffset"),
+        ).text = "bottom" if aligned else "5080"
     ET.SubElement(
         placement,
         _q(WP, "extent"),
@@ -290,9 +299,14 @@ def _header_image_document(
     kind: str = "header",
     cropped: bool = False,
     anchored: bool = False,
+    aligned: bool = False,
 ) -> bytes:
     assert kind in {"header", "footer"}
-    body_image = _image_document(cropped=cropped, anchored=anchored)
+    body_image = _image_document(
+        cropped=cropped,
+        anchored=anchored,
+        aligned=aligned,
+    )
     with ZipFile(io.BytesIO(body_image)) as archive:
         image_document = parse_xml(
             archive.read("word/document.xml")
@@ -397,11 +411,11 @@ class DocxImageTests(unittest.TestCase):
             ),
             (
                 "floating-image-horizontal-position",
-                {"relative_to", "offset"},
+                {"relative_to", "offset", "alignment"},
             ),
             (
                 "floating-image-vertical-position",
-                {"relative_to", "offset"},
+                {"relative_to", "offset", "alignment"},
             ),
             (
                 "floating-image-text-wrap",
@@ -472,6 +486,23 @@ class DocxImageTests(unittest.TestCase):
             self.assertTrue(
                 required_properties.issubset(schema["properties"])
             )
+            if kind in {
+                "floating-image-horizontal-position",
+                "floating-image-vertical-position",
+            }:
+                self.assertEqual(
+                    {
+                        tuple(branch["required"])
+                        for branch in schema["oneOf"]
+                    },
+                    {("offset",), ("alignment",)},
+                )
+                for branch in schema["oneOf"]:
+                    mode = branch["required"][0]
+                    self.assertEqual(
+                        branch["properties"][mode],
+                        {"not": {"type": "null"}},
+                    )
             if kind == "header-footer-image-block":
                 capabilities = schema["properties"]["capabilities"]
                 self.assertEqual(
@@ -491,7 +522,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.36")
+        self.assertEqual(spec["spec_version"], "0.2-draft.37")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -808,6 +839,214 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(replaced_image["crop"], updated["crop"])
         self.assertEqual(replaced.document.image_bytes(image["id"]), JPEG)
 
+    def test_floating_alignment_positions_project_switch_and_roundtrip(
+        self,
+    ) -> None:
+        source = _image_document(
+            anchored=True,
+            aligned=True,
+            cropped=True,
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(
+            image["floating"]["horizontal"],
+            {
+                "relative_to": "margin",
+                "alignment": "center",
+            },
+        )
+        self.assertEqual(
+            image["floating"]["vertical"],
+            {
+                "relative_to": "page",
+                "alignment": "bottom",
+            },
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+        self.assertEqual(
+            document.inspect()["nodes"][0]["floating"],
+            image["floating"],
+        )
+        capabilities = document.capabilities()["assets"]
+        self.assertEqual(
+            capabilities["projected_placements"],
+            [
+                "inline",
+                "floating_offset_or_alignment_square_wrap",
+            ],
+        )
+        self.assertEqual(
+            capabilities["floating_position_modes"],
+            ["offset", "alignment"],
+        )
+        self.assertEqual(
+            capabilities["floating_horizontal_alignments"],
+            ["left", "right", "center", "inside", "outside"],
+        )
+        self.assertEqual(
+            capabilities["floating_vertical_alignments"],
+            ["top", "bottom", "center", "inside", "outside"],
+        )
+
+        switched = document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": {
+                        "horizontal": {
+                            "relative_to": "page",
+                            "offset": {"value": 48, "unit": "pt"},
+                        },
+                        "vertical": {
+                            "relative_to": "margin",
+                            "alignment": "top",
+                        },
+                    },
+                }
+            ]
+        )
+        self.assertTrue(switched.success, switched.model_dump())
+        assert switched.document is not None
+        switched_image = switched.document.to_spec()["content"][0]
+        self.assertEqual(
+            switched_image["floating"]["horizontal"],
+            {
+                "relative_to": "page",
+                "offset": {"value": 48.0, "unit": "pt"},
+            },
+        )
+        self.assertEqual(
+            switched_image["floating"]["vertical"],
+            {
+                "relative_to": "margin",
+                "alignment": "top",
+            },
+        )
+        switched_bytes = switched.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(switched_bytes)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        horizontal = root.find(f".//{_q(WP, 'positionH')}")
+        vertical = root.find(f".//{_q(WP, 'positionV')}")
+        assert horizontal is not None
+        assert vertical is not None
+        self.assertEqual(
+            [child.tag for child in horizontal],
+            [_q(WP, "posOffset")],
+        )
+        self.assertEqual(horizontal[0].text, "609600")
+        self.assertEqual(
+            [child.tag for child in vertical],
+            [_q(WP, "align")],
+        )
+        self.assertEqual(vertical[0].text, "top")
+
+        reopened = Document.from_docx(switched_bytes)
+        restored = reopened.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": {
+                        "horizontal": {
+                            "relative_to": "outside_margin",
+                            "alignment": "outside",
+                        },
+                        "vertical": {
+                            "relative_to": "paragraph",
+                            "offset": {"value": -12, "unit": "pt"},
+                        },
+                    },
+                }
+            ]
+        )
+        self.assertTrue(restored.success, restored.model_dump())
+        assert restored.document is not None
+        restored_bytes = restored.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(restored_bytes)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        horizontal = root.find(f".//{_q(WP, 'positionH')}")
+        vertical = root.find(f".//{_q(WP, 'positionV')}")
+        assert horizontal is not None
+        assert vertical is not None
+        self.assertEqual(horizontal.get("relativeFrom"), "outsideMargin")
+        self.assertEqual(horizontal[0].tag, _q(WP, "align"))
+        self.assertEqual(horizontal[0].text, "outside")
+        self.assertEqual(vertical.get("relativeFrom"), "paragraph")
+        self.assertEqual(vertical[0].tag, _q(WP, "posOffset"))
+        self.assertEqual(vertical[0].text, "-152400")
+        roundtripped = Document.from_docx(restored_bytes)
+        self.assertEqual(
+            roundtripped.to_spec()["content"][0]["floating"],
+            restored.document.to_spec()["content"][0]["floating"],
+        )
+        self.assertEqual(
+            roundtripped.image_bytes(image["id"]),
+            PNG,
+        )
+
+    def test_libreoffice_neutral_picture_normalization_is_editable(
+        self,
+    ) -> None:
+        source = _image_document(
+            anchored=True,
+            aligned=True,
+            cropped=True,
+        )
+        with ZipFile(io.BytesIO(source)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        shape = root.find(f".//{_q(PIC, 'spPr')}")
+        assert shape is not None
+        shape.set("bwMode", "auto")
+        ET.SubElement(shape, _q(A, "noFill"))
+        normalized = _rewrite_package(
+            source,
+            replacements={
+                "word/document.xml": serialize_xml(root),
+            },
+            additions={},
+        )
+        document = Document.from_docx(normalized)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(image["type"], "image")
+        self.assertEqual(
+            image["floating"]["horizontal"]["alignment"],
+            "center",
+        )
+        self.assertEqual(document.to_bytes("docx"), normalized)
+
+        updated = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "alt_text": (
+                            "LibreOffice-normalized aligned picture"
+                        )
+                    },
+                }
+            ]
+        )
+        self.assertTrue(updated.success, updated.model_dump())
+        assert updated.document is not None
+        output = updated.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        shape = root.find(f".//{_q(PIC, 'spPr')}")
+        assert shape is not None
+        self.assertEqual(shape.attrib, {"bwMode": "auto"})
+        no_fills = shape.findall(f"./{_q(A, 'noFill')}")
+        self.assertEqual(len(no_fills), 1)
+        self.assertFalse(no_fills[0].attrib)
+        self.assertFalse(len(no_fills[0]))
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            reopened.to_spec()["content"][0]["floating"],
+            image["floating"],
+        )
+
     def test_floating_anchor_update_is_selective_and_roundtrips(
         self,
     ) -> None:
@@ -1018,6 +1257,46 @@ class DocxImageTests(unittest.TestCase):
                 "op": "image.anchor.update",
                 "target": image["id"],
                 "set": {
+                    "horizontal": {
+                        "relative_to": "page",
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "horizontal": {
+                        "relative_to": "page",
+                        "alignment": None,
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "horizontal": {
+                        "relative_to": "page",
+                        "offset": {"value": 12, "unit": "pt"},
+                        "alignment": "center",
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "vertical": {
+                        "relative_to": "page",
+                        "alignment": "middle",
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
                     "wrap": {
                         "mode": "square",
                         "side": "left",
@@ -1188,9 +1467,12 @@ class DocxImageTests(unittest.TestCase):
 
     def test_unsupported_floating_anchor_variants_remain_opaque(self) -> None:
         cases = (
-            "alignment_position",
+            "duplicate_position_mode",
+            "invalid_alignment_position",
             "simple_position",
             "non_square_wrap",
+            "nondefault_bw_mode",
+            "duplicate_no_fill",
             "negative_distance",
             "malformed_extension_id",
             "missing_required_attribute",
@@ -1201,12 +1483,16 @@ class DocxImageTests(unittest.TestCase):
                 root = parse_xml(archive.read("word/document.xml"))
             anchor = root.find(f".//{_q(WP, 'anchor')}")
             assert anchor is not None
-            if case == "alignment_position":
+            if case == "duplicate_position_mode":
+                position = anchor.find(f"./{_q(WP, 'positionH')}")
+                assert position is not None
+                ET.SubElement(position, _q(WP, "align")).text = "center"
+            elif case == "invalid_alignment_position":
                 position = anchor.find(f"./{_q(WP, 'positionH')}")
                 assert position is not None
                 position.clear()
                 position.attrib["relativeFrom"] = "margin"
-                ET.SubElement(position, _q(WP, "align")).text = "center"
+                ET.SubElement(position, _q(WP, "align")).text = "middle"
             elif case == "simple_position":
                 anchor.attrib["simplePos"] = "1"
             elif case == "non_square_wrap":
@@ -1214,6 +1500,15 @@ class DocxImageTests(unittest.TestCase):
                 assert wrap is not None
                 wrap.tag = _q(WP, "wrapNone")
                 wrap.attrib.clear()
+            elif case == "nondefault_bw_mode":
+                shape = anchor.find(f".//{_q(PIC, 'spPr')}")
+                assert shape is not None
+                shape.set("bwMode", "gray")
+            elif case == "duplicate_no_fill":
+                shape = anchor.find(f".//{_q(PIC, 'spPr')}")
+                assert shape is not None
+                ET.SubElement(shape, _q(A, "noFill"))
+                ET.SubElement(shape, _q(A, "noFill"))
             elif case == "negative_distance":
                 anchor.attrib["distL"] = "-1"
             elif case == "malformed_extension_id":
@@ -2580,6 +2875,99 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(reopened.image_bytes(image["id"]), PNG)
         self.assertEqual(reopened.to_bytes("docx"), output)
 
+    def test_aligned_floating_header_anchor_update_is_story_local(
+        self,
+    ) -> None:
+        source = _header_image_document(
+            anchored=True,
+            aligned=True,
+            cropped=True,
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["header_footers"][0]["content"][0]
+        self.assertEqual(
+            image["floating"]["horizontal"],
+            {
+                "relative_to": "margin",
+                "alignment": "center",
+            },
+        )
+        self.assertEqual(
+            image["floating"]["vertical"],
+            {
+                "relative_to": "page",
+                "alignment": "bottom",
+            },
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": {
+                        "horizontal": {
+                            "relative_to": "inside_margin",
+                            "alignment": "inside",
+                        },
+                        "vertical": {
+                            "relative_to": "paragraph",
+                            "offset": {"value": 6, "unit": "pt"},
+                        },
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            self.assertEqual(
+                before.read("word/document.xml"),
+                after.read("word/document.xml"),
+            )
+            self.assertEqual(
+                before.read("word/_rels/header1.xml.rels"),
+                after.read("word/_rels/header1.xml.rels"),
+            )
+            self.assertEqual(
+                before.read("word/media/image1.png"),
+                after.read("word/media/image1.png"),
+            )
+            header_root = parse_xml(after.read("word/header1.xml"))
+        horizontal = header_root.find(f".//{_q(WP, 'positionH')}")
+        vertical = header_root.find(f".//{_q(WP, 'positionV')}")
+        assert horizontal is not None
+        assert vertical is not None
+        self.assertEqual(horizontal.get("relativeFrom"), "insideMargin")
+        self.assertEqual(horizontal[0].tag, _q(WP, "align"))
+        self.assertEqual(horizontal[0].text, "inside")
+        self.assertEqual(vertical.get("relativeFrom"), "paragraph")
+        self.assertEqual(vertical[0].tag, _q(WP, "posOffset"))
+        self.assertEqual(vertical[0].text, "76200")
+
+        reopened = Document.from_docx(output)
+        reopened_image = reopened.to_spec()["header_footers"][0][
+            "content"
+        ][0]
+        self.assertEqual(
+            reopened_image["floating"]["horizontal"],
+            {
+                "relative_to": "inside_margin",
+                "alignment": "inside",
+            },
+        )
+        self.assertEqual(
+            reopened_image["floating"]["vertical"],
+            {
+                "relative_to": "paragraph",
+                "offset": {"value": 6.0, "unit": "pt"},
+            },
+        )
+        self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+
     def test_cloned_header_image_can_be_replaced_copy_on_write(
         self,
     ) -> None:
@@ -3162,7 +3550,10 @@ class DocxImageTests(unittest.TestCase):
         capabilities = result.document.capabilities()["assets"]
         self.assertEqual(
             capabilities["insert_placements"],
-            ["inline", "floating_offset_square_wrap"],
+            [
+                "inline",
+                "floating_offset_or_alignment_square_wrap",
+            ],
         )
         self.assertEqual(
             capabilities["insert_default_placement"],
@@ -3290,6 +3681,94 @@ class DocxImageTests(unittest.TestCase):
                 "relative_to": "page",
                 "offset": {"value": 96.0, "unit": "pt"},
             },
+        )
+
+    def test_insert_image_after_creates_aligned_floating_picture(
+        self,
+    ) -> None:
+        document = Document.from_docx(
+            _image_document(preceding_text="Before")
+        )
+        layout = {
+            "horizontal": {
+                "relative_to": "margin",
+                "alignment": "center",
+            },
+            "vertical": {
+                "relative_to": "page",
+                "alignment": "bottom",
+            },
+            "wrap": {
+                "mode": "square",
+                "side": "largest",
+                "distance_top": {"value": 3, "unit": "pt"},
+                "distance_right": {"value": 5, "unit": "pt"},
+                "distance_bottom": {"value": 3, "unit": "pt"},
+                "distance_left": {"value": 5, "unit": "pt"},
+            },
+            "relative_height": 4096,
+            "behind_text": False,
+            "locked": False,
+            "layout_in_cell": True,
+            "allow_overlap": False,
+        }
+        result = document.insert_image_after(
+            "#before",
+            JPEG,
+            width={"value": 2, "unit": "in"},
+            height={"value": 1, "unit": "in"},
+            alt_text="Aligned floating expert diagram",
+            media_type="image/jpeg",
+            image_id="aligned_floating_diagram",
+            floating=layout,
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        inserted = result.document.to_spec()["content"][1]
+        self.assertEqual(inserted["id"], "aligned_floating_diagram")
+        self.assertEqual(inserted["floating"], layout)
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        anchor = root.find(f".//{_q(WP, 'anchor')}")
+        assert anchor is not None
+        horizontal = anchor.find(f"./{_q(WP, 'positionH')}")
+        vertical = anchor.find(f"./{_q(WP, 'positionV')}")
+        assert horizontal is not None
+        assert vertical is not None
+        self.assertEqual(horizontal.get("relativeFrom"), "margin")
+        self.assertEqual(horizontal[0].tag, _q(WP, "align"))
+        self.assertEqual(horizontal[0].text, "center")
+        self.assertEqual(vertical.get("relativeFrom"), "page")
+        self.assertEqual(vertical[0].tag, _q(WP, "align"))
+        self.assertEqual(vertical[0].text, "bottom")
+        self.assertIsNone(horizontal.find(f"./{_q(WP, 'posOffset')}"))
+        self.assertIsNone(vertical.find(f"./{_q(WP, 'posOffset')}"))
+
+        reopened = Document.from_docx(output)
+        reopened_image = reopened.to_spec()["content"][1]
+        self.assertEqual(reopened_image["floating"], layout)
+        resized = reopened.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": "#aligned_floating_diagram",
+                    "set": {
+                        "width": {"value": 180, "unit": "pt"},
+                        "alt_text": "Resized aligned diagram",
+                    },
+                }
+            ]
+        )
+        self.assertTrue(resized.success, resized.model_dump())
+        assert resized.document is not None
+        self.assertEqual(
+            resized.document.to_spec()["content"][1]["floating"],
+            layout,
+        )
+        self.assertEqual(
+            resized.document.image_bytes("aligned_floating_diagram"),
+            JPEG,
         )
 
     def test_insert_image_after_rejects_unsafe_requests_atomically(self) -> None:
@@ -3757,7 +4236,10 @@ class DocxImageTests(unittest.TestCase):
                 workspace_capabilities["binary_operations"][
                     "image.insert_after"
                 ]["placements"],
-                ["inline", "floating_offset_square_wrap"],
+                [
+                    "inline",
+                    "floating_offset_or_alignment_square_wrap",
+                ],
             )
             patch_path = (
                 root
