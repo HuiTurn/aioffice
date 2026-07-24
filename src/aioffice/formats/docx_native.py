@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+import hashlib
+from pathlib import PurePosixPath
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -11,6 +13,9 @@ from pydantic import ValidationError
 
 from aioffice.core.errors import NativePackageError
 from aioffice.formats.docx_style import (
+    apply_paragraph_mark_text_style,
+    apply_paragraph_style,
+    apply_text_style,
     patch_paragraph_mark_text_style,
     patch_paragraph_style,
     patch_paragraph_style_ref,
@@ -27,9 +32,11 @@ from aioffice.formats.docx_header_footer import (
 )
 from aioffice.formats.docx_fields import (
     FieldStructureError,
+    append_complex_field,
     canonical_field_instruction,
     field_match_at,
     native_ref_for_field,
+    parse_paragraph_fields,
     patch_field_instruction,
 )
 from aioffice.formats.docx_images import (
@@ -71,6 +78,7 @@ from aioffice.spec.models import (
     Heading,
     ImageBlock,
     ImageInsert,
+    InlineContent,
     NamedStyle,
     NativeRef,
     Paragraph,
@@ -80,14 +88,22 @@ from aioffice.spec.models import (
     TableCell,
     TableCellFormat,
     TableLayout,
+    TextSpan,
     TextStyle,
 )
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 XML = "http://www.w3.org/XML/1998/namespace"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+HYPERLINK_RELATIONSHIP_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+)
+RELATIONSHIPS_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-package.relationships+xml"
+)
 
 
 def _q(namespace: str, local: str) -> str:
@@ -98,6 +114,277 @@ def _target_id(value: Any) -> str:
     if not isinstance(value, str) or not value:
         raise NativePackageError("Native DOCX patch target must be a node ID.")
     return value[1:] if value.startswith("#") else value
+
+
+def _relationship_part_uri(source_part: str) -> str:
+    source = PurePosixPath(source_part)
+    return str(
+        source.parent
+        / "_rels"
+        / f"{source.name}.rels"
+    )
+
+
+def _attach_hyperlink_relationship(
+    package: NativePackage,
+    *,
+    source_part: str,
+    target: str,
+) -> str:
+    relationship_part_uri = _relationship_part_uri(source_part)
+    relationship_part_exists = package.has_part(relationship_part_uri)
+    relationships = (
+        parse_xml(package.get_part(relationship_part_uri))
+        if relationship_part_exists
+        else ET.Element(_q(REL, "Relationships"))
+    )
+    if relationships.tag != _q(REL, "Relationships"):
+        raise NativePackageError(
+            f"DOCX relationship part {relationship_part_uri!r} has "
+            "an invalid root."
+        )
+    relationship_ids = {
+        element.get("Id", "")
+        for element in relationships.findall(_q(REL, "Relationship"))
+    }
+    relationship_number = 1
+    while (
+        f"rIdAiOfficeHyperlink{relationship_number}"
+        in relationship_ids
+    ):
+        relationship_number += 1
+    relationship_id = f"rIdAiOfficeHyperlink{relationship_number}"
+    ET.SubElement(
+        relationships,
+        _q(REL, "Relationship"),
+        {
+            "Id": relationship_id,
+            "Type": HYPERLINK_RELATIONSHIP_TYPE,
+            "Target": target,
+            "TargetMode": "External",
+        },
+    )
+    package.set_part(
+        relationship_part_uri,
+        serialize_xml(relationships),
+        content_type=(
+            None
+            if relationship_part_exists
+            else RELATIONSHIPS_CONTENT_TYPE
+        ),
+    )
+    return relationship_id
+
+
+def _native_paragraph_anchor(
+    container: ET.Element,
+    node_id: str,
+) -> str:
+    existing = {
+        value
+        for paragraph in container.findall(_q(W, "p"))
+        if (value := paragraph.get(_q(W14, "paraId"))) is not None
+    }
+    ordinal = 0
+    while True:
+        candidate = hashlib.sha256(
+            f"{node_id}:{ordinal}".encode()
+        ).hexdigest()[:8].upper()
+        if candidate == "00000000":
+            candidate = "00000001"
+        if candidate not in existing:
+            return candidate
+        ordinal += 1
+
+
+def _merge_text_style(
+    base: TextStyle | None,
+    override: TextStyle | None,
+) -> TextStyle | None:
+    if base is None:
+        return override
+    if override is None:
+        return base
+    return TextStyle.model_validate(
+        {
+            **base.model_dump(mode="json", exclude_none=True),
+            **override.model_dump(mode="json", exclude_none=True),
+        }
+    )
+
+
+def _append_inserted_text_span(
+    package: NativePackage,
+    paragraph: ET.Element,
+    span: TextSpan,
+    *,
+    source_part: str,
+    default_style: TextStyle | None,
+) -> None:
+    run_parent = paragraph
+    if "link" in span.marks:
+        assert span.href is not None
+        if span.href.startswith("#"):
+            anchor = span.href[1:]
+            if not anchor:
+                raise NativePackageError(
+                    "A native internal hyperlink requires a non-empty anchor."
+                )
+            run_parent = ET.SubElement(
+                paragraph,
+                _q(W, "hyperlink"),
+                {_q(W, "anchor"): anchor},
+            )
+        else:
+            relationship_id = _attach_hyperlink_relationship(
+                package,
+                source_part=source_part,
+                target=span.href,
+            )
+            run_parent = ET.SubElement(
+                paragraph,
+                _q(W, "hyperlink"),
+                {_q(R, "id"): relationship_id},
+            )
+    run = ET.SubElement(run_parent, _q(W, "r"))
+    apply_text_style(
+        run,
+        _merge_text_style(default_style, span.style),
+    )
+    if span.marks:
+        mark_style: dict[str, object] = {}
+        if "strong" in span.marks:
+            mark_style["bold"] = True
+        if "emphasis" in span.marks:
+            mark_style["italic"] = True
+        if "underline" in span.marks:
+            mark_style["underline"] = True
+        if "strike" in span.marks:
+            mark_style["strike"] = True
+        if "subscript" in span.marks:
+            mark_style["baseline"] = "subscript"
+        if "superscript" in span.marks:
+            mark_style["baseline"] = "superscript"
+        if "code" in span.marks:
+            mark_style["font_family"] = "Consolas"
+        if mark_style:
+            apply_text_style(
+                run,
+                TextStyle.model_validate(mark_style),
+            )
+        properties = run.find(_q(W, "rPr"))
+        if properties is None:
+            properties = ET.Element(_q(W, "rPr"))
+            run.insert(0, properties)
+        if "highlight" in span.marks:
+            ET.SubElement(
+                properties,
+                _q(W, "highlight"),
+                {_q(W, "val"): "yellow"},
+            )
+        if "link" in span.marks:
+            ET.SubElement(
+                properties,
+                _q(W, "rStyle"),
+                {_q(W, "val"): "Hyperlink"},
+            )
+    text = ET.SubElement(run, _q(W, "t"))
+    if (
+        span.text[:1].isspace()
+        or span.text[-1:].isspace()
+        or "  " in span.text
+    ):
+        text.set(_q(XML, "space"), "preserve")
+    text.text = span.text
+
+
+def _compile_inserted_text_block(
+    package: NativePackage,
+    container: ET.Element,
+    block: Heading | Paragraph,
+    *,
+    source_part: str,
+    styles_root: ET.Element | None,
+) -> tuple[ET.Element, list[DocumentField]]:
+    if block.source_ref is not None:
+        raise NativePackageError(
+            "node.insert_after content cannot claim an existing native "
+            "source reference."
+        )
+    native_style_ref = (
+        block.style_ref or f"Heading{block.level}"
+        if isinstance(block, Heading)
+        else block.style_ref
+    )
+    if native_style_ref is not None:
+        if (
+            styles_root is None
+            or find_named_style(styles_root, native_style_ref) is None
+        ):
+            raise NativePackageError(
+                f"Native DOCX has no paragraph style "
+                f"{native_style_ref!r} required by inserted "
+                f"{block.type} {block.id!r}."
+            )
+    paragraph = ET.Element(
+        _q(W, "p"),
+        {
+            _q(W14, "paraId"): _native_paragraph_anchor(
+                container,
+                block.id,
+            )
+        },
+    )
+    if native_style_ref is not None:
+        patch_paragraph_style_ref(
+            paragraph,
+            native_style_ref,
+        )
+    apply_paragraph_style(paragraph, block.paragraph_style)
+    apply_paragraph_mark_text_style(paragraph, block.text_style)
+    content: Sequence[InlineContent] = (
+        block.content
+        if block.text is None
+        else [TextSpan(text=block.text)]
+    )
+    inserted_fields: list[DocumentField] = []
+    for inline in content:
+        if isinstance(inline, TextSpan):
+            _append_inserted_text_span(
+                package,
+                paragraph,
+                inline,
+                source_part=source_part,
+                default_style=block.text_style,
+            )
+            continue
+        if inline.kind == "native":
+            raise NativePackageError(
+                "node.insert_after cannot reconstruct a native-only field "
+                "instruction from its semantic projection."
+            )
+        append_complex_field(
+            paragraph,
+            inline,
+            effective_style=_merge_text_style(
+                block.text_style,
+                inline.style,
+            ),
+        )
+        inserted_fields.append(inline)
+    matches = parse_paragraph_fields(paragraph)
+    if len(matches) != len(inserted_fields):
+        raise NativePackageError(
+            "Inserted field count does not match generated native fields."
+        )
+    try:
+        parse_xml(serialize_xml(paragraph))
+    except (NativePackageError, UnicodeError, ValueError) as error:
+        raise NativePackageError(
+            "node.insert_after generated text or attributes that are not "
+            "valid, safe XML."
+        ) from error
+    return paragraph, inserted_fields
 
 
 def _ensure_identity_manifest_parts(package: NativePackage) -> None:
@@ -656,12 +943,14 @@ def apply_docx_operations(
     result_spec: AiOfficeDocumentSpec,
     operations: Sequence[Mapping[str, Any]],
     *,
+    changes: Sequence[Mapping[str, Any]],
     image_payloads: Mapping[str, bytes] | None = None,
 ) -> tuple[NativePackage, FidelityReport, dict[str, NativeRef]]:
     supported = {
         "text.replace",
         "paragraph.format",
         "text.format",
+        "node.insert_after",
         "node.remove",
         "style.apply",
         "style.define",
@@ -681,7 +970,8 @@ def apply_docx_operations(
     if unsupported:
         raise NativePackageError(
             "Imported DOCX V0.2 currently supports native lowering for "
-            "text.replace, paragraph.format, text.format, node.move_after, "
+            "text.replace, paragraph.format, text.format, "
+            "node.insert_after, node.move_after, "
             "node.move_before, node.remove, "
             "style.apply, style.define, style.format, section.format, and "
             "field.update, image.insert_after, image.replace, image.update, "
@@ -689,6 +979,11 @@ def apply_docx_operations(
             "table.column.format, and "
             "table.cell.format; "
             f"unsupported: {', '.join(unsupported)}."
+        )
+    if len(changes) != len(operations):
+        raise NativePackageError(
+            "Native DOCX lowering requires one semantic change record "
+            "for every Patch operation."
         )
 
     updated = package.clone()
@@ -701,6 +996,10 @@ def apply_docx_operations(
         "style.define",
         "style.format",
     }.intersection(str(operation.get("op")) for operation in operations)
+    has_text_insert = any(
+        operation.get("op") == "node.insert_after"
+        for operation in operations
+    )
     styles_root: ET.Element | None = None
     styles_changed = False
     changed_xml_parts: set[str] = set()
@@ -709,6 +1008,8 @@ def apply_docx_operations(
             raise NativePackageError(
                 "Native DOCX has no /word/styles.xml part for named-style editing."
             )
+        styles_root = parse_xml(updated.get_part("/word/styles.xml"))
+    elif has_text_insert and updated.has_part("/word/styles.xml"):
         styles_root = parse_xml(updated.get_part("/word/styles.xml"))
     original_elements = list(body)
     part_roots: dict[str, ET.Element] = {
@@ -843,10 +1144,12 @@ def apply_docx_operations(
                 source_ref,
             )
     inserted_images: dict[str, ET.Element] = {}
+    inserted_nodes: set[str] = set()
+    inserted_fields: dict[str, tuple[ET.Element, int]] = {}
     moved_nodes: set[str] = set()
     removed_nodes: set[str] = set()
 
-    for operation in operations:
+    for operation, change in zip(operations, changes, strict=True):
         operation_name = operation.get("op")
         if operation_name == "style.define":
             assert styles_root is not None
@@ -1111,6 +1414,133 @@ def apply_docx_operations(
                 payload=payload,
             )
             changed_xml_parts.add(source_ref.part_uri)
+            continue
+        if operation_name == "node.insert_after":
+            target_id = _target_id(operation.get("target"))
+            mapped_source = source_elements.get(target_id)
+            if mapped_source is None:
+                source_ref = _find_source_ref(
+                    spec,
+                    operation.get("target"),
+                )
+                container, mapped_elements = elements_for_ref(
+                    source_ref
+                )
+            else:
+                mapped_elements, source_ref = mapped_source
+                container = part_containers[source_ref.part_uri]
+            if (
+                source_ref.part_uri != "/word/document.xml"
+                or container is not body
+                or not mapped_elements
+            ):
+                raise NativePackageError(
+                    "node.insert_after requires a mapped top-level "
+                    "document body anchor."
+                )
+            current_elements = list(body)
+            if any(
+                element not in current_elements
+                for element in mapped_elements
+            ):
+                raise NativePackageError(
+                    "node.insert_after anchor is no longer in the "
+                    "document body."
+                )
+            anchor_indices = [
+                current_elements.index(element)
+                for element in mapped_elements
+            ]
+            if anchor_indices != list(
+                range(
+                    anchor_indices[0],
+                    anchor_indices[0] + len(anchor_indices),
+                )
+            ):
+                raise NativePackageError(
+                    "node.insert_after requires the anchor's complete "
+                    "native range to remain contiguous."
+                )
+            if any(
+                element.tag == _q(W, "sectPr")
+                or element.find(f".//{_q(W, 'sectPr')}") is not None
+                for element in mapped_elements
+            ):
+                raise NativePackageError(
+                    "node.insert_after refuses an anchor that carries a "
+                    "native section boundary."
+                )
+            created_nodes = change.get("created_nodes")
+            if (
+                change.get("operation") != "node.insert_after"
+                or not isinstance(created_nodes, list)
+                or len(created_nodes) != 1
+                or not isinstance(created_nodes[0], str)
+            ):
+                raise NativePackageError(
+                    "node.insert_after requires one trusted semantic "
+                    "created-node record."
+                )
+            created_id = created_nodes[0]
+            content = operation.get("content")
+            if not isinstance(content, Mapping):
+                raise NativePackageError(
+                    "node.insert_after content must be an object."
+                )
+            candidate_payload = deepcopy(dict(content))
+            supplied_id = candidate_payload.get("id")
+            if supplied_id is not None and supplied_id != created_id:
+                raise NativePackageError(
+                    "node.insert_after semantic and native created IDs "
+                    "do not match."
+                )
+            candidate_payload["id"] = created_id
+            try:
+                if candidate_payload.get("type") == "paragraph":
+                    candidate: Heading | Paragraph = (
+                        Paragraph.model_validate(candidate_payload)
+                    )
+                elif candidate_payload.get("type") == "heading":
+                    candidate = Heading.model_validate(candidate_payload)
+                else:
+                    raise NativePackageError(
+                        "Imported DOCX node.insert_after currently "
+                        "supports only paragraph and heading content."
+                    )
+            except ValidationError as error:
+                raise NativePackageError(
+                    f"Could not lower node.insert_after content: {error}"
+                ) from error
+            paragraph, new_fields = _compile_inserted_text_block(
+                updated,
+                body,
+                candidate,
+                source_part="/word/document.xml",
+                styles_root=styles_root,
+            )
+            insert_index = max(anchor_indices) + 1
+            body.insert(insert_index, paragraph)
+            temporary_ref = native_ref_for_part_elements(
+                [paragraph],
+                [insert_index],
+                part_uri="/word/document.xml",
+                native_kind="w:p",
+                root_path="/w:document/w:body",
+                native_id=paragraph.get(_q(W14, "paraId")),
+            )
+            source_elements[created_id] = (
+                [paragraph],
+                temporary_ref,
+            )
+            for field_ordinal, document_field in enumerate(
+                new_fields
+            ):
+                inserted_fields[document_field.id] = (
+                    paragraph,
+                    field_ordinal,
+                )
+            inserted_nodes.add(created_id)
+            changed_xml_parts.add("/word/document.xml")
             continue
         if operation_name == "table.format":
             source_table, source_ref = _find_table(
@@ -1593,6 +2023,21 @@ def apply_docx_operations(
             part_uri=original_ref.part_uri,
             root_path=root_path,
         )
+    for field_id, (paragraph, field_ordinal) in inserted_fields.items():
+        paragraph_index = current_indices.get(id(paragraph))
+        if paragraph_index is None:
+            continue
+        try:
+            match = field_match_at(paragraph, field_ordinal)
+        except FieldStructureError:
+            continue
+        identity_updates[field_id] = native_ref_for_field(
+            paragraph,
+            paragraph_index,
+            match,
+            part_uri="/word/document.xml",
+            root_path="/w:document/w:body",
+        )
     for table_id, (source_table, table_element, source_ref) in (
         source_tables.items()
     ):
@@ -1773,7 +2218,10 @@ def apply_docx_operations(
         assert styles_root is not None
         updated.set_part("/word/styles.xml", serialize_xml(styles_root))
     structural_identity_required = bool(
-        inserted_images or moved_nodes or removed_nodes
+        inserted_images
+        or inserted_nodes
+        or moved_nodes
+        or removed_nodes
     )
     if structural_identity_required:
         _ensure_identity_manifest_parts(updated)

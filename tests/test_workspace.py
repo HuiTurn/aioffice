@@ -377,6 +377,12 @@ class WorkspaceTests(unittest.TestCase):
                 ["c", "a", "b"],
             )
             self.assertIn(
+                "node.insert_after",
+                workspace.capabilities(document.id)[
+                    "patch_operations"
+                ],
+            )
+            self.assertIn(
                 "node.move_before",
                 workspace.capabilities(document.id)[
                     "patch_operations"
@@ -416,6 +422,30 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(
                 removed.changes[0]["removed_nodes"],
                 ["b"],
+            )
+            inserted = workspace.apply(
+                document.id,
+                [
+                    {
+                        "op": "node.insert_after",
+                        "target": "#a",
+                        "content": {
+                            "id": "inserted",
+                            "type": "paragraph",
+                            "text": "Inserted",
+                        },
+                    }
+                ],
+                base_revision=removed.result_revision,
+            )
+            self.assertTrue(inserted.success, inserted.model_dump())
+            after_insert = workspace.open_document(document.id)
+            self.assertEqual(
+                [
+                    node["id"]
+                    for node in after_insert.to_spec()["content"]
+                ],
+                ["c", "a", "inserted"],
             )
 
 

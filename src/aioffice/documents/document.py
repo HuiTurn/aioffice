@@ -986,6 +986,7 @@ class Document:
                 "text.replace",
                 "paragraph.format",
                 "text.format",
+                "node.insert_after",
                 "node.move_after",
                 "node.move_before",
                 "node.remove",
@@ -1006,6 +1007,7 @@ class Document:
                 operations.append("image.replace")
                 operations.append("image.update")
         elif detached_native_projection:
+            operations.remove("node.insert_after")
             operations.remove("node.move_after")
             operations.remove("node.move_before")
             operations.remove("node.remove")
@@ -1332,6 +1334,20 @@ class Document:
             },
             "structural_editing": {
                 "available": not detached_native_projection,
+                "insert_operation": "node.insert_after",
+                "insertable_native_blocks": [
+                    "paragraph",
+                    "heading",
+                ],
+                "inserted_inline_content": [
+                    "styled_text_spans",
+                    "internal_hyperlinks",
+                    "external_hyperlinks",
+                    "normalized_document_fields",
+                ],
+                "inserted_node_batch_targeting": True,
+                "batch_targeting_requires_caller_selected_id": True,
+                "generated_id_evidence": "changes[].created_nodes",
                 "move_operation": "node.move_after",
                 "move_operations": {
                     "after": "node.move_after",
@@ -1345,6 +1361,9 @@ class Document:
                     "before_complete_anchor_range",
                 ],
                 "native_scope": "word_document_body_top_level",
+                "native_insert_strategy": (
+                    "compile_only_the_new_w:p_and_preserve_existing_xml"
+                ),
                 "multi_element_nodes": "move_as_one_contiguous_group",
                 "section_policy": "same_section_only",
                 "section_start_anchor_movable": False,
@@ -2786,6 +2805,7 @@ class Document:
             and any(
                 operation.get("op")
                 in {
+                    "node.insert_after",
                     "node.move_after",
                     "node.move_before",
                     "node.remove",
@@ -2798,7 +2818,8 @@ class Document:
                 severity=Severity.ERROR,
                 code="UNSUPPORTED_FEATURE",
                 message=(
-                    "node.move_after, node.move_before, and node.remove "
+                    "node.insert_after, node.move_after, node.move_before, "
+                    "and node.remove "
                     "require the attached native DOCX package for a "
                     "native-authority projection; detached JSON cannot prove "
                     "or mutate the complete XML element range."
@@ -2876,6 +2897,7 @@ class Document:
                     self._spec,
                     updated._spec,
                     operations,
+                    changes=changes,
                     image_payloads=image_payloads,
                 )
                 for node in updated._spec.content:

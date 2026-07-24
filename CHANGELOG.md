@@ -225,6 +225,20 @@
 - Corrected semantic Diff ordering evidence so pure additions or removals no longer
   masquerade as moves; `moved` now requires a relative-order change among identities
   present in both revisions.
+- Added incremental native `node.insert_after` lowering for paragraphs and headings:
+  only the new `w:p` is compiled while every existing native XML element remains
+  unreconstructed.
+- Added rich inserted text spans, direct paragraph/text formatting, named heading
+  styles, internal/external hyperlinks, and normalized dynamic fields with fresh,
+  collision-safe native identities and relationship IDs.
+- Made nodes created earlier in one Patch immediately addressable by later insertion,
+  text, formatting, move, and removal operations through live XML object tracking
+  rather than stale indices.
+- Added fail-closed top-level, contiguity, section-boundary, style-existence,
+  source-reference, safe-XML, and supported-block proofs for native text insertion.
+- Attached persistent identity manifests on the first text insertion into third-party
+  DOCX packages, refreshed shifted content/field/section/table references, and exposed
+  the operation through capabilities, CLI apply, and Workspace persistence.
 - Changed mixed text/drawing paragraphs and complex image cases to explicit opaque
   projections so the semantic layer can no longer hide a picture inside an ordinary
   text node.
@@ -237,7 +251,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.21`.
+- Advanced the AiOffice Document Spec to `0.2-draft.22`.
 
 ## 0.1.0
 

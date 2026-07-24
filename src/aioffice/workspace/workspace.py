@@ -145,6 +145,7 @@ class Workspace:
                 "text.replace",
                 "paragraph.format",
                 "text.format",
+                "node.insert_after",
                 "node.move_after",
                 "node.move_before",
                 "node.remove",

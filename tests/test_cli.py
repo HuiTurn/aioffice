@@ -207,6 +207,7 @@ class CliTests(unittest.TestCase):
                     "text.replace",
                     "paragraph.format",
                     "text.format",
+                    "node.insert_after",
                     "node.move_after",
                     "node.move_before",
                     "node.remove",
@@ -396,6 +397,15 @@ class CliTests(unittest.TestCase):
                             "before": "#a",
                         },
                         {"op": "node.remove", "target": "#b"},
+                        {
+                            "op": "node.insert_after",
+                            "target": "#a",
+                            "content": {
+                                "id": "inserted",
+                                "type": "paragraph",
+                                "text": "Inserted",
+                            },
+                        },
                     ]
                 ),
                 encoding="utf-8",
@@ -424,13 +434,17 @@ class CliTests(unittest.TestCase):
                 report["changes"][1]["operation"],
                 "node.remove",
             )
+            self.assertEqual(
+                report["changes"][2]["operation"],
+                "node.insert_after",
+            )
             reopened = Document.from_docx(output)
             self.assertEqual(
                 [
                     node["id"]
                     for node in reopened.to_spec()["content"]
                 ],
-                ["c", "a"],
+                ["c", "a", "inserted"],
             )
 
 

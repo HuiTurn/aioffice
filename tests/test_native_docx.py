@@ -18,8 +18,12 @@ from aioffice.native import (
 from aioffice.native.xml import parse_xml, serialize_xml
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+HYPERLINK_RELATIONSHIP_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+)
 
 
 def _q(namespace: str, local: str) -> str:
@@ -155,7 +159,8 @@ class NativeDocxTests(unittest.TestCase):
             self.assertIn("AlpHA-BEta Gamma", texts)
 
     def test_unsupported_native_operation_is_atomic(self) -> None:
-        document = Document.from_docx(self._source_document())
+        source = self._source_document()
+        document = Document.from_docx(source)
         result = document.apply(
             [
                 {
@@ -170,6 +175,380 @@ class NativeDocxTests(unittest.TestCase):
         self.assertEqual(document.revision, 1)
         assert document.fidelity is not None
         self.assertEqual(document.fidelity.level, FidelityLevel.EXACT_PACKAGE)
+
+        unsupported_insert = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": "#body",
+                    "content": {
+                        "id": "unsupported_break",
+                        "type": "page_break",
+                    },
+                }
+            ]
+        )
+        self.assertFalse(unsupported_insert.success)
+        self.assertEqual(
+            unsupported_insert.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "only paragraph and heading",
+            unsupported_insert.diagnostics[0].message,
+        )
+        invalid_xml_insert = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": "#body",
+                    "content": {
+                        "id": "invalid_xml",
+                        "type": "paragraph",
+                        "text": "Unsafe\u0001text",
+                    },
+                }
+            ]
+        )
+        self.assertFalse(invalid_xml_insert.success)
+        self.assertEqual(
+            invalid_xml_insert.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "valid, safe XML",
+            invalid_xml_insert.diagnostics[0].message,
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+
+    def test_native_insert_rich_paragraph_preserves_existing_xml(self) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Anchor", id="anchor")
+            .paragraph("Tail", id="tail")
+            .build()
+            .to_bytes("docx")
+        )
+        with ZipFile(io.BytesIO(source)) as archive:
+            root_relationships = parse_xml(
+                archive.read("_rels/.rels")
+            )
+            content_types = parse_xml(
+                archive.read("[Content_Types].xml")
+            )
+        for relationship in list(root_relationships):
+            if (
+                relationship.get("Type")
+                == MANIFEST_RELATIONSHIP_TYPE
+            ):
+                root_relationships.remove(relationship)
+        for override in list(content_types):
+            if (
+                override.tag == _q(CT, "Override")
+                and override.get("PartName") == MANIFEST_PART_URI
+            ):
+                content_types.remove(override)
+        source = _rewrite_package(
+            source,
+            {
+                "_rels/.rels": serialize_xml(root_relationships),
+                "[Content_Types].xml": serialize_xml(content_types),
+            },
+            deletions={MANIFEST_PART_URI.lstrip("/")},
+        )
+        before_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        before_body = before_root.find(_q(W, "body"))
+        assert before_body is not None
+        existing_payloads = {
+            "anchor": ET.tostring(list(before_body)[0]),
+            "tail": ET.tostring(list(before_body)[1]),
+        }
+        document = Document.from_docx(source)
+        anchor_id = next(
+            str(node["id"])
+            for node in document.to_spec()["content"]
+            if _semantic_text(node) == "Anchor"
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": f"#{anchor_id}",
+                    "content": {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Executive ",
+                                "marks": ["strong"],
+                            },
+                            {
+                                "id": "inserted_page",
+                                "type": "field",
+                                "kind": "page_number",
+                                "number_format": "upper_roman",
+                                "cached_result": "IV",
+                            },
+                            {
+                                "type": "text",
+                                "text": " / site",
+                                "marks": ["link"],
+                                "href": "https://example.com/report",
+                            },
+                            {
+                                "type": "text",
+                                "text": " / local",
+                                "marks": ["link"],
+                                "href": "#appendix",
+                            },
+                        ],
+                        "paragraph_style": {
+                            "alignment": "center",
+                            "spacing_after": {
+                                "value": 8,
+                                "unit": "pt",
+                            },
+                        },
+                        "text_style": {
+                            "font_size": {
+                                "value": 11,
+                                "unit": "pt",
+                            }
+                        },
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        created_id = result.changes[0]["created_nodes"][0]
+        self.assertTrue(str(created_id).startswith("para_"))
+        assert result.document is not None
+        inserted = next(
+            node
+            for node in result.document.to_spec()["content"]
+            if node["id"] == created_id
+        )
+        self.assertEqual(
+            inserted["paragraph_style"]["alignment"],
+            "center",
+        )
+        inserted_field = next(
+            inline
+            for inline in inserted["content"]
+            if inline["type"] == "field"
+        )
+        self.assertEqual(inserted_field["id"], "inserted_page")
+        self.assertEqual(
+            inserted_field["source_ref"]["native_kind"],
+            "w:complex-field",
+        )
+
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            for name in before.namelist():
+                if name not in {
+                    "[Content_Types].xml",
+                    "_rels/.rels",
+                    "word/document.xml",
+                    "word/_rels/document.xml.rels",
+                    "customXml/aioffice-manifest.xml",
+                }:
+                    self.assertEqual(before.read(name), after.read(name), name)
+            relationships = parse_xml(
+                after.read("word/_rels/document.xml.rels")
+            )
+            hyperlinks = [
+                relationship
+                for relationship in relationships.findall(
+                    _q(REL, "Relationship")
+                )
+                if relationship.get("Type")
+                == HYPERLINK_RELATIONSHIP_TYPE
+            ]
+            self.assertEqual(len(hyperlinks), 1)
+            self.assertEqual(
+                hyperlinks[0].get("Target"),
+                "https://example.com/report",
+            )
+            self.assertEqual(
+                hyperlinks[0].get("TargetMode"),
+                "External",
+            )
+            after_root = parse_xml(after.read("word/document.xml"))
+            self.assertIn(
+                MANIFEST_PART_URI.lstrip("/"),
+                after.namelist(),
+            )
+        after_body = after_root.find(_q(W, "body"))
+        assert after_body is not None
+        self.assertEqual(
+            ET.tostring(list(after_body)[0]),
+            existing_payloads["anchor"],
+        )
+        self.assertEqual(
+            ET.tostring(list(after_body)[2]),
+            existing_payloads["tail"],
+        )
+        native_inserted = list(after_body)[1]
+        internal_link = next(
+            hyperlink
+            for hyperlink in native_inserted.findall(_q(W, "hyperlink"))
+            if hyperlink.get(_q(W, "anchor")) is not None
+        )
+        self.assertEqual(
+            internal_link.get(_q(W, "anchor")),
+            "appendix",
+        )
+        external_link = next(
+            hyperlink
+            for hyperlink in native_inserted.findall(_q(W, "hyperlink"))
+            if hyperlink.get(_q(R, "id")) is not None
+        )
+        self.assertEqual(
+            external_link.get(_q(R, "id")),
+            hyperlinks[0].get("Id"),
+        )
+        instruction = native_inserted.find(f".//{_q(W, 'instrText')}")
+        assert instruction is not None
+        self.assertIn("PAGE", instruction.text or "")
+        self.assertIn("ROMAN", instruction.text or "")
+
+        reopened = Document.from_docx(output)
+        reopened_inserted = next(
+            node
+            for node in reopened.to_spec()["content"]
+            if node["id"] == created_id
+        )
+        self.assertEqual(
+            reopened_inserted["paragraph_style"]["alignment"],
+            "center",
+        )
+        self.assertEqual(
+            next(
+                inline
+                for inline in reopened_inserted["content"]
+                if inline["type"] == "field"
+            )["id"],
+            "inserted_page",
+        )
+        self.assertEqual(
+            [
+                inline.get("href")
+                for inline in reopened_inserted["content"]
+                if inline.get("href") is not None
+            ],
+            [
+                "https://example.com/report",
+                "#appendix",
+            ],
+        )
+
+    def test_native_inserted_nodes_are_batch_addressable(self) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Anchor", id="anchor")
+            .paragraph("Tail", id="tail")
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": "#anchor",
+                    "content": {
+                        "id": "new_body",
+                        "type": "paragraph",
+                        "text": "Alpha",
+                    },
+                },
+                {
+                    "op": "node.insert_after",
+                    "target": "#new_body",
+                    "content": {
+                        "id": "new_heading",
+                        "type": "heading",
+                        "level": 2,
+                        "text": "New section",
+                    },
+                },
+                {
+                    "op": "text.replace",
+                    "target": "#new_body",
+                    "search": "Alpha",
+                    "replacement": "Revised",
+                },
+                {
+                    "op": "paragraph.format",
+                    "target": "#new_body",
+                    "set": {"alignment": "right"},
+                },
+                {
+                    "op": "node.move_before",
+                    "target": "#new_heading",
+                    "before": "#new_body",
+                },
+                {
+                    "op": "node.insert_after",
+                    "target": "#new_body",
+                    "content": {
+                        "id": "temporary",
+                        "type": "paragraph",
+                        "text": "Temporary",
+                    },
+                },
+                {
+                    "op": "node.remove",
+                    "target": "#temporary",
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.document is not None
+        self.assertEqual(
+            [
+                node["id"]
+                for node in result.document.to_spec()["content"]
+            ],
+            ["anchor", "new_heading", "new_body", "tail"],
+        )
+        self.assertNotIn(
+            "temporary",
+            {
+                node["id"]
+                for node in result.document.to_spec()["content"]
+            },
+        )
+        output = result.document.to_bytes("docx")
+        reopened = Document.from_docx(output)
+        reopened_nodes = reopened.to_spec()["content"]
+        self.assertEqual(
+            [node["id"] for node in reopened_nodes],
+            ["anchor", "new_heading", "new_body", "tail"],
+        )
+        self.assertEqual(reopened_nodes[1]["type"], "heading")
+        self.assertEqual(reopened_nodes[1]["level"], 2)
+        self.assertEqual(_semantic_text(reopened_nodes[1]), "New section")
+        self.assertEqual(_semantic_text(reopened_nodes[2]), "Revised")
+        self.assertEqual(
+            reopened_nodes[2]["paragraph_style"]["alignment"],
+            "right",
+        )
+        self.assertEqual(
+            [
+                node["source_ref"]["element_index"]
+                for node in reopened_nodes
+            ],
+            [0, 1, 2, 3],
+        )
 
     def test_identity_map_is_refreshed_after_removal(self) -> None:
         document = Document.from_docx(self._source_document())
@@ -250,8 +629,30 @@ class NativeDocxTests(unittest.TestCase):
         }
         detached = Document.from_spec(before_spec)
         self.assertNotIn(
+            "node.insert_after",
+            detached.capabilities()["operations"],
+        )
+        self.assertNotIn(
             "node.remove",
             detached.capabilities()["operations"],
+        )
+        detached_insert = detached.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": ids["A"],
+                    "content": {
+                        "id": "detached_new",
+                        "type": "paragraph",
+                        "text": "Detached",
+                    },
+                }
+            ]
+        )
+        self.assertFalse(detached_insert.success)
+        self.assertEqual(
+            detached_insert.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
         )
         detached_result = detached.apply(
             [{"op": "node.remove", "target": ids["B"]}]
@@ -682,6 +1083,28 @@ class NativeDocxTests(unittest.TestCase):
         self.assertIn(
             "section boundary",
             carrier_remove.diagnostics[0].message,
+        )
+        carrier_insert = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": ids["Front end"],
+                    "content": {
+                        "id": "unsafe_insert",
+                        "type": "paragraph",
+                        "text": "Wrong section",
+                    },
+                }
+            ]
+        )
+        self.assertFalse(carrier_insert.success)
+        self.assertEqual(
+            carrier_insert.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "section boundary",
+            carrier_insert.diagnostics[0].message,
         )
         section_start_remove = document.apply(
             [{"op": "node.remove", "target": ids["Body"]}]

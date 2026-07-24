@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev21`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev22`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -26,8 +26,9 @@ background/border surfaces, conservative native image projection, verified asset
 extraction, selective native image metadata and geometry updates, occurrence-scoped
 copy-on-write image replacement, addressable native inline image insertion, direct
 image-paragraph layout formatting, semantic diffs, isolated LibreOffice/Poppler
-native rendering, stable-ID native block reordering, consistent multi-page evidence,
-page occupancy diagnostics, visual-regression contracts, and fidelity reports.
+native rendering, stable-ID native paragraph/heading insertion and block reordering,
+consistent multi-page evidence, page occupancy diagnostics, visual-regression
+contracts, and fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -731,6 +732,38 @@ assert result.success
 preview = result.document
 ```
 
+Imported DOCX documents can receive a new paragraph or heading without rebuilding
+their existing content:
+
+```python
+result = doc.apply([
+    {
+        "op": "node.insert_after",
+        "target": "#executive_summary",
+        "content": {
+            "id": "recommendation",
+            "type": "paragraph",
+            "content": [
+                {"type": "text", "text": "Recommendation: ", "marks": ["strong"]},
+                {"type": "text", "text": "approve the proposed plan."},
+            ],
+            "paragraph_style": {
+                "spacing_before": {"value": 8, "unit": "pt"},
+                "spacing_after": {"value": 8, "unit": "pt"},
+            },
+        },
+    }
+])
+assert result.success
+```
+
+Only the new `w:p` is compiled. Existing XML, DrawingML, relationships, and
+unsupported native features remain untouched. A caller-selected new ID can be
+targeted again later in the same Patch; an omitted ID is returned in change
+evidence. Rich text, direct formatting, internal/external hyperlinks, and normalized
+document fields are supported. See
+[native text insertion](docs/native-text-insertion.md).
+
 Existing top-level content can be reordered without reconstructing it or addressing
 an array index:
 
@@ -749,7 +782,7 @@ For imported DOCX, AiOffice moves the target's complete mapped XML range. A
 multi-paragraph list remains one contiguous unit, DrawingML and unknown XML stay in
 their original elements, and every native reference is reindexed. `node.move_after`
 and `node.move_before` cover every relative position without array indexes. The
-conservative dev21 boundary permits moves only within one semantic section, refuses
+conservative dev22 boundary permits moves only within one semantic section, refuses
 moving a section start anchor, and rebinds `section.start_at` when prepending within
 a later section. Native elements carrying `w:sectPr` remain immovable. See
 [the structural editing contract](docs/structural-editing.md).
@@ -764,9 +797,10 @@ Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `node.remove`, `node.update`, `style.define`, `style.apply`, `style.format`,
 `section.format`, `field.update`,
 `table.format`, `table.column.format`, and `table.cell.format`. Imported DOCX
-documents additionally expose safe native image operations reported by
-`capabilities()`. Selectors use stable content, section, header/footer block, field,
-image, table, column, row, cell, or rich cell-paragraph identities in this release.
+documents support incremental `node.insert_after` for paragraphs and headings and
+additionally expose safe native image operations reported by `capabilities()`.
+Selectors use stable content, section, header/footer block, field, image, table,
+column, row, cell, or rich cell-paragraph identities in this release.
 
 ## CLI
 
