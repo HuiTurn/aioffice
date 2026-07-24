@@ -377,6 +377,12 @@ class WorkspaceTests(unittest.TestCase):
                 ["c", "a", "b"],
             )
             self.assertIn(
+                "node.append",
+                workspace.capabilities(document.id)[
+                    "patch_operations"
+                ],
+            )
+            self.assertIn(
                 "node.insert_after",
                 workspace.capabilities(document.id)[
                     "patch_operations"
@@ -452,6 +458,31 @@ class WorkspaceTests(unittest.TestCase):
                     for node in after_insert.to_spec()["content"]
                 ],
                 ["inserted", "c", "a"],
+            )
+            appended = workspace.apply(
+                document.id,
+                [
+                    {
+                        "op": "node.append",
+                        "target": "$",
+                        "content": {
+                            "id": "appended",
+                            "type": "heading",
+                            "level": 2,
+                            "text": "Appended",
+                        },
+                    }
+                ],
+                base_revision=inserted.result_revision,
+            )
+            self.assertTrue(appended.success, appended.model_dump())
+            after_append = workspace.open_document(document.id)
+            self.assertEqual(
+                [
+                    node["id"]
+                    for node in after_append.to_spec()["content"]
+                ],
+                ["inserted", "c", "a", "appended"],
             )
 
 

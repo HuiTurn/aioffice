@@ -987,6 +987,7 @@ class Document:
                 "text.replace",
                 "paragraph.format",
                 "text.format",
+                "node.append",
                 "node.insert_after",
                 "node.insert_before",
                 "node.move_after",
@@ -1009,6 +1010,7 @@ class Document:
                 operations.append("image.replace")
                 operations.append("image.update")
         elif detached_native_projection:
+            operations.remove("node.append")
             operations.remove("node.insert_after")
             operations.remove("node.insert_before")
             operations.remove("node.move_after")
@@ -1337,6 +1339,7 @@ class Document:
             },
             "structural_editing": {
                 "available": not detached_native_projection,
+                "append_operation": "node.append",
                 "insert_operation": "node.insert_after",
                 "insert_operations": {
                     "after": "node.insert_after",
@@ -1364,9 +1367,13 @@ class Document:
                 "selectors": "stable_top_level_content_ids",
                 "position": "after_complete_anchor_range",
                 "positions": [
+                    "before_terminal_body_sectPr",
                     "after_complete_anchor_range",
                     "before_complete_anchor_range",
                 ],
+                "append_position": "before_terminal_body_sectPr",
+                "append_section": "last_semantic_section",
+                "append_empty_document": True,
                 "native_scope": "word_document_body_top_level",
                 "native_insert_strategy": (
                     "compile_only_the_new_w:p_and_preserve_existing_xml"
@@ -2815,6 +2822,7 @@ class Document:
             and any(
                 operation.get("op")
                 in {
+                    "node.append",
                     "node.insert_after",
                     "node.insert_before",
                     "node.move_after",
@@ -2829,7 +2837,7 @@ class Document:
                 severity=Severity.ERROR,
                 code="UNSUPPORTED_FEATURE",
                 message=(
-                    "node.insert_after, node.insert_before, "
+                    "node.append, node.insert_after, node.insert_before, "
                     "node.move_after, node.move_before, and node.remove "
                     "require the attached native DOCX package for a "
                     "native-authority projection; detached JSON cannot prove "
@@ -5262,6 +5270,21 @@ class Document:
                         severity=Severity.ERROR,
                         code="UNSUPPORTED_FEATURE",
                         message="node.append currently supports only the document root target '$'.",
+                    )
+                )
+            unexpected = sorted(
+                set(operation) - {"op", "target", "content"}
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "node.append received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[payload["artifact"]["id"]],
                     )
                 )
             content = operation.get("content")

@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev23`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev24`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -26,9 +26,9 @@ background/border surfaces, conservative native image projection, verified asset
 extraction, selective native image metadata and geometry updates, occurrence-scoped
 copy-on-write image replacement, addressable native inline image insertion, direct
 image-paragraph layout formatting, semantic diffs, isolated LibreOffice/Poppler
-native rendering, bidirectional stable-ID native paragraph/heading insertion and
-block reordering, consistent multi-page evidence, page occupancy diagnostics,
-visual-regression contracts, and fidelity reports.
+native rendering, root append plus bidirectional stable-ID native
+paragraph/heading insertion and block reordering, consistent multi-page evidence,
+page occupancy diagnostics, visual-regression contracts, and fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -763,7 +763,10 @@ targeted again later in the same Patch; an omitted ID is returned in change
 evidence. Rich text, direct formatting, internal/external hyperlinks, and normalized
 document fields are supported. Use `node.insert_before` for symmetric placement,
 including insertion at the beginning of the document. Inserting before a later
-section's first node safely rebinds that section's `start_at`. See
+section's first node safely rebinds that section's `start_at`. Use `node.append`
+with target `$` when the AI should add content to the last section without first
+discovering the final content ID; native lowering inserts it before the terminal
+body `w:sectPr`. See
 [native text insertion](docs/native-text-insertion.md).
 
 Existing top-level content can be reordered without reconstructing it or addressing
@@ -784,7 +787,7 @@ For imported DOCX, AiOffice moves the target's complete mapped XML range. A
 multi-paragraph list remains one contiguous unit, DrawingML and unknown XML stay in
 their original elements, and every native reference is reindexed. `node.move_after`
 and `node.move_before` cover every relative position without array indexes. The
-conservative dev23 boundary permits moves only within one semantic section, refuses
+conservative dev24 boundary permits moves only within one semantic section, refuses
 moving a section start anchor, and rebinds `section.start_at` when prepending within
 a later section. Native elements carrying `w:sectPr` remain immovable. See
 [the structural editing contract](docs/structural-editing.md).
@@ -800,7 +803,8 @@ Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `section.format`, `field.update`,
 `table.format`, `table.column.format`, and `table.cell.format`. Imported DOCX
 documents support incremental before/after insertion for paragraphs and headings
-and additionally expose safe native image operations reported by `capabilities()`.
+plus root append, and additionally expose safe native image operations reported by
+`capabilities()`.
 Selectors use stable content, section, header/footer block, field, image, table,
 column, row, cell, or rich cell-paragraph identities in this release.
 

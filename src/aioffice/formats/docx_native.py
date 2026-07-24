@@ -950,6 +950,7 @@ def apply_docx_operations(
         "text.replace",
         "paragraph.format",
         "text.format",
+        "node.append",
         "node.insert_after",
         "node.insert_before",
         "node.remove",
@@ -972,7 +973,7 @@ def apply_docx_operations(
         raise NativePackageError(
             "Imported DOCX V0.2 currently supports native lowering for "
             "text.replace, paragraph.format, text.format, "
-            "node.insert_after, node.insert_before, node.move_after, "
+            "node.append, node.insert_after, node.insert_before, node.move_after, "
             "node.move_before, node.remove, "
             "style.apply, style.define, style.format, section.format, and "
             "field.update, image.insert_after, image.replace, image.update, "
@@ -999,7 +1000,7 @@ def apply_docx_operations(
     }.intersection(str(operation.get("op")) for operation in operations)
     has_text_insert = any(
         operation.get("op")
-        in {"node.insert_after", "node.insert_before"}
+        in {"node.append", "node.insert_after", "node.insert_before"}
         for operation in operations
     )
     styles_root: ET.Element | None = None
@@ -1512,68 +1513,100 @@ def apply_docx_operations(
             changed_xml_parts.add(source_ref.part_uri)
             continue
         if operation_name in {
+            "node.append",
             "node.insert_after",
             "node.insert_before",
         }:
-            target_id = _target_id(operation.get("target"))
-            mapped_source = source_elements.get(target_id)
-            if mapped_source is None:
-                source_ref = _find_source_ref(
-                    spec,
-                    operation.get("target"),
-                )
-                container, mapped_elements = elements_for_ref(
-                    source_ref
+            current_elements = list(body)
+            target_id: str | None = None
+            if operation_name == "node.append":
+                section_property_indices = [
+                    index
+                    for index, element in enumerate(current_elements)
+                    if element.tag == _q(W, "sectPr")
+                ]
+                if (
+                    len(section_property_indices) > 1
+                    or (
+                        section_property_indices
+                        and section_property_indices[0]
+                        != len(current_elements) - 1
+                    )
+                ):
+                    raise NativePackageError(
+                        "node.append requires the optional body-level "
+                        "w:sectPr to be the final and only direct section "
+                        "properties element."
+                    )
+                insert_index = (
+                    section_property_indices[0]
+                    if section_property_indices
+                    else len(current_elements)
                 )
             else:
-                mapped_elements, source_ref = mapped_source
-                container = part_containers[source_ref.part_uri]
-            if (
-                source_ref.part_uri != "/word/document.xml"
-                or container is not body
-                or not mapped_elements
-            ):
-                raise NativePackageError(
-                    f"{operation_name} requires a mapped top-level "
-                    "document body anchor."
-                )
-            current_elements = list(body)
-            if any(
-                element not in current_elements
-                for element in mapped_elements
-            ):
-                raise NativePackageError(
-                    f"{operation_name} anchor is no longer in the "
-                    "document body."
-                )
-            anchor_indices = [
-                current_elements.index(element)
-                for element in mapped_elements
-            ]
-            if anchor_indices != list(
-                range(
-                    anchor_indices[0],
-                    anchor_indices[0] + len(anchor_indices),
-                )
-            ):
-                raise NativePackageError(
-                    f"{operation_name} requires the anchor's complete "
-                    "native range to remain contiguous."
-                )
-            if (
-                operation_name == "node.insert_after"
-                and any(
-                    element.tag == _q(W, "sectPr")
-                    or element.find(
-                        f".//{_q(W, 'sectPr')}"
+                target_id = _target_id(operation.get("target"))
+                mapped_source = source_elements.get(target_id)
+                if mapped_source is None:
+                    source_ref = _find_source_ref(
+                        spec,
+                        operation.get("target"),
                     )
-                    is not None
+                    container, mapped_elements = elements_for_ref(
+                        source_ref
+                    )
+                else:
+                    mapped_elements, source_ref = mapped_source
+                    container = part_containers[source_ref.part_uri]
+                if (
+                    source_ref.part_uri != "/word/document.xml"
+                    or container is not body
+                    or not mapped_elements
+                ):
+                    raise NativePackageError(
+                        f"{operation_name} requires a mapped top-level "
+                        "document body anchor."
+                    )
+                if any(
+                    element not in current_elements
                     for element in mapped_elements
-                )
-            ):
-                raise NativePackageError(
-                    "node.insert_after refuses an anchor that carries a "
-                    "native section boundary."
+                ):
+                    raise NativePackageError(
+                        f"{operation_name} anchor is no longer in the "
+                        "document body."
+                    )
+                anchor_indices = [
+                    current_elements.index(element)
+                    for element in mapped_elements
+                ]
+                if anchor_indices != list(
+                    range(
+                        anchor_indices[0],
+                        anchor_indices[0] + len(anchor_indices),
+                    )
+                ):
+                    raise NativePackageError(
+                        f"{operation_name} requires the anchor's complete "
+                        "native range to remain contiguous."
+                    )
+                if (
+                    operation_name == "node.insert_after"
+                    and any(
+                        element.tag == _q(W, "sectPr")
+                        or element.find(
+                            f".//{_q(W, 'sectPr')}"
+                        )
+                        is not None
+                        for element in mapped_elements
+                    )
+                ):
+                    raise NativePackageError(
+                        "node.insert_after refuses an anchor that carries a "
+                        "native section boundary."
+                    )
+                insert_index = (
+                    max(anchor_indices) + 1
+                    if operation_name == "node.insert_after"
+                    else min(anchor_indices)
                 )
             created_nodes = change.get("created_nodes")
             if (
@@ -1623,22 +1656,18 @@ def apply_docx_operations(
                 source_part="/word/document.xml",
                 styles_root=styles_root,
             )
-            insert_index = (
-                max(anchor_indices) + 1
-                if operation_name == "node.insert_after"
-                else min(anchor_indices)
-            )
             body.insert(insert_index, paragraph)
-            synchronize_section_start(
-                change,
-                operation_name=str(operation_name),
-                anchor_id=target_id,
-                new_start_id=created_id,
-                new_start_elements=[paragraph],
-                can_rebind=(
-                    operation_name == "node.insert_before"
-                ),
-            )
+            if target_id is not None:
+                synchronize_section_start(
+                    change,
+                    operation_name=str(operation_name),
+                    anchor_id=target_id,
+                    new_start_id=created_id,
+                    new_start_elements=[paragraph],
+                    can_rebind=(
+                        operation_name == "node.insert_before"
+                    ),
+                )
             temporary_ref = native_ref_for_part_elements(
                 [paragraph],
                 [insert_index],

@@ -81,6 +81,29 @@ class PatchTests(unittest.TestCase):
         self.assertEqual(len(result.document.to_spec()["content"]), 4)
         self.assertNotEqual(result.changes[0]["created_nodes"], ["<generated>"])
         self.assertNotEqual(result.changes[1]["created_nodes"], ["<generated>"])
+        invalid = self.document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "invalid_append",
+                        "type": "paragraph",
+                        "text": "Invalid",
+                    },
+                    "index": 0,
+                }
+            ]
+        )
+        self.assertFalse(invalid.success)
+        self.assertEqual(
+            invalid.diagnostics[0].code,
+            "INVALID_SPEC",
+        )
+        self.assertIn(
+            "unknown fields: index",
+            invalid.diagnostics[0].message,
+        )
 
     def test_insert_before_prepends_and_rebinds_section_start(self) -> None:
         document = (
@@ -217,6 +240,21 @@ class PatchTests(unittest.TestCase):
             "structural_editing"
         ]
         self.assertTrue(structural_capabilities["available"])
+        self.assertEqual(
+            structural_capabilities["append_operation"],
+            "node.append",
+        )
+        self.assertEqual(
+            structural_capabilities["append_position"],
+            "before_terminal_body_sectPr",
+        )
+        self.assertEqual(
+            structural_capabilities["append_section"],
+            "last_semantic_section",
+        )
+        self.assertTrue(
+            structural_capabilities["append_empty_document"]
+        )
         self.assertEqual(
             structural_capabilities["insert_operations"],
             {

@@ -1,6 +1,6 @@
 # Incremental native paragraph and heading insertion
 
-AiOffice `0.2.0.dev23` can insert a new paragraph or heading into an imported DOCX
+AiOffice `0.2.0.dev24` can insert a new paragraph or heading into an imported DOCX
 without rebuilding the document from its JSON projection. JSON remains the
 AI-facing intent and evidence layer; the attached OPC package remains the native
 authority.
@@ -39,6 +39,27 @@ native range and inserts one freshly compiled `w:p` after its last element or be
 its first element. This makes a multi-paragraph list a valid anchor without placing
 the new paragraph inside the list. `node.insert_before` also reaches the beginning
 of the document without a synthetic root or array index.
+
+Use the document root when the content belongs at the end of the final section:
+
+```json
+{
+  "op": "node.append",
+  "target": "$",
+  "content": {
+    "id": "appendix",
+    "type": "heading",
+    "level": 2,
+    "text": "Appendix"
+  }
+}
+```
+
+Unlike `node.insert_after`, root append does not require an existing anchor and
+therefore works for an empty document. In native DOCX, AiOffice inserts the new
+`w:p` immediately before the optional final body-level `w:sectPr`. The original
+section properties stay terminal and unchanged, so the block belongs to the final
+semantic section.
 
 The `id` is optional. When omitted, the semantic transaction generates one and
 passes that exact identity to native lowering. Supplying IDs is recommended for
@@ -123,7 +144,7 @@ section ownership.
 
 ## Fidelity and safety
 
-Before mutation AiOffice proves that:
+Before relative insertion AiOffice proves that:
 
 1. the anchor belongs directly to `/word/document.xml`'s `w:body`;
 2. every mapped anchor element is present and contiguous;
@@ -133,6 +154,10 @@ Before mutation AiOffice proves that:
 5. the required named style exists in the native style catalog;
 6. generated text and attributes form safe, valid XML;
 7. the generated field count matches its semantic field identities.
+
+For root append, AiOffice separately proves that a direct body-level `w:sectPr`, if
+present, is unique and terminal. A malformed or ambiguous body layout is refused
+atomically instead of guessing an insertion point.
 
 External hyperlinks receive collision-safe relationship IDs. New paragraphs receive
 collision-safe deterministic `w14:paraId` values. All shifted content, section,
@@ -153,5 +178,6 @@ aioffice workspace apply ARTIFACT_ID insert.json --root project
 ```
 
 Inspect `Document.capabilities()["structural_editing"]` before planning. A detached
-JSON projection whose extension declares native authority omits both insertion
-operations and rejects them until the original DOCX package is attached again.
+JSON projection whose extension declares native authority omits root append and
+both relative insertion operations, rejecting them until the original DOCX package
+is attached again.

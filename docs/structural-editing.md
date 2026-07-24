@@ -1,6 +1,6 @@
 # Stable-ID structural editing
 
-AiOffice structural edits address semantic nodes, not array positions. The dev23
+AiOffice structural edits address semantic nodes, not array positions. The dev24
 contract exposes insertion, a deliberately narrow pair of relative moves, and
 removal:
 
@@ -43,10 +43,12 @@ because another unknown native consumer may still depend on them.
 
 ## Native insertion versus movement
 
-`node.insert_after` and `node.insert_before` create a new semantic node. For an
-imported DOCX, dev23 accepts new `paragraph` and `heading` blocks and compiles
-exactly one new `w:p`. It never reconstructs the anchor or any other existing block.
-Rich text, direct paragraph/text formatting, internal and external hyperlinks, and
+`node.append`, `node.insert_after`, and `node.insert_before` create a new semantic
+node. For an imported DOCX, dev24 accepts new `paragraph` and `heading` blocks and
+compiles exactly one new `w:p`. Root append targets `$` and works even when the
+document has no semantic content; it places the new block before the optional final
+body-level `w:sectPr`. The relative operations preserve the complete anchor. Rich
+text, direct paragraph/text formatting, internal and external hyperlinks, and
 normalized document fields are supported. See
 [native text insertion](native-text-insertion.md).
 
@@ -78,7 +80,7 @@ returned in `changes[].created_nodes` for a later Patch.
 
 Word section semantics depend on the position of `w:sectPr`. A move that casually
 crosses one of those boundaries can silently change page size, margins, columns,
-headers, footers, numbering, or vertical alignment. Dev23 therefore requires:
+headers, footers, numbering, or vertical alignment. Dev24 therefore requires:
 
 - target and anchor belong to the same semantic section;
 - the target is not the `start_at` node of a later section;
@@ -90,7 +92,7 @@ carrier remains in place and the semantic section's `start_at` is rebound to the
 moved node. The change evidence records the section ID and old/new anchors. A
 text-bearing paragraph that itself carries `w:sectPr` is refused. Cross-section
 movement will require an explicit future operation that updates section ownership
-and proves header/footer semantics together; dev23 does not approximate it.
+and proves header/footer semantics together; dev24 does not approximate it.
 
 Insertion is placed before or after the anchor's complete contiguous range. An
 after-insertion anchor that carries `w:sectPr` is refused because placement after
@@ -98,6 +100,10 @@ that paragraph would change the native section. Before-insertion is safe because
 boundary remains after the unchanged anchor. If the anchor is the first node of a
 later semantic section, its created predecessor becomes the new `section.start_at`;
 native lowering proves that both remain after the preceding section boundary.
+
+Root append always belongs to the last semantic section. AiOffice inserts before a
+unique terminal body `w:sectPr`, never after it. If direct body-level section
+properties are duplicated or nonterminal, the Patch fails atomically.
 
 ## Identity and third-party packages
 
@@ -127,11 +133,11 @@ The operations fail atomically with actionable diagnostics for:
   references, missing paragraph styles, or unsafe XML text;
 - any result that fails semantic validation or native identity refresh.
 
-The machine-readable `structural_editing` capability reports insertion and both move
-operations, the remove operation, supported inserted blocks and inline content,
-placement rules, selector type, native scope, multi-element behavior, section
-policy, section-prepend behavior, identity behavior, conservative orphan policy,
-source immutability, and dry-run support.
+The machine-readable `structural_editing` capability reports root append, relative
+insertion and both move operations, the remove operation, supported inserted blocks
+and inline content, placement rules, selector type, native scope, multi-element
+behavior, section policy, section-prepend behavior, identity behavior, conservative
+orphan policy, source immutability, and dry-run support.
 
 ## CLI and Workspace
 

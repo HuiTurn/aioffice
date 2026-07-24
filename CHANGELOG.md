@@ -239,6 +239,17 @@
 - Attached persistent identity manifests on the first text insertion into third-party
   DOCX packages, refreshed shifted content/field/section/table references, and exposed
   the operation through capabilities, CLI apply, and Workspace persistence.
+- Added native `node.append` lowering for imported DOCX so AI callers can add a
+  paragraph or heading through the document-root selector without first discovering
+  the final content ID.
+- Appended content is inserted before the optional terminal body-level `w:sectPr`,
+  keeping it in the final semantic section while preserving the original section
+  properties byte-for-byte; empty document bodies are supported.
+- Added ordered batch tracking for appended nodes, terminal-section fail-closed
+  validation, strict unknown-field validation, CLI/Workspace capability coverage,
+  and exact preservation/reopen tests.
+- Removed `node.append` from detached native-authority projections and reject it
+  before semantic mutation when the authoritative DOCX package is unavailable.
 - Added symmetric native `node.insert_before` so AI callers can prepend content to
   the document or place a new paragraph/heading before any complete mapped range,
   including multi-paragraph list anchors.
@@ -263,7 +274,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.23`.
+- Advanced the AiOffice Document Spec to `0.2-draft.24`.
 
 ## 0.1.0
 

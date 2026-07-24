@@ -158,6 +158,284 @@ class NativeDocxTests(unittest.TestCase):
             ]
             self.assertIn("AlpHA-BEta Gamma", texts)
 
+    def test_native_append_preserves_terminal_section_and_existing_xml(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder(
+                sections=[
+                    {"id": "front", "start_at": None},
+                    {
+                        "id": "body_section",
+                        "start_at": "body",
+                        "layout": {"start_type": "next_page"},
+                    },
+                ]
+            )
+            .paragraph("Cover", id="cover")
+            .paragraph("Body", id="body")
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        before_spec = document.to_spec()
+        before_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        before_body = before_root.find(_q(W, "body"))
+        assert before_body is not None
+        terminal_section = ET.tostring(list(before_body)[-1])
+        original_payloads = {
+            node["id"]: [
+                ET.tostring(list(before_body)[index])
+                for index in node["source_ref"]["element_indices"]
+            ]
+            for node in before_spec["content"]
+        }
+        result = document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "appendix",
+                        "type": "heading",
+                        "level": 2,
+                        "text": "Appendix",
+                    },
+                },
+                {
+                    "op": "node.append",
+                    "target": f"#{document.id}",
+                    "content": {
+                        "id": "tail",
+                        "type": "paragraph",
+                        "text": "Draft tail",
+                    },
+                },
+                {
+                    "op": "text.replace",
+                    "target": "#tail",
+                    "search": "Draft",
+                    "replacement": "Final",
+                },
+                {
+                    "op": "paragraph.format",
+                    "target": "#tail",
+                    "set": {"keep_with_next": True},
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.document is not None
+        result_spec = result.document.to_spec()
+        self.assertEqual(
+            [node["id"] for node in result_spec["content"]],
+            ["cover", "body", "appendix", "tail"],
+        )
+        self.assertEqual(
+            [
+                section.get("start_at")
+                for section in result_spec["sections"]
+            ],
+            [
+                section.get("start_at")
+                for section in before_spec["sections"]
+            ],
+        )
+        output = result.document.to_bytes("docx")
+        output_root = parse_xml(
+            ZipFile(io.BytesIO(output)).read("word/document.xml")
+        )
+        output_body = output_root.find(_q(W, "body"))
+        assert output_body is not None
+        self.assertEqual(
+            list(output_body)[-1].tag,
+            _q(W, "sectPr"),
+        )
+        self.assertEqual(
+            ET.tostring(list(output_body)[-1]),
+            terminal_section,
+        )
+        for node in result_spec["content"]:
+            if node["id"] not in original_payloads:
+                continue
+            self.assertEqual(
+                [
+                    ET.tostring(list(output_body)[index])
+                    for index in node["source_ref"]["element_indices"]
+                ],
+                original_payloads[node["id"]],
+                node["id"],
+            )
+        reopened = Document.from_docx(output)
+        reopened_nodes = reopened.to_spec()["content"]
+        self.assertEqual(
+            [node["id"] for node in reopened_nodes],
+            ["cover", "body", "appendix", "tail"],
+        )
+        self.assertEqual(_semantic_text(reopened_nodes[-1]), "Final tail")
+        self.assertTrue(
+            reopened_nodes[-1]["paragraph_style"]["keep_with_next"]
+        )
+
+    def test_native_append_populates_an_empty_document_body(
+        self,
+    ) -> None:
+        source = DocumentBuilder().build().to_bytes("docx")
+        document = Document.from_docx(source)
+        self.assertEqual(document.to_spec()["content"], [])
+        result = document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": document.id,
+                    "content": {
+                        "id": "first",
+                        "type": "paragraph",
+                        "text": "First content",
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        output_root = parse_xml(
+            ZipFile(io.BytesIO(output)).read("word/document.xml")
+        )
+        output_body = output_root.find(_q(W, "body"))
+        assert output_body is not None
+        self.assertEqual(
+            [
+                element.tag
+                for element in list(output_body)
+            ],
+            [_q(W, "p"), _q(W, "sectPr")],
+        )
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            [
+                node["id"]
+                for node in reopened.to_spec()["content"]
+            ],
+            ["first"],
+        )
+
+    def test_native_append_refuses_nonterminal_body_section_properties(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Existing", id="existing")
+            .build()
+            .to_bytes("docx")
+        )
+        source_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        source_body = source_root.find(_q(W, "body"))
+        assert source_body is not None
+        terminal_section = list(source_body)[-1]
+        self.assertEqual(terminal_section.tag, _q(W, "sectPr"))
+        source_body.remove(terminal_section)
+        source_body.insert(0, terminal_section)
+        malformed = _rewrite_package(
+            source,
+            {
+                "word/document.xml": serialize_xml(source_root),
+            },
+        )
+        document = Document.from_docx(malformed)
+        result = document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "unsafe_append",
+                        "type": "paragraph",
+                        "text": "Unsafe",
+                    },
+                }
+            ]
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "final and only direct section properties",
+            result.diagnostics[0].message,
+        )
+        self.assertEqual(document.to_bytes("docx"), malformed)
+
+    def test_native_append_supports_body_without_section_properties(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Existing", id="existing")
+            .build()
+            .to_bytes("docx")
+        )
+        source_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        source_body = source_root.find(_q(W, "body"))
+        assert source_body is not None
+        terminal_section = list(source_body)[-1]
+        self.assertEqual(terminal_section.tag, _q(W, "sectPr"))
+        source_body.remove(terminal_section)
+        without_section_properties = _rewrite_package(
+            source,
+            {
+                "word/document.xml": serialize_xml(source_root),
+            },
+        )
+        document = Document.from_docx(without_section_properties)
+        result = document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "appended",
+                        "type": "paragraph",
+                        "text": "Appended",
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(
+            document.to_bytes("docx"),
+            without_section_properties,
+        )
+        assert result.document is not None
+        output_root = parse_xml(
+            ZipFile(
+                io.BytesIO(result.document.to_bytes("docx"))
+            ).read("word/document.xml")
+        )
+        output_body = output_root.find(_q(W, "body"))
+        assert output_body is not None
+        self.assertEqual(
+            [
+                _semantic_text(node)
+                for node in Document.from_docx(
+                    result.document.to_bytes("docx")
+                ).to_spec()["content"]
+            ],
+            ["Existing", "Appended"],
+        )
+        self.assertEqual(
+            list(output_body)[-1].tag,
+            _q(W, "p"),
+        )
+
     def test_unsupported_native_operation_is_atomic(self) -> None:
         source = self._source_document()
         document = Document.from_docx(source)
@@ -166,12 +444,16 @@ class NativeDocxTests(unittest.TestCase):
                 {
                     "op": "node.append",
                     "target": "$",
-                    "content": {"type": "paragraph", "text": "New"},
+                    "content": {"type": "page_break"},
                 }
             ]
         )
         self.assertFalse(result.success)
         self.assertEqual(result.diagnostics[0].code, "NATIVE_PATCH_FAILED")
+        self.assertIn(
+            "only paragraph and heading",
+            result.diagnostics[0].message,
+        )
         self.assertEqual(document.revision, 1)
         assert document.fidelity is not None
         self.assertEqual(document.fidelity.level, FidelityLevel.EXACT_PACKAGE)
@@ -746,6 +1028,10 @@ class NativeDocxTests(unittest.TestCase):
         }
         detached = Document.from_spec(before_spec)
         self.assertNotIn(
+            "node.append",
+            detached.capabilities()["operations"],
+        )
+        self.assertNotIn(
             "node.insert_after",
             detached.capabilities()["operations"],
         )
@@ -791,6 +1077,24 @@ class NativeDocxTests(unittest.TestCase):
         self.assertFalse(detached_insert_before.success)
         self.assertEqual(
             detached_insert_before.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+        detached_append = detached.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "detached_append",
+                        "type": "paragraph",
+                        "text": "Detached append",
+                    },
+                }
+            ]
+        )
+        self.assertFalse(detached_append.success)
+        self.assertEqual(
+            detached_append.diagnostics[0].code,
             "UNSUPPORTED_FEATURE",
         )
         detached_result = detached.apply(
