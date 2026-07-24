@@ -1,6 +1,6 @@
 # Stable-ID structural editing
 
-AiOffice structural edits address semantic nodes, not array positions. The dev24
+AiOffice structural edits address semantic nodes, not array positions. The dev25
 contract exposes insertion, a deliberately narrow pair of relative moves, and
 removal:
 
@@ -44,12 +44,13 @@ because another unknown native consumer may still depend on them.
 ## Native insertion versus movement
 
 `node.append`, `node.insert_after`, and `node.insert_before` create a new semantic
-node. For an imported DOCX, dev24 accepts new `paragraph` and `heading` blocks and
-compiles exactly one new `w:p`. Root append targets `$` and works even when the
-document has no semantic content; it places the new block before the optional final
-body-level `w:sectPr`. The relative operations preserve the complete anchor. Rich
-text, direct paragraph/text formatting, internal and external hyperlinks, and
-normalized document fields are supported. See
+node. For an imported DOCX, dev25 accepts new `paragraph`, `heading`, and
+`page_break` blocks and compiles exactly one new `w:p`. Root append targets `$` and
+works even when the document has no semantic content; it places the new block
+before the optional final body-level `w:sectPr`. The relative operations preserve
+the complete anchor. Rich text, direct paragraph/text formatting, internal and
+external hyperlinks, and normalized document fields are supported for text blocks;
+a page break is compiled as an isolated `w:r/w:br` control. See
 [native text insertion](native-text-insertion.md).
 
 Reconstructing an *existing* imported DOCX block from its JSON projection would
@@ -80,7 +81,7 @@ returned in `changes[].created_nodes` for a later Patch.
 
 Word section semantics depend on the position of `w:sectPr`. A move that casually
 crosses one of those boundaries can silently change page size, margins, columns,
-headers, footers, numbering, or vertical alignment. Dev24 therefore requires:
+headers, footers, numbering, or vertical alignment. Dev25 therefore requires:
 
 - target and anchor belong to the same semantic section;
 - the target is not the `start_at` node of a later section;
@@ -92,7 +93,7 @@ carrier remains in place and the semantic section's `start_at` is rebound to the
 moved node. The change evidence records the section ID and old/new anchors. A
 text-bearing paragraph that itself carries `w:sectPr` is refused. Cross-section
 movement will require an explicit future operation that updates section ownership
-and proves header/footer semantics together; dev24 does not approximate it.
+and proves header/footer semantics together; dev25 does not approximate it.
 
 Insertion is placed before or after the anchor's complete contiguous range. An
 after-insertion anchor that carries `w:sectPr` is refused because placement after

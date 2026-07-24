@@ -471,7 +471,15 @@ class WorkspaceTests(unittest.TestCase):
                             "level": 2,
                             "text": "Appended",
                         },
-                    }
+                    },
+                    {
+                        "op": "node.append",
+                        "target": "$",
+                        "content": {
+                            "id": "final_break",
+                            "type": "page_break",
+                        },
+                    },
                 ],
                 base_revision=inserted.result_revision,
             )
@@ -479,10 +487,16 @@ class WorkspaceTests(unittest.TestCase):
             after_append = workspace.open_document(document.id)
             self.assertEqual(
                 [
-                    node["id"]
+                    (node["id"], node["type"])
                     for node in after_append.to_spec()["content"]
                 ],
-                ["inserted", "c", "a", "appended"],
+                [
+                    ("inserted", "paragraph"),
+                    ("c", "paragraph"),
+                    ("a", "paragraph"),
+                    ("appended", "heading"),
+                    ("final_break", "page_break"),
+                ],
             )
 
 

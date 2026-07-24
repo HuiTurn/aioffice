@@ -1348,6 +1348,7 @@ class Document:
                 "insertable_native_blocks": [
                     "paragraph",
                     "heading",
+                    "page_break",
                 ],
                 "inserted_inline_content": [
                     "styled_text_spans",

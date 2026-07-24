@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev24`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev25`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -27,8 +27,9 @@ extraction, selective native image metadata and geometry updates, occurrence-sco
 copy-on-write image replacement, addressable native inline image insertion, direct
 image-paragraph layout formatting, semantic diffs, isolated LibreOffice/Poppler
 native rendering, root append plus bidirectional stable-ID native
-paragraph/heading insertion and block reordering, consistent multi-page evidence,
-page occupancy diagnostics, visual-regression contracts, and fidelity reports.
+paragraph/heading/page-break insertion and block reordering, consistent multi-page
+evidence, page occupancy diagnostics, visual-regression contracts, and fidelity
+reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -732,8 +733,8 @@ assert result.success
 preview = result.document
 ```
 
-Imported DOCX documents can receive a new paragraph or heading without rebuilding
-their existing content:
+Imported DOCX documents can receive a new paragraph, heading, or explicit page
+break without rebuilding their existing content:
 
 ```python
 result = doc.apply([
@@ -769,6 +770,11 @@ discovering the final content ID; native lowering inserts it before the terminal
 body `w:sectPr`. See
 [native text insertion](docs/native-text-insertion.md).
 
+Use the same operations with `{"type": "page_break"}` to insert one native
+`w:p/w:r/w:br` pagination control. The break has its own stable ID, can be targeted
+later in the Patch, and is verified by native rendering rather than approximated by
+the JSON projection.
+
 Existing top-level content can be reordered without reconstructing it or addressing
 an array index:
 
@@ -787,7 +793,7 @@ For imported DOCX, AiOffice moves the target's complete mapped XML range. A
 multi-paragraph list remains one contiguous unit, DrawingML and unknown XML stay in
 their original elements, and every native reference is reindexed. `node.move_after`
 and `node.move_before` cover every relative position without array indexes. The
-conservative dev24 boundary permits moves only within one semantic section, refuses
+conservative dev25 boundary permits moves only within one semantic section, refuses
 moving a section start anchor, and rebinds `section.start_at` when prepending within
 a later section. Native elements carrying `w:sectPr` remain immovable. See
 [the structural editing contract](docs/structural-editing.md).

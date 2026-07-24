@@ -81,6 +81,7 @@ from aioffice.spec.models import (
     InlineContent,
     NamedStyle,
     NativeRef,
+    PageBreak,
     Paragraph,
     ParagraphStyle,
     SectionLayout,
@@ -298,10 +299,10 @@ def _append_inserted_text_span(
     text.text = span.text
 
 
-def _compile_inserted_text_block(
+def _compile_inserted_body_block(
     package: NativePackage,
     container: ET.Element,
-    block: Heading | Paragraph,
+    block: Heading | PageBreak | Paragraph,
     *,
     source_part: str,
     styles_root: ET.Element | None,
@@ -311,6 +312,34 @@ def _compile_inserted_text_block(
             "Inserted content cannot claim an existing native "
             "source reference."
         )
+    paragraph = ET.Element(
+        _q(W, "p"),
+        {
+            _q(W14, "paraId"): _native_paragraph_anchor(
+                container,
+                block.id,
+            )
+        },
+    )
+    if isinstance(block, PageBreak):
+        run = ET.SubElement(paragraph, _q(W, "r"))
+        ET.SubElement(
+            run,
+            _q(W, "br"),
+            {_q(W, "type"): "page"},
+        )
+        try:
+            parse_xml(serialize_xml(paragraph))
+        except (
+            NativePackageError,
+            UnicodeError,
+            ValueError,
+        ) as error:
+            raise NativePackageError(
+                "Native page-break insertion generated attributes that "
+                "are not valid, safe XML."
+            ) from error
+        return paragraph, []
     native_style_ref = (
         block.style_ref or f"Heading{block.level}"
         if isinstance(block, Heading)
@@ -326,15 +355,6 @@ def _compile_inserted_text_block(
                 f"{native_style_ref!r} required by inserted "
                 f"{block.type} {block.id!r}."
             )
-    paragraph = ET.Element(
-        _q(W, "p"),
-        {
-            _q(W14, "paraId"): _native_paragraph_anchor(
-                container,
-                block.id,
-            )
-        },
-    )
     if native_style_ref is not None:
         patch_paragraph_style_ref(
             paragraph,
@@ -1635,21 +1655,26 @@ def apply_docx_operations(
             candidate_payload["id"] = created_id
             try:
                 if candidate_payload.get("type") == "paragraph":
-                    candidate: Heading | Paragraph = (
+                    candidate: Heading | PageBreak | Paragraph = (
                         Paragraph.model_validate(candidate_payload)
                     )
                 elif candidate_payload.get("type") == "heading":
                     candidate = Heading.model_validate(candidate_payload)
+                elif candidate_payload.get("type") == "page_break":
+                    candidate = PageBreak.model_validate(
+                        candidate_payload
+                    )
                 else:
                     raise NativePackageError(
                         f"Imported DOCX {operation_name} currently "
-                        "supports only paragraph and heading content."
+                        "supports only paragraph, heading, and page_break "
+                        "content."
                     )
             except ValidationError as error:
                 raise NativePackageError(
                     f"Could not lower {operation_name} content: {error}"
                 ) from error
-            paragraph, new_fields = _compile_inserted_text_block(
+            paragraph, new_fields = _compile_inserted_body_block(
                 updated,
                 body,
                 candidate,
@@ -1672,7 +1697,11 @@ def apply_docx_operations(
                 [paragraph],
                 [insert_index],
                 part_uri="/word/document.xml",
-                native_kind="w:p",
+                native_kind=(
+                    "w:page-break"
+                    if isinstance(candidate, PageBreak)
+                    else "w:p"
+                ),
                 root_path="/w:document/w:body",
                 native_id=paragraph.get(_q(W14, "paraId")),
             )

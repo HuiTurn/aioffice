@@ -1,3 +1,3 @@
 """AiOffice package version."""
 
-__version__ = "0.2.0.dev24"
+__version__ = "0.2.0.dev25"

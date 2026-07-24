@@ -408,6 +408,14 @@ class CliTests(unittest.TestCase):
                                 "text": "Inserted",
                             },
                         },
+                        {
+                            "op": "node.append",
+                            "target": "$",
+                            "content": {
+                                "id": "final_break",
+                                "type": "page_break",
+                            },
+                        },
                     ]
                 ),
                 encoding="utf-8",
@@ -440,13 +448,22 @@ class CliTests(unittest.TestCase):
                 report["changes"][2]["operation"],
                 "node.insert_before",
             )
+            self.assertEqual(
+                report["changes"][3]["operation"],
+                "node.append",
+            )
             reopened = Document.from_docx(output)
             self.assertEqual(
                 [
-                    node["id"]
+                    (node["id"], node["type"])
                     for node in reopened.to_spec()["content"]
                 ],
-                ["inserted", "c", "a"],
+                [
+                    ("inserted", "paragraph"),
+                    ("c", "paragraph"),
+                    ("a", "paragraph"),
+                    ("final_break", "page_break"),
+                ],
             )
 
 

@@ -250,6 +250,15 @@
   and exact preservation/reopen tests.
 - Removed `node.append` from detached native-authority projections and reject it
   before semantic mutation when the authoritative DOCX package is unavailable.
+- Added native `page_break` lowering through `node.append`, `node.insert_after`, and
+  `node.insert_before`, compiling exactly one stable-ID `w:p/w:r/w:br` with
+  `w:type="page"`.
+- Page breaks now participate in live batch targeting, section-start rebinding,
+  identity refresh, CLI apply, Workspace persistence, and standalone reopen without
+  reconstructing any existing native element.
+- Added exact XML tests for all three placement modes and rendered a real third-party
+  DOCX to prove that the explicit break changes pagination while existing image,
+  table, relationship, and section payloads remain unchanged.
 - Added symmetric native `node.insert_before` so AI callers can prepend content to
   the document or place a new paragraph/heading before any complete mapped range,
   including multi-paragraph list anchors.
@@ -274,7 +283,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.24`.
+- Advanced the AiOffice Document Spec to `0.2-draft.25`.
 
 ## 0.1.0
 

@@ -1,9 +1,9 @@
-# Incremental native paragraph and heading insertion
+# Incremental native body-block insertion
 
-AiOffice `0.2.0.dev24` can insert a new paragraph or heading into an imported DOCX
-without rebuilding the document from its JSON projection. JSON remains the
-AI-facing intent and evidence layer; the attached OPC package remains the native
-authority.
+AiOffice `0.2.0.dev25` can insert a new paragraph, heading, or explicit page break
+into an imported DOCX without rebuilding the document from its JSON projection.
+JSON remains the AI-facing intent and evidence layer; the attached OPC package
+remains the native authority.
 
 ## Operations
 
@@ -69,7 +69,7 @@ multi-operation agent plans because later operations can refer to them directly.
 
 The native subset accepts:
 
-- `paragraph` and `heading` blocks;
+- `paragraph`, `heading`, and `page_break` blocks;
 - plain text or ordered rich `TextSpan` / normalized `DocumentField` content;
 - strong, emphasis, underline, strike, code, subscript, superscript, highlight, and
   link marks;
@@ -81,8 +81,26 @@ The native subset accepts:
   `style_ref` uses the document's `Heading1` through `Heading6` style.
 
 Native-only field instructions are read-only and cannot be inserted from their
-display projection. Lists, tables, images, page breaks, and opaque blocks require
-dedicated native operations rather than generic text insertion.
+display projection. Lists, tables, images, and opaque blocks require dedicated
+native operations rather than generic body insertion.
+
+A page break uses only its ID and type:
+
+```json
+{
+  "op": "node.insert_before",
+  "target": "#appendix",
+  "content": {
+    "id": "appendix_page",
+    "type": "page_break"
+  }
+}
+```
+
+Native lowering creates one paragraph with one run and one `w:br` whose `w:type` is
+`page`. It adds no display text, relationship, or reconstructed style. The new break
+can immediately anchor another insertion, move as one native element, or be removed
+through its stable ID.
 
 ## Batch object tracking
 
@@ -142,6 +160,12 @@ the unchanged boundary still follows that paragraph. Insertion *after* the same
 paragraph remains refused because it would silently change the inserted block's
 section ownership.
 
+A page break inserted before a later section's first node becomes that section's
+new `start_at`, just like a paragraph or heading. This is structurally exact, though
+the combination of an explicit break and a `next_page` section start may intentionally
+produce additional whitespace; native render evidence is the authority for that
+layout decision.
+
 ## Fidelity and safety
 
 Before relative insertion AiOffice proves that:
@@ -152,7 +176,7 @@ Before relative insertion AiOffice proves that:
    any boundary inside the unchanged anchor;
 4. the new block has no forged `source_ref`;
 5. the required named style exists in the native style catalog;
-6. generated text and attributes form safe, valid XML;
+6. generated text, page-break controls, and attributes form safe, valid XML;
 7. the generated field count matches its semantic field identities.
 
 For root append, AiOffice separately proves that a direct body-level `w:sectPr`, if

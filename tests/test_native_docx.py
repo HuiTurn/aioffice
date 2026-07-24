@@ -436,6 +436,177 @@ class NativeDocxTests(unittest.TestCase):
             _q(W, "p"),
         )
 
+    def test_native_page_breaks_support_all_insertion_positions(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder(
+                sections=[
+                    {"id": "front", "start_at": None},
+                    {
+                        "id": "body_section",
+                        "start_at": "body",
+                        "layout": {"start_type": "continuous"},
+                    },
+                ]
+            )
+            .paragraph("Cover", id="cover")
+            .paragraph("Body", id="body")
+            .paragraph("Conclusion", id="conclusion")
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        before_spec = document.to_spec()
+        before_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        before_body = before_root.find(_q(W, "body"))
+        assert before_body is not None
+        terminal_section = ET.tostring(list(before_body)[-1])
+        original_payloads = {
+            node["id"]: [
+                ET.tostring(list(before_body)[index])
+                for index in node["source_ref"]["element_indices"]
+            ]
+            for node in before_spec["content"]
+        }
+        result = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": "#cover",
+                    "content": {
+                        "id": "after_cover",
+                        "type": "page_break",
+                    },
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#body",
+                    "content": {
+                        "id": "body_break",
+                        "type": "page_break",
+                    },
+                },
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "final_break",
+                        "type": "page_break",
+                    },
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#final_break",
+                    "content": {
+                        "id": "closing_label",
+                        "type": "paragraph",
+                        "text": "Closing label",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.document is not None
+        result_spec = result.document.to_spec()
+        self.assertEqual(
+            [node["id"] for node in result_spec["content"]],
+            [
+                "cover",
+                "after_cover",
+                "body_break",
+                "body",
+                "conclusion",
+                "closing_label",
+                "final_break",
+            ],
+        )
+        self.assertEqual(
+            result_spec["sections"][1]["start_at"],
+            "body_break",
+        )
+        self.assertEqual(
+            result.changes[1]["section_start_updated"],
+            {
+                "section_id": "body_section",
+                "from": "body",
+                "to": "body_break",
+            },
+        )
+        output = result.document.to_bytes("docx")
+        output_root = parse_xml(
+            ZipFile(io.BytesIO(output)).read("word/document.xml")
+        )
+        output_body = output_root.find(_q(W, "body"))
+        assert output_body is not None
+        self.assertEqual(
+            ET.tostring(list(output_body)[-1]),
+            terminal_section,
+        )
+        for node in result_spec["content"]:
+            if node["id"] not in original_payloads:
+                continue
+            self.assertEqual(
+                [
+                    ET.tostring(list(output_body)[index])
+                    for index in node["source_ref"]["element_indices"]
+                ],
+                original_payloads[node["id"]],
+                node["id"],
+            )
+        for break_id in {
+            "after_cover",
+            "body_break",
+            "final_break",
+        }:
+            break_node = next(
+                node
+                for node in result_spec["content"]
+                if node["id"] == break_id
+            )
+            self.assertEqual(break_node["type"], "page_break")
+            self.assertEqual(
+                break_node["source_ref"]["native_kind"],
+                "w:page-break",
+            )
+            break_element = list(output_body)[
+                break_node["source_ref"]["element_index"]
+            ]
+            native_break = break_element.find(
+                f".//{_q(W, 'br')}"
+            )
+            assert native_break is not None
+            self.assertEqual(
+                native_break.get(_q(W, "type")),
+                "page",
+            )
+            self.assertIsNone(
+                break_element.find(f".//{_q(W, 't')}")
+            )
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            [
+                (node["id"], node["type"])
+                for node in reopened.to_spec()["content"]
+            ],
+            [
+                ("cover", "paragraph"),
+                ("after_cover", "page_break"),
+                ("body_break", "page_break"),
+                ("body", "paragraph"),
+                ("conclusion", "paragraph"),
+                ("closing_label", "paragraph"),
+                ("final_break", "page_break"),
+            ],
+        )
+        self.assertEqual(
+            reopened.to_spec()["sections"][1]["start_at"],
+            "body_break",
+        )
+
     def test_unsupported_native_operation_is_atomic(self) -> None:
         source = self._source_document()
         document = Document.from_docx(source)
@@ -444,14 +615,18 @@ class NativeDocxTests(unittest.TestCase):
                 {
                     "op": "node.append",
                     "target": "$",
-                    "content": {"type": "page_break"},
+                    "content": {
+                        "id": "unsupported_list",
+                        "type": "bullet_list",
+                        "items": ["New"],
+                    },
                 }
             ]
         )
         self.assertFalse(result.success)
         self.assertEqual(result.diagnostics[0].code, "NATIVE_PATCH_FAILED")
         self.assertIn(
-            "only paragraph and heading",
+            "only paragraph, heading, and page_break",
             result.diagnostics[0].message,
         )
         self.assertEqual(document.revision, 1)
@@ -464,8 +639,9 @@ class NativeDocxTests(unittest.TestCase):
                     "op": "node.insert_after",
                     "target": "#body",
                     "content": {
-                        "id": "unsupported_break",
-                        "type": "page_break",
+                        "id": "unsupported_list",
+                        "type": "ordered_list",
+                        "items": ["New"],
                     },
                 }
             ]
@@ -476,7 +652,7 @@ class NativeDocxTests(unittest.TestCase):
             "NATIVE_PATCH_FAILED",
         )
         self.assertIn(
-            "only paragraph and heading",
+            "only paragraph, heading, and page_break",
             unsupported_insert.diagnostics[0].message,
         )
         invalid_xml_insert = document.apply(

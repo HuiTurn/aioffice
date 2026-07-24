@@ -256,6 +256,10 @@ class PatchTests(unittest.TestCase):
             structural_capabilities["append_empty_document"]
         )
         self.assertEqual(
+            structural_capabilities["insertable_native_blocks"],
+            ["paragraph", "heading", "page_break"],
+        )
+        self.assertEqual(
             structural_capabilities["insert_operations"],
             {
                 "after": "node.insert_after",
