@@ -173,6 +173,23 @@
 - Documented the verified interoperability boundary that LibreOffice 26.8 currently
   ignores `a:alphaModFix` during rendering and removes it on save; Word/Office
   rendering remains required for opacity-sensitive visual approval.
+- Added strict `ImageShadow` semantics backed by one direct
+  `pic:spPr/a:effectLst/a:outerShdw`, with direct sRGB color, opacity at native
+  thousandth-percentage precision, explicit blur and distance lengths, clockwise
+  direction, all nine rectangle alignments, rotate-with-shape behavior, and
+  optional four-edge inline effect-extent layout evidence.
+- Added complete-group shadow set/clear lowering, insertion, semantic HTML
+  evidence, CLI and Workspace transport, verified reads, copy-on-write replacement,
+  anchor-update preservation, and header/footer clone isolation.
+- Preserved supported outer-shadow XML byte-for-byte through no-op and unrelated
+  edits, accepted a neutral empty direct effect list, and kept theme colors,
+  scaling, skewing, additional effects, malformed attributes, and invalid child
+  order fail-closed as opaque.
+- Verified that LibreOffice 26.8 renders the tested direct black outer shadow,
+  retains it on save, and may quantize its EMU lengths or add effect extents. A
+  LibreOffice save may wrap the drawing in `mc:AlternateContent`, which remains
+  losslessly opaque; Microsoft Word/Office remains the cross-producer visual
+  authority.
 - Accepted LibreOffice's visually neutral picture normalization
   (`pic:spPr/@bwMode="auto"` and at most one empty `a:noFill`) so aligned pictures
   remain projected and editable after an Office-compatible open/save cycle, while
@@ -580,6 +597,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.43`.
 - Advanced the AiOffice Document Spec to `0.2-draft.44`.
 - Advanced the AiOffice Document Spec to `0.2-draft.45`.
+- Advanced the AiOffice Document Spec to `0.2-draft.46`.
 
 ## 0.1.0
 

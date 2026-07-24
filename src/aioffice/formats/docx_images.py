@@ -34,8 +34,10 @@ from aioffice.spec.models import (
     FloatingImageWrapPolygon,
     ImageBlock,
     ImageCrop,
+    ImageEffectExtent,
     ImageInsert,
     ImageOutline,
+    ImageShadow,
     ImageTransform,
     Length,
     NativeRef,
@@ -74,6 +76,21 @@ _OUTLINE_DASH_TO_NATIVE = {
 _OUTLINE_DASH_FROM_NATIVE = {
     native: semantic
     for semantic, native in _OUTLINE_DASH_TO_NATIVE.items()
+}
+_SHADOW_ALIGNMENT_TO_NATIVE = {
+    "top_left": "tl",
+    "top": "t",
+    "top_right": "tr",
+    "left": "l",
+    "center": "ctr",
+    "right": "r",
+    "bottom_left": "bl",
+    "bottom": "b",
+    "bottom_right": "br",
+}
+_SHADOW_ALIGNMENT_FROM_NATIVE = {
+    native: semantic
+    for semantic, native in _SHADOW_ALIGNMENT_TO_NATIVE.items()
 }
 
 IMAGE_RELATIONSHIP_TYPE = (
@@ -145,6 +162,7 @@ class SimpleNativeImage:
     transform: ImageTransform | None
     outline: ImageOutline | None
     opacity: float | None
+    shadow: ImageShadow | None
     placement: Literal["inline", "floating"]
     floating: FloatingImageLayout | None
     name: str | None
@@ -189,6 +207,17 @@ ImageOutlineDashValue: TypeAlias = Literal[
     "large_dash_dot",
     "large_dash_dot_dot",
     "system_dash_dot_dot",
+]
+ImageShadowAlignmentValue: TypeAlias = Literal[
+    "top_left",
+    "top",
+    "top_right",
+    "left",
+    "center",
+    "right",
+    "bottom_left",
+    "bottom",
+    "bottom_right",
 ]
 RelativeWidthTo: TypeAlias = Literal[
     "inside_margin",
@@ -531,7 +560,7 @@ def _native_text_distance_attributes(
 
 
 def _native_effect_extent(
-    effect_extent: FloatingImageEffectExtent,
+    effect_extent: ImageEffectExtent,
 ) -> ET.Element | None:
     attributes: dict[str, str] = {}
     for field_name, attribute_name in _EFFECT_EXTENT_FIELDS:
@@ -749,6 +778,54 @@ def _native_image_opacity_amount(opacity: float | None) -> str | None:
     if native_opacity < 0 or native_opacity >= 100_000:
         return None
     return str(native_opacity)
+
+
+def _native_image_shadow_element(
+    shadow: ImageShadow,
+) -> ET.Element | None:
+    native_blur = round(shadow.blur_radius.to_points() * EMU_PER_POINT)
+    native_distance = round(shadow.distance.to_points() * EMU_PER_POINT)
+    native_direction = round(
+        shadow.direction_degrees_clockwise * 60_000
+    )
+    native_opacity = round(shadow.opacity * 1_000)
+    native_alignment = _SHADOW_ALIGNMENT_TO_NATIVE.get(shadow.alignment)
+    if (
+        native_blur < 0
+        or native_blur > 2_147_483_647
+        or native_distance < 0
+        or native_distance > 2_147_483_647
+        or not (native_blur or native_distance)
+        or native_direction < 0
+        or native_direction >= 21_600_000
+        or native_opacity <= 0
+        or native_opacity > 100_000
+        or native_alignment is None
+    ):
+        return None
+    effect_list = ET.Element(_q(A, "effectLst"))
+    outer_shadow = ET.SubElement(
+        effect_list,
+        _q(A, "outerShdw"),
+        {
+            "blurRad": str(native_blur),
+            "dist": str(native_distance),
+            "dir": str(native_direction),
+            "algn": native_alignment,
+            "rotWithShape": "1" if shadow.rotate_with_shape else "0",
+        },
+    )
+    color = ET.SubElement(
+        outer_shadow,
+        _q(A, "srgbClr"),
+        {"val": shadow.color.removeprefix("#").upper()},
+    )
+    ET.SubElement(
+        color,
+        _q(A, "alpha"),
+        {"val": str(native_opacity)},
+    )
+    return effect_list
 
 
 def floating_image_layout_matches(
@@ -1415,7 +1492,7 @@ def simple_native_image(
         parsed_effect_extent = _floating_effect_extent(effect_extent)
     except ValueError:
         return None
-    if (
+    inline_effect_extent_is_nonzero = (
         placement == "inline"
         and parsed_effect_extent is not None
         and any(
@@ -1426,8 +1503,7 @@ def simple_native_image(
             != 0
             for field_name, _ in _EFFECT_EXTENT_FIELDS
         )
-    ):
-        return None
+    )
 
     graphic_data = graphic.find(f"./{_q(A, 'graphicData')}")
     if (
@@ -1581,6 +1657,7 @@ def simple_native_image(
         _q(A, "prstGeom"),
         _q(A, "noFill"),
         _q(A, "ln"),
+        _q(A, "effectLst"),
     }
     if any(
         child.tag not in allowed_shape_children
@@ -1594,13 +1671,19 @@ def simple_native_image(
     ):
         return None
     outline_elements = shape_properties.findall(f"./{_q(A, 'ln')}")
+    effect_lists = shape_properties.findall(f"./{_q(A, 'effectLst')}")
     expected_shape_children = [
         _q(A, "xfrm"),
         _q(A, "prstGeom"),
         *([_q(A, "noFill")] if no_fills else []),
         *([_q(A, "ln")] if outline_elements else []),
+        *([_q(A, "effectLst")] if effect_lists else []),
     ]
-    if [child.tag for child in shape_properties] != expected_shape_children:
+    if (
+        len(effect_lists) > 1
+        or [child.tag for child in shape_properties]
+        != expected_shape_children
+    ):
         return None
     transforms = shape_properties.findall(f"./{_q(A, 'xfrm')}")
     if len(transforms) != 1:
@@ -1793,6 +1876,110 @@ def simple_native_image(
                 color=f"#{color_value.upper()}",
                 dash=cast(ImageOutlineDashValue, outline_dash),
             )
+    image_shadow: ImageShadow | None = None
+    effect_list = effect_lists[0] if effect_lists else None
+    outer_shadow: ET.Element | None = None
+    if effect_list is not None:
+        if effect_list.attrib or len(effect_list) > 1:
+            return None
+        if len(effect_list):
+            outer_shadow = effect_list[0]
+            if outer_shadow.tag != _q(A, "outerShdw"):
+                return None
+            if set(outer_shadow.attrib) != {
+                "blurRad",
+                "dist",
+                "dir",
+                "algn",
+                "rotWithShape",
+            }:
+                return None
+            if len(outer_shadow) != 1:
+                return None
+            color_element = outer_shadow[0]
+            if color_element.tag != _q(A, "srgbClr"):
+                return None
+            color_value = color_element.attrib.get("val", "")
+            if (
+                set(color_element.attrib) != {"val"}
+                or len(color_value) != 6
+                or any(
+                    character not in "0123456789abcdefABCDEF"
+                    for character in color_value
+                )
+                or len(color_element) > 1
+                or (
+                    len(color_element)
+                    and color_element[0].tag != _q(A, "alpha")
+                )
+            ):
+                return None
+            native_opacity = 100_000
+            if len(color_element):
+                alpha = color_element[0]
+                if set(alpha.attrib) != {"val"} or len(alpha):
+                    return None
+                try:
+                    native_opacity = int(alpha.attrib["val"])
+                except ValueError:
+                    return None
+                if native_opacity <= 0 or native_opacity > 100_000:
+                    return None
+            try:
+                native_blur = int(outer_shadow.attrib["blurRad"])
+                native_distance = int(outer_shadow.attrib["dist"])
+                native_direction = int(outer_shadow.attrib["dir"])
+            except ValueError:
+                return None
+            alignment = _SHADOW_ALIGNMENT_FROM_NATIVE.get(
+                outer_shadow.attrib["algn"]
+            )
+            rotate_with_shape = _strict_boolean(
+                outer_shadow.attrib["rotWithShape"]
+            )
+            if (
+                native_blur < 0
+                or native_blur > 2_147_483_647
+                or native_distance < 0
+                or native_distance > 2_147_483_647
+                or not (native_blur or native_distance)
+                or native_direction < 0
+                or native_direction >= 21_600_000
+                or alignment is None
+                or rotate_with_shape is None
+            ):
+                return None
+            image_shadow = ImageShadow(
+                color=f"#{color_value.upper()}",
+                opacity=round(native_opacity / 1_000, 3),
+                blur_radius=Length(
+                    value=round(native_blur / EMU_PER_POINT, 6),
+                    unit="pt",
+                ),
+                distance=Length(
+                    value=round(native_distance / EMU_PER_POINT, 6),
+                    unit="pt",
+                ),
+                direction_degrees_clockwise=round(
+                    native_direction / 60_000,
+                    6,
+                ),
+                alignment=cast(
+                    ImageShadowAlignmentValue,
+                    alignment,
+                ),
+                rotate_with_shape=rotate_with_shape,
+            )
+    if inline_effect_extent_is_nonzero:
+        if image_shadow is None or parsed_effect_extent is None:
+            return None
+        image_shadow = image_shadow.model_copy(
+            update={
+                "effect_extent": ImageEffectExtent.model_validate(
+                    parsed_effect_extent.model_dump()
+                )
+            }
+        )
     if any(
         element.tag == _q(A, "ln")
         and element not in outline_elements
@@ -1801,7 +1988,11 @@ def simple_native_image(
         return None
     if any(
         _local_name(element.tag) in _VISUAL_EFFECT_NAMES
-        and element is not opacity_element
+        and element not in {
+            opacity_element,
+            effect_list,
+            outer_shadow,
+        }
         for element in picture.iter()
     ):
         return None
@@ -1854,6 +2045,7 @@ def simple_native_image(
         transform=image_transform,
         outline=image_outline,
         opacity=image_opacity,
+        shadow=image_shadow,
         placement=placement,
         floating=floating,
         name=optional_attribute("name"),
@@ -2069,7 +2261,14 @@ def patch_simple_native_image(
         existing_index = (
             list(shape_properties).index(outlines[0])
             if outlines
-            else len(shape_properties)
+            else next(
+                (
+                    list(shape_properties).index(element)
+                    for element in shape_properties
+                    if element.tag == _q(A, "effectLst")
+                ),
+                len(shape_properties),
+            )
         )
         if outlines:
             shape_properties.remove(outlines[0])
@@ -2117,6 +2316,77 @@ def patch_simple_native_image(
                 ),
             )
 
+    if "shadow" in fields:
+        shape_properties = drawing_container.find(
+            f"./{_q(A, 'graphic')}/{_q(A, 'graphicData')}/"
+            f"{_q(PIC, 'pic')}/{_q(PIC, 'spPr')}"
+        )
+        if shape_properties is None:
+            raise NativePackageError(
+                "Supported native image has no pic:spPr element."
+            )
+        effect_lists = shape_properties.findall(f"./{_q(A, 'effectLst')}")
+        if len(effect_lists) > 1:
+            raise NativePackageError(
+                "Supported native image has duplicate direct effect lists."
+            )
+        existing_index = (
+            list(shape_properties).index(effect_lists[0])
+            if effect_lists
+            else len(shape_properties)
+        )
+        if effect_lists:
+            shape_properties.remove(effect_lists[0])
+        if result.shadow is not None:
+            native_shadow = _native_image_shadow_element(result.shadow)
+            if native_shadow is None:
+                raise NativePackageError(
+                    "image.update shadow is outside the supported range."
+                )
+            shape_properties.insert(existing_index, native_shadow)
+        if original.placement == "inline":
+            extent = drawing_container.find(f"./{_q(WP, 'extent')}")
+            effect_extents = drawing_container.findall(
+                f"./{_q(WP, 'effectExtent')}"
+            )
+            if extent is None or len(effect_extents) > 1:
+                raise NativePackageError(
+                    "Supported inline image has invalid effect extent."
+                )
+            desired_effect_extent = (
+                result.shadow.effect_extent
+                if result.shadow is not None
+                else None
+            )
+            native_effect_extent = (
+                _native_effect_extent(desired_effect_extent)
+                if desired_effect_extent is not None
+                else None
+            )
+            if (
+                desired_effect_extent is not None
+                and native_effect_extent is None
+            ):
+                raise NativePackageError(
+                    "image.update shadow effect extent is outside the "
+                    "supported range."
+                )
+            if native_effect_extent is not None:
+                if effect_extents:
+                    drawing_container.remove(effect_extents[0])
+                drawing_container.insert(
+                    list(drawing_container).index(extent) + 1,
+                    native_effect_extent,
+                )
+            elif effect_extents and any(
+                effect_extents[0].get(attribute_name) != "0"
+                for _, attribute_name in _EFFECT_EXTENT_FIELDS
+            ):
+                effect_extents[0].attrib.clear()
+                effect_extents[0].attrib.update(
+                    {"l": "0", "t": "0", "r": "0", "b": "0"}
+                )
+
     verified = simple_native_image(
         package,
         paragraph,
@@ -2128,6 +2398,7 @@ def patch_simple_native_image(
         or verified.transform != result.transform
         or verified.outline != result.outline
         or verified.opacity != result.opacity
+        or verified.shadow != result.shadow
         or verified.placement != original.placement
         or not floating_image_layout_matches(
             verified.floating,
@@ -2344,6 +2615,7 @@ def patch_simple_native_image_anchor(
         or verified.transform != original.transform
         or verified.outline != original.outline
         or verified.opacity != original.opacity
+        or verified.shadow != original.shadow
         or verified.name != original.name
         or verified.alt_text != original.alt_text
         or verified.title != original.title
@@ -2540,6 +2812,7 @@ def replace_simple_native_image(
         or replaced.transform != original.transform
         or replaced.outline != original.outline
         or replaced.opacity != original.opacity
+        or replaced.shadow != original.shadow
         or replaced.placement != original.placement
         or not floating_image_layout_matches(
             replaced.floating,
@@ -2783,11 +3056,25 @@ def insert_simple_native_image_after(
             )
         placement.append(native_wrap)
     else:
-        ET.SubElement(
-            placement,
-            _q(WP, "effectExtent"),
-            {"l": "0", "t": "0", "r": "0", "b": "0"},
-        )
+        if (
+            image.shadow is not None
+            and image.shadow.effect_extent is not None
+        ):
+            native_effect_extent = _native_effect_extent(
+                image.shadow.effect_extent
+            )
+            if native_effect_extent is None:
+                raise NativePackageError(
+                    "Inline image shadow effect extent is outside the "
+                    "supported native range."
+                )
+            placement.append(native_effect_extent)
+        else:
+            ET.SubElement(
+                placement,
+                _q(WP, "effectExtent"),
+                {"l": "0", "t": "0", "r": "0", "b": "0"},
+            )
     document_properties = {
         "id": str(_next_drawing_id(package, container)),
         "name": image.name or asset.filename or "AiOffice image",
@@ -2875,6 +3162,13 @@ def insert_simple_native_image_after(
                 "Image insertion outline is outside the supported range."
             )
         shape.append(native_outline)
+    if image.shadow is not None:
+        native_shadow = _native_image_shadow_element(image.shadow)
+        if native_shadow is None:
+            raise NativePackageError(
+                "Image insertion shadow is outside the supported range."
+            )
+        shape.append(native_shadow)
     if image.placement == "floating":
         assert image.floating is not None
         native_relative_size = _native_relative_size(
@@ -2919,6 +3213,7 @@ def insert_simple_native_image_after(
         or projected.transform != image.transform
         or projected.outline != image.outline
         or projected.opacity != image.opacity
+        or projected.shadow != image.shadow
         or projected.placement != image.placement
         or not floating_image_layout_matches(
             projected.floating,

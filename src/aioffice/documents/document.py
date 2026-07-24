@@ -73,6 +73,7 @@ from aioffice.spec.models import (
     ImageBlock,
     ImageInsert,
     ImageOutline,
+    ImageShadow,
     ImageTransform,
     ImageUpdate,
     LEGACY_DOCUMENT_SCHEMA_URL,
@@ -371,6 +372,7 @@ class Document:
             or image.transform != native_image.transform
             or image.outline != native_image.outline
             or image.opacity != native_image.opacity
+            or image.shadow != native_image.shadow
             or round(image.width.to_points() * 12_700)
             != round(native_image.width.to_points() * 12_700)
             or round(image.height.to_points() * 12_700)
@@ -531,6 +533,7 @@ class Document:
         transform: ImageTransform | Mapping[str, Any] | None = None,
         outline: ImageOutline | Mapping[str, Any] | None = None,
         opacity: float | None = None,
+        shadow: ImageShadow | Mapping[str, Any] | None = None,
         floating: FloatingImageLayout | Mapping[str, Any] | None = None,
         paragraph_style: ParagraphStyle | Mapping[str, Any] | None = None,
         dry_run: bool = False,
@@ -604,6 +607,7 @@ class Document:
             "transform": transform,
             "outline": outline,
             "opacity": opacity,
+            "shadow": shadow,
             "name": name or prepared.asset.filename,
             "alt_text": alt_text,
             "title": title,
@@ -800,6 +804,14 @@ class Document:
                             else None
                         ),
                         opacity=node.opacity,
+                        shadow=(
+                            node.shadow.model_dump(
+                                mode="json",
+                                exclude_none=True,
+                            )
+                            if node.shadow is not None
+                            else None
+                        ),
                         floating=(
                             node.floating.model_dump(
                                 mode="json",
@@ -958,6 +970,14 @@ class Document:
                                             else None
                                         ),
                                         "opacity": block.opacity,
+                                        "shadow": (
+                                            block.shadow.model_dump(
+                                                mode="json",
+                                                exclude_none=True,
+                                            )
+                                            if block.shadow is not None
+                                            else None
+                                        ),
                                         "placement": block.placement,
                                         "floating": (
                                             block.floating.model_dump(
@@ -1231,6 +1251,7 @@ class Document:
                     "transform",
                     "outline",
                     "opacity",
+                    "shadow",
                     "alt_text",
                     "title",
                 ],
@@ -1239,6 +1260,7 @@ class Document:
                     "transform",
                     "outline",
                     "opacity",
+                    "shadow",
                     "alt_text",
                     "title",
                 ],
@@ -1295,6 +1317,37 @@ class Document:
                     "pic:blipFill/a:blip/a:alphaModFix"
                 ),
                 "image_opacity_clear_restores_fully_opaque": True,
+                "image_shadow_schema": "image-shadow",
+                "image_shadow_fields": [
+                    "color",
+                    "opacity",
+                    "blur_radius",
+                    "distance",
+                    "direction_degrees_clockwise",
+                    "alignment",
+                    "rotate_with_shape",
+                    "effect_extent",
+                ],
+                "image_shadow_color": "direct_srgb_hex",
+                "image_shadow_opacity_unit": "percentage_points",
+                "image_shadow_opacity_precision": 0.001,
+                "image_shadow_length_unit": "explicit_length",
+                "image_shadow_native_length_unit": "emu",
+                "image_shadow_native_length_bounds": {
+                    "minimum_inclusive": 0,
+                    "maximum_inclusive": 2_147_483_647,
+                },
+                "image_shadow_direction_unit": "degrees_clockwise",
+                "image_shadow_native_units_per_degree": 60_000,
+                "image_shadow_group_update": "complete_object",
+                "image_shadow_clear_removes_direct_outer_shadow": True,
+                "image_shadow_effect_extent_schema": (
+                    "image-effect-extent"
+                ),
+                "image_shadow_inline_effect_extent": "optional",
+                "image_shadow_floating_effect_extent": (
+                    "floating.anchor_effect_extent"
+                ),
                 "single_dimension_resize": "preserve_aspect_ratio",
                 "two_dimension_resize": "exact",
                 "native_geometry_patch": [
@@ -1304,6 +1357,7 @@ class Document:
                     "pic:spPr/a:xfrm/@rot|@flipH|@flipV",
                     "pic:spPr/a:ln",
                     "pic:blipFill/a:blip/a:alphaModFix",
+                    "pic:spPr/a:effectLst/a:outerShdw",
                 ],
                 "projected_placements": [
                     "inline",
@@ -1469,6 +1523,7 @@ class Document:
                     "picture_transform",
                     "picture_outline",
                     "picture_opacity",
+                    "picture_outer_shadow",
                     "native_placement_and_anchor_layout",
                     "alternative_text",
                     "title",
@@ -1478,7 +1533,7 @@ class Document:
                 "native_insert_api": (
                     "Document.insert_image_after(target, source, width=..., "
                     "height=..., alt_text=..., transform=None, outline=None, "
-                    "opacity=None, floating=None)"
+                    "opacity=None, shadow=None, floating=None)"
                 ),
                 "native_insert_operation": "image.insert_after",
                 "insert_placement": (
@@ -1500,6 +1555,7 @@ class Document:
                 "insert_transform_schema": "image-transform",
                 "insert_outline_schema": "image-outline",
                 "insert_opacity_unit": "percentage_points",
+                "insert_shadow_schema": "image-shadow",
                 "insert_alt_text": "required",
                 "insert_target": "mapped_top_level_body_node",
                 "insert_supports_paragraph_style": True,
@@ -1545,6 +1601,10 @@ class Document:
                         "optional direct a:alphaModFix picture opacity with "
                         "0.001-percentage-point precision"
                     ),
+                    (
+                        "optional direct-RGB a:outerShdw picture shadow with "
+                        "explicit native geometry"
+                    ),
                     "no other visual effect",
                     (
                         "optional LibreOffice-neutral bwMode auto and empty "
@@ -1565,8 +1625,8 @@ class Document:
                     "linked or external image",
                     (
                         "negative, overconstrained, malformed-transform, "
-                        "unsupported-outline, malformed-opacity, or other "
-                        "effected picture"
+                        "unsupported-outline, malformed-opacity, "
+                        "unsupported-shadow, or other effected picture"
                     ),
                     "picture in table",
                     "VML, OLE, or embedded object",
@@ -4253,6 +4313,7 @@ class Document:
                 transform=image_insert.transform,
                 outline=image_insert.outline,
                 opacity=image_insert.opacity,
+                shadow=image_insert.shadow,
                 name=image_insert.name,
                 alt_text=image_insert.alt_text,
                 title=image_insert.title,
@@ -4493,6 +4554,7 @@ class Document:
                         "transform",
                         "outline",
                         "opacity",
+                        "shadow",
                         "alt_text",
                         "title",
                     }

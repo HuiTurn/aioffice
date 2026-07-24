@@ -418,6 +418,40 @@ def _image_opacity_attributes(image: ImageBlock) -> str:
     return f' data-aioffice-opacity="{image.opacity:g}"'
 
 
+def _image_shadow_attributes(image: ImageBlock) -> str:
+    if image.shadow is None:
+        return ""
+    shadow = image.shadow
+    effect_extent = (
+        ""
+        if shadow.effect_extent is None
+        else (
+            ' data-aioffice-shadow-effect-extent-left-pt="'
+            f'{shadow.effect_extent.left.to_points():g}"'
+            ' data-aioffice-shadow-effect-extent-top-pt="'
+            f'{shadow.effect_extent.top.to_points():g}"'
+            ' data-aioffice-shadow-effect-extent-right-pt="'
+            f'{shadow.effect_extent.right.to_points():g}"'
+            ' data-aioffice-shadow-effect-extent-bottom-pt="'
+            f'{shadow.effect_extent.bottom.to_points():g}"'
+        )
+    )
+    return (
+        f' data-aioffice-shadow-color="{shadow.color}"'
+        f' data-aioffice-shadow-opacity="{shadow.opacity:g}"'
+        ' data-aioffice-shadow-blur-radius-pt="'
+        f'{shadow.blur_radius.to_points():g}"'
+        ' data-aioffice-shadow-distance-pt="'
+        f'{shadow.distance.to_points():g}"'
+        ' data-aioffice-shadow-direction-degrees-clockwise="'
+        f'{shadow.direction_degrees_clockwise:g}"'
+        f' data-aioffice-shadow-alignment="{shadow.alignment}"'
+        ' data-aioffice-shadow-rotate-with-shape="'
+        f'{"true" if shadow.rotate_with_shape else "false"}"'
+        f"{effect_extent}"
+    )
+
+
 def _image_placement_attributes(image: ImageBlock) -> str:
     return f' data-aioffice-placement="{image.placement}"'
 
@@ -506,6 +540,7 @@ def _header_footer_html(
                 f"{_image_transform_attributes(block)}"
                 f"{_image_outline_attributes(block)}"
                 f"{_image_opacity_attributes(block)}"
+                f"{_image_shadow_attributes(block)}"
                 f"{figure_style}>"
                 '<div class="native-image-placeholder" role="img" '
                 f'aria-label="{escape(label, quote=True)}" '
@@ -990,6 +1025,7 @@ def export_html(
                 f"{_image_transform_attributes(block)}"
                 f"{_image_outline_attributes(block)}"
                 f"{_image_opacity_attributes(block)}"
+                f"{_image_shadow_attributes(block)}"
                 f"{_style_attribute(figure_css)}>"
             )
             lines.append(

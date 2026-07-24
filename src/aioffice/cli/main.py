@@ -37,8 +37,10 @@ from aioffice.spec.models import (
     HeaderFooterPart,
     ImageBlock,
     ImageCrop,
+    ImageEffectExtent,
     ImageInsert,
     ImageOutline,
+    ImageShadow,
     ImageTransform,
     ImageUpdate,
     NamedStyle,
@@ -190,6 +192,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     insert_image.add_argument(
+        "--shadow",
+        type=Path,
+        help="JSON file containing one strict ImageShadow.",
+    )
+    insert_image.add_argument(
         "--floating-layout",
         type=Path,
         help=(
@@ -334,8 +341,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "header-footer-part",
             "image-block",
             "image-crop",
+            "image-effect-extent",
             "image-insert",
             "image-outline",
+            "image-shadow",
             "image-transform",
             "image-update",
             "named-style",
@@ -467,6 +476,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "Picture opacity in percentage points [0, 100); "
             "omit for fully opaque."
         ),
+    )
+    workspace_insert_image.add_argument(
+        "--shadow",
+        type=Path,
+        help="JSON file containing one strict ImageShadow.",
     )
     workspace_insert_image.add_argument(
         "--floating-layout",
@@ -661,6 +675,14 @@ def _run(args: argparse.Namespace) -> int:
                     else None
                 ),
                 opacity=args.opacity,
+                shadow=(
+                    _load_json_object(
+                        args.shadow,
+                        label="Image shadow",
+                    )
+                    if args.shadow is not None
+                    else None
+                ),
                 floating=(
                     _load_json_object(
                         args.floating_layout,
@@ -819,6 +841,14 @@ def _run(args: argparse.Namespace) -> int:
                 else None
             ),
             opacity=args.opacity,
+            shadow=(
+                _load_json_object(
+                    args.shadow,
+                    label="Image shadow",
+                )
+                if args.shadow is not None
+                else None
+            ),
             floating=(
                 _load_json_object(
                     args.floating_layout,
@@ -982,8 +1012,10 @@ def _run(args: argparse.Namespace) -> int:
             "header-footer-part": HeaderFooterPart,
             "image-block": ImageBlock,
             "image-crop": ImageCrop,
+            "image-effect-extent": ImageEffectExtent,
             "image-insert": ImageInsert,
             "image-outline": ImageOutline,
+            "image-shadow": ImageShadow,
             "image-transform": ImageTransform,
             "image-update": ImageUpdate,
             "named-style": NamedStyle,

@@ -19,7 +19,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.45"
+SPEC_VERSION = "0.2-draft.46"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1492,8 +1492,8 @@ class FloatingImageTextDistances(StrictModel):
         )
 
 
-class FloatingImageEffectExtent(StrictModel):
-    """OOXML effect extents on all four edges, in signed EMU semantics."""
+class ImageEffectExtent(StrictModel):
+    """OOXML image effect extents on all four edges, in signed EMU semantics."""
 
     left: Length
     top: Length
@@ -1501,7 +1501,7 @@ class FloatingImageEffectExtent(StrictModel):
     bottom: Length
 
     @model_validator(mode="after")
-    def validate_extents(self) -> "FloatingImageEffectExtent":
+    def validate_extents(self) -> "ImageEffectExtent":
         minimum = -27_273_042_329_600
         maximum = 27_273_042_316_900
         for field_name in ("left", "top", "right", "bottom"):
@@ -1509,10 +1509,14 @@ class FloatingImageEffectExtent(StrictModel):
             emu = round(value.to_points() * 12_700)
             if emu < minimum or emu > maximum:
                 raise ValueError(
-                    f"Floating image effect extent {field_name} must fit "
+                    f"Image effect extent {field_name} must fit "
                     "the OOXML ST_Coordinate range."
                 )
         return self
+
+
+class FloatingImageEffectExtent(ImageEffectExtent):
+    """Backward-compatible effect-extent type for floating image layout."""
 
 
 class FloatingImageWrapPoint(StrictModel):
@@ -1951,6 +1955,109 @@ class ImageOutline(StrictModel):
         return self
 
 
+def _normalize_shadow_opacity(value: object) -> object:
+    if isinstance(value, bool):
+        raise ValueError("Image shadow opacity cannot be a boolean.")
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric <= 0 or numeric > 100:
+            return value
+        return round(round(numeric * 1_000) / 1_000, 3)
+    return value
+
+
+ShadowOpacityPercentage = Annotated[
+    float,
+    BeforeValidator(_normalize_shadow_opacity),
+    Field(
+        gt=0,
+        le=100,
+        strict=True,
+        description=(
+            "Shadow opacity in percentage points, quantized to DrawingML "
+            "thousandths; clear shadow instead of specifying zero opacity."
+        ),
+    ),
+]
+
+
+class ImageShadow(StrictModel):
+    """Direct-RGB DrawingML outer shadow for one picture occurrence."""
+
+    color: HexColor
+    opacity: ShadowOpacityPercentage = 50.0
+    blur_radius: Length
+    distance: Length
+    direction_degrees_clockwise: float = Field(
+        default=45.0,
+        ge=0,
+        lt=360,
+        strict=True,
+        description=(
+            "Shadow offset direction in clockwise page degrees, quantized "
+            "to the DrawingML ST_PositiveFixedAngle unit of 1/60000 degree."
+        ),
+    )
+    alignment: Literal[
+        "top_left",
+        "top",
+        "top_right",
+        "left",
+        "center",
+        "right",
+        "bottom_left",
+        "bottom",
+        "bottom_right",
+    ] = "center"
+    rotate_with_shape: bool = Field(default=False, strict=True)
+    effect_extent: ImageEffectExtent | None = None
+
+    @field_validator("color")
+    @classmethod
+    def normalize_color(cls, value: str) -> str:
+        return value.upper()
+
+    @field_validator("direction_degrees_clockwise", mode="before")
+    @classmethod
+    def normalize_direction(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("Image shadow direction cannot be a boolean.")
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            if numeric < 0 or numeric >= 360:
+                return value
+            native_angle = round(numeric * 60_000)
+            return round(native_angle / 60_000, 6)
+        return value
+
+    @model_validator(mode="after")
+    def validate_lengths(self) -> "ImageShadow":
+        native_lengths: dict[str, int] = {}
+        for field_name in ("blur_radius", "distance"):
+            value = getattr(self, field_name)
+            native_length = round(value.to_points() * 12_700)
+            if native_length < 0 or native_length > 2_147_483_647:
+                raise ValueError(
+                    f"Image shadow {field_name} must fit DrawingML "
+                    "ST_PositiveCoordinate (0..2147483647 EMUs)."
+                )
+            native_lengths[field_name] = native_length
+            setattr(
+                self,
+                field_name,
+                Length(
+                    value=round(native_length / 12_700, 6),
+                    unit="pt",
+                ),
+            )
+        if not any(native_lengths.values()):
+            raise ValueError(
+                "Image shadow requires a non-zero blur radius or distance; "
+                "clear shadow to remove the effect."
+            )
+        return self
+
+
 class ImageBlock(NodeBase):
     """One AI-addressable image occurrence backed by a native binary asset."""
 
@@ -1964,6 +2071,7 @@ class ImageBlock(NodeBase):
     transform: ImageTransform | None = None
     outline: ImageOutline | None = None
     opacity: ImageOpacityPercentage | None = None
+    shadow: ImageShadow | None = None
     floating: FloatingImageLayout | None = None
     name: str | None = None
     alt_text: str | None = None
@@ -1990,6 +2098,15 @@ class ImageBlock(NodeBase):
             raise ValueError(
                 "Floating image placement requires floating layout evidence, "
                 "and inline placement forbids it."
+            )
+        if (
+            self.placement == "floating"
+            and self.shadow is not None
+            and self.shadow.effect_extent is not None
+        ):
+            raise ValueError(
+                "A floating image shadow uses floating.anchor_effect_extent; "
+                "shadow.effect_extent is reserved for inline placement."
             )
         if self.capabilities != [
             "inspect",
@@ -2035,6 +2152,16 @@ class HeaderFooterImageBlock(ImageBlock):
                 "Floating image placement requires floating layout evidence, "
                 "and inline placement forbids it."
             )
+        if (
+            self.placement == "floating"
+            and self.shadow is not None
+            and self.shadow.effect_extent is not None
+        ):
+            raise ValueError(
+                "A floating header/footer image shadow uses "
+                "floating.anchor_effect_extent; shadow.effect_extent is "
+                "reserved for inline placement."
+            )
         if self.capabilities != [
             "inspect",
             "extract",
@@ -2056,6 +2183,7 @@ class ImageUpdate(StrictModel):
     transform: ImageTransform | None = None
     outline: ImageOutline | None = None
     opacity: ImageOpacityPercentage | None = None
+    shadow: ImageShadow | None = None
     alt_text: str | None = Field(default=None, min_length=1, max_length=4096)
     title: str | None = Field(default=None, min_length=1, max_length=1024)
 
@@ -2100,6 +2228,7 @@ class ImageInsert(StrictModel):
     transform: ImageTransform | None = None
     outline: ImageOutline | None = None
     opacity: ImageOpacityPercentage | None = None
+    shadow: ImageShadow | None = None
     name: str | None = Field(default=None, min_length=1, max_length=1024)
     alt_text: str = Field(min_length=1, max_length=4096)
     title: str | None = Field(default=None, min_length=1, max_length=1024)
@@ -2111,6 +2240,15 @@ class ImageInsert(StrictModel):
             raise ValueError(
                 "Floating image insertion requires floating layout, and "
                 "inline insertion forbids it."
+            )
+        if (
+            self.placement == "floating"
+            and self.shadow is not None
+            and self.shadow.effect_extent is not None
+        ):
+            raise ValueError(
+                "Floating insertion uses floating.anchor_effect_extent; "
+                "shadow.effect_extent is reserved for inline placement."
             )
         for field_name in ("width", "height"):
             value = getattr(self, field_name)
@@ -2229,6 +2367,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.43",
         "0.2-draft.44",
         "0.2-draft.45",
+        "0.2-draft.46",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

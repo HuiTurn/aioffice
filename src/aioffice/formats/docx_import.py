@@ -450,6 +450,11 @@ def _paragraph_projection(
                 else None
             ),
             "opacity": native_image.opacity,
+            "shadow": (
+                native_image.shadow.model_dump(mode="json")
+                if native_image.shadow is not None
+                else None
+            ),
             "floating": (
                 native_image.floating.model_dump(
                     mode="json",

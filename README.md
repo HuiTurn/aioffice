@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev45`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev46`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -27,6 +27,7 @@ verified asset extraction, selective native image metadata and geometry updates,
 bounded rectangular source cropping, native picture rotation and
 horizontal/vertical mirroring, direct-RGB picture outlines with preset dash styles,
 fixed picture opacity with native thousandth-percentage precision,
+direct-RGB picture outer shadows with explicit native geometry,
 conservative offset/alignment/percentage floating-image anchor projection,
 optional Office 2010 relative width/height rules with absolute extent fallbacks,
 square/no-wrap/top-and-bottom/tight/through text wrapping, selective floating-anchor layout
@@ -99,9 +100,9 @@ preserves untouched part payloads.
 Image bytes deliberately stay out of the JSON Spec. A simple body, header, or footer
 paragraph containing exactly one supported embedded DrawingML picture is projected
 as an AI-addressable `image` block with inline or conservative floating placement,
-physical extent, optional rectangular source crop, transform, direct-RGB outline and
-opacity, alternative text, media type, filename, byte count, and SHA-256 asset
-identity:
+physical extent, optional rectangular source crop, transform, direct-RGB outline,
+opacity and outer shadow, alternative text, media type, filename, byte count, and
+SHA-256 asset identity:
 
 ```python
 image = next(
@@ -159,8 +160,8 @@ requires an attached native DOCX and an image already projected as a supported
 floating anchor—it never converts an inline or opaque drawing.
 
 Supported projected images can be resized, cropped, transformed, outlined, made
-translucent, or given accessible metadata without rewriting their binary part or
-relationship:
+translucent, given an outer shadow, or given accessible metadata without rewriting
+their binary part or relationship:
 
 ```python
 result = doc.apply([
@@ -181,6 +182,15 @@ result = doc.apply([
                 "dash": "solid",
             },
             "opacity": 72.5,
+            "shadow": {
+                "color": "#000000",
+                "opacity": 40,
+                "blur_radius": {"value": 6, "unit": "pt"},
+                "distance": {"value": 3, "unit": "pt"},
+                "direction_degrees_clockwise": 45,
+                "alignment": "center",
+                "rotate_with_shape": False,
+            },
             "alt_text": "Quarterly revenue by region",
             "title": "Revenue chart",
         },
@@ -199,14 +209,23 @@ sRGB hex value and `dash` is one DrawingML preset exposed by the
 `image-outline` schema. Both transform and outline are complete replacement groups.
 Use `"clear": ["outline"]` to remove the direct line. Opacity is expressed in
 percentage points from 0 inclusive to 100 exclusive, quantized to `0.001`; clear it
-to restore fully opaque identity. `alt_text` and `title` are also clearable. The
+to restore fully opaque identity. Shadow is a complete replacement group backed by
+one direct `a:effectLst/a:outerShdw`; clear it to remove the effect. It accepts one
+direct sRGB color, 0.001-percentage-point opacity, explicit blur/distance lengths,
+clockwise direction, nine-point alignment, rotate-with-shape behavior, and optional
+four-edge inline effect-extent layout evidence. Floating shadows reuse
+`floating.anchor_effect_extent`.
+`alt_text` and `title` are also clearable. The
 native patch updates the minimal DrawingML geometry while preserving image bytes and
 package relationships. It requires the attached native DOCX, so a detached JSON
 snapshot cannot perform this operation.
 
-LibreOffice 26.8 currently ignores this `a:alphaModFix` opacity during rendering and
-removes it on save. AiOffice preserves it exactly, but opacity-sensitive visual
-approval must use Microsoft Word/Office until the LibreOffice path supports it.
+LibreOffice 26.8 renders the tested direct black outer shadow, retains its native
+effect on save, and may quantize shadow lengths or add effect-extent evidence. It
+still ignores the tested `a:alphaModFix` picture opacity. A LibreOffice save may
+also wrap the drawing in `mc:AlternateContent`, which this conservative projection
+keeps losslessly opaque. AiOffice preserves untouched native XML exactly; Microsoft
+Word/Office remains the final authority for cross-producer visual approval.
 
 The projected image ID also addresses its native host paragraph. Reuse
 `paragraph.format` to control layout around an existing picture without touching its
@@ -247,7 +266,7 @@ result.document.export("replaced.docx")
 
 AiOffice signature-checks and bounds the raster input, creates a content-addressed
 native image part and a new relationship for only that occurrence, and preserves its
-stable image ID, displayed extent, source crop, transform, outline, opacity,
+stable image ID, displayed extent, source crop, transform, outline, opacity, shadow,
 alternative text, and title. Other occurrences that shared the old image remain
 unchanged. Raw JSON Patch cannot carry the binary.
 
@@ -268,6 +287,12 @@ result = doc.insert_image_after(
         "dash": "solid",
     },
     opacity=85,
+    shadow={
+        "color": "#000000",
+        "opacity": 40,
+        "blur_radius": {"value": 6, "unit": "pt"},
+        "distance": {"value": 3, "unit": "pt"},
+    },
     paragraph_style={"alignment": "center"},
 )
 assert result.success
@@ -381,7 +406,7 @@ aioffice replace-image existing.docx IMAGE_ID replacement.png -o replaced.docx
 aioffice insert-image-after existing.docx TARGET replacement.png \
   --width 3 --width-unit in --height 1.5 --height-unit in \
   --alt-text "Expert workflow" --outline image-outline.json \
-  --opacity 85 \
+  --opacity 85 --shadow image-shadow.json \
   --floating-layout floating-layout.json \
   -o inserted.docx
 ```
@@ -397,8 +422,9 @@ before returning bytes. Mixed text/picture paragraphs, active simple-position
 anchors, malformed relative-size rules, unsupported wrap-specific effects, linked images,
 multiple pictures, negative or overconstrained crop rectangles, malformed transforms,
 unsupported outline fills, joins, compound lines, arrowheads or custom dashes,
-malformed opacity or other picture effects, drawings in tables, complex
-header/footer drawings, VML, OLE, and embedded objects remain explicit opaque native
+malformed opacity, unsupported or malformed shadows, other picture effects, drawings
+in tables, complex header/footer drawings, VML, OLE, and embedded objects remain
+explicit opaque native
 content. They are preserved losslessly and rendered through the native provider
 rather than flattened into a misleading image model. See
 [the native image and asset contract](docs/native-images.md).

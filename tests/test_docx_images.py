@@ -98,6 +98,7 @@ def _image_document(
     transform_attributes: dict[str, str] | None = None,
     outlined: bool = False,
     opacity_amount: str | None = None,
+    shadowed: bool = False,
     alt_text: str | None = "A compact expert workflow diagram",
 ) -> bytes:
     if (aligned or percentage_position or relative_size) and not anchored:
@@ -361,6 +362,29 @@ def _image_document(
             {"val": "dashDot"},
         )
         ET.SubElement(outline, _q(A, "round"))
+    if shadowed:
+        effect_list = ET.SubElement(shape, _q(A, "effectLst"))
+        outer_shadow = ET.SubElement(
+            effect_list,
+            _q(A, "outerShdw"),
+            {
+                "blurRad": "127000",
+                "dist": "38100",
+                "dir": "2700000",
+                "algn": "ctr",
+                "rotWithShape": "0",
+            },
+        )
+        color = ET.SubElement(
+            outer_shadow,
+            _q(A, "srgbClr"),
+            {"val": "123456"},
+        )
+        ET.SubElement(
+            color,
+            _q(A, "alpha"),
+            {"val": "33333"},
+        )
     if relative_size:
         relative_width = ET.SubElement(
             placement,
@@ -433,6 +457,7 @@ def _header_image_document(
     transform_attributes: dict[str, str] | None = None,
     outlined: bool = False,
     opacity_amount: str | None = None,
+    shadowed: bool = False,
 ) -> bytes:
     assert kind in {"header", "footer"}
     body_image = _image_document(
@@ -445,6 +470,7 @@ def _header_image_document(
         transform_attributes=transform_attributes,
         outlined=outlined,
         opacity_amount=opacity_amount,
+        shadowed=shadowed,
     )
     with ZipFile(io.BytesIO(body_image)) as archive:
         image_document = parse_xml(
@@ -549,6 +575,10 @@ class DocxImageTests(unittest.TestCase):
                 {"left", "top", "right", "bottom"},
             ),
             (
+                "image-effect-extent",
+                {"left", "top", "right", "bottom"},
+            ),
+            (
                 "image-transform",
                 {
                     "rotation_degrees_clockwise",
@@ -559,6 +589,19 @@ class DocxImageTests(unittest.TestCase):
             (
                 "image-outline",
                 {"width", "color", "dash"},
+            ),
+            (
+                "image-shadow",
+                {
+                    "color",
+                    "opacity",
+                    "blur_radius",
+                    "distance",
+                    "direction_degrees_clockwise",
+                    "alignment",
+                    "rotate_with_shape",
+                    "effect_extent",
+                },
             ),
             (
                 "floating-image-effect-extent",
@@ -663,6 +706,7 @@ class DocxImageTests(unittest.TestCase):
                     "transform",
                     "outline",
                     "opacity",
+                    "shadow",
                     "alt_text",
                     "paragraph_style",
                 },
@@ -676,6 +720,7 @@ class DocxImageTests(unittest.TestCase):
                     "transform",
                     "outline",
                     "opacity",
+                    "shadow",
                     "alt_text",
                     "title",
                 },
@@ -824,7 +869,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.45")
+        self.assertEqual(spec["spec_version"], "0.2-draft.46")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -914,6 +959,7 @@ class DocxImageTests(unittest.TestCase):
                 "transform",
                 "outline",
                 "opacity",
+                "shadow",
                 "alt_text",
                 "title",
             ],
@@ -925,6 +971,7 @@ class DocxImageTests(unittest.TestCase):
                 "transform",
                 "outline",
                 "opacity",
+                "shadow",
                 "alt_text",
                 "title",
             ],
@@ -3613,6 +3660,513 @@ class DocxImageTests(unittest.TestCase):
         assert opacity is not None
         self.assertEqual(opacity.attrib, {"amt": "100000"})
 
+    def test_picture_outer_shadow_projects_updates_clears_and_preserves(
+        self,
+    ) -> None:
+        source = _image_document(shadowed=True)
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(
+            image["shadow"],
+            {
+                "color": "#123456",
+                "opacity": 33.333,
+                "blur_radius": {"value": 10.0, "unit": "pt"},
+                "distance": {"value": 3.0, "unit": "pt"},
+                "direction_degrees_clockwise": 45.0,
+                "alignment": "center",
+                "rotate_with_shape": False,
+            },
+        )
+        self.assertEqual(
+            document.inspect()["nodes"][0]["shadow"],
+            image["shadow"],
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+        capabilities = document.capabilities()["assets"]
+        self.assertIn("shadow", capabilities["native_update_fields"])
+        self.assertIn("shadow", capabilities["clearable_update_fields"])
+        self.assertEqual(
+            capabilities["image_shadow_schema"],
+            "image-shadow",
+        )
+        self.assertEqual(
+            capabilities["image_shadow_native_length_bounds"],
+            {
+                "minimum_inclusive": 0,
+                "maximum_inclusive": 2_147_483_647,
+            },
+        )
+        html = document.to_bytes("html").decode()
+        self.assertIn(
+            'data-aioffice-shadow-color="#123456"',
+            html,
+        )
+        self.assertIn(
+            'data-aioffice-shadow-opacity="33.333"',
+            html,
+        )
+        self.assertIn(
+            'data-aioffice-shadow-direction-degrees-clockwise="45"',
+            html,
+        )
+
+        unrelated = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"title": "Shadow preserved"},
+                }
+            ]
+        )
+        self.assertTrue(unrelated.success, unrelated.model_dump())
+        assert unrelated.document is not None
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(
+                io.BytesIO(unrelated.document.to_bytes("docx"))
+            ) as after,
+        ):
+            before_root = parse_xml(before.read("word/document.xml"))
+            after_root = parse_xml(after.read("word/document.xml"))
+        before_effects = before_root.find(f".//{_q(A, 'effectLst')}")
+        after_effects = after_root.find(f".//{_q(A, 'effectLst')}")
+        assert before_effects is not None
+        assert after_effects is not None
+        self.assertEqual(
+            serialize_xml(after_effects),
+            serialize_xml(before_effects),
+        )
+
+        updated = unrelated.document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "shadow": {
+                            "color": "#abcdef",
+                            "opacity": 62.3456,
+                            "blur_radius": {
+                                "value": 5.12345,
+                                "unit": "pt",
+                            },
+                            "distance": {
+                                "value": 2.5,
+                                "unit": "pt",
+                            },
+                            "direction_degrees_clockwise": 315.123456,
+                            "alignment": "bottom_right",
+                            "rotate_with_shape": True,
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(updated.success, updated.model_dump())
+        assert updated.document is not None
+        updated_shadow = updated.document.to_spec()["content"][0]["shadow"]
+        self.assertEqual(updated_shadow["color"], "#ABCDEF")
+        self.assertEqual(updated_shadow["opacity"], 62.346)
+        self.assertEqual(
+            updated_shadow["blur_radius"],
+            {"value": 5.123465, "unit": "pt"},
+        )
+        self.assertEqual(
+            updated_shadow["direction_degrees_clockwise"],
+            315.12345,
+        )
+        updated_output = updated.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(updated_output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+            self.assertEqual(package.read("word/media/image1.png"), PNG)
+        outer_shadow = root.find(f".//{_q(A, 'outerShdw')}")
+        assert outer_shadow is not None
+        self.assertEqual(
+            outer_shadow.attrib,
+            {
+                "blurRad": "65068",
+                "dist": "31750",
+                "dir": "18907407",
+                "algn": "br",
+                "rotWithShape": "1",
+            },
+        )
+        color = outer_shadow.find(f"./{_q(A, 'srgbClr')}")
+        assert color is not None
+        self.assertEqual(color.attrib, {"val": "ABCDEF"})
+        alpha = color.find(f"./{_q(A, 'alpha')}")
+        assert alpha is not None
+        self.assertEqual(alpha.attrib, {"val": "62346"})
+        reopened = Document.from_docx(updated_output)
+        self.assertEqual(
+            reopened.to_spec()["content"][0]["shadow"],
+            updated_shadow,
+        )
+
+        replaced = reopened.replace_image(
+            image["id"],
+            JPEG,
+            media_type="image/jpeg",
+        )
+        self.assertTrue(replaced.success, replaced.model_dump())
+        assert replaced.document is not None
+        self.assertEqual(
+            replaced.document.to_spec()["content"][0]["shadow"],
+            updated_shadow,
+        )
+
+        cleared = replaced.document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "clear": ["shadow"],
+                }
+            ]
+        )
+        self.assertTrue(cleared.success, cleared.model_dump())
+        assert cleared.document is not None
+        cleared_output = cleared.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(cleared_output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        self.assertIsNone(root.find(f".//{_q(A, 'effectLst')}"))
+        self.assertNotIn(
+            "shadow",
+            Document.from_docx(cleared_output).to_spec()["content"][0],
+        )
+
+    def test_empty_picture_effect_list_is_neutral_and_preserved(self) -> None:
+        source = _image_document()
+        with ZipFile(io.BytesIO(source)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        shape = root.find(f".//{_q(PIC, 'spPr')}")
+        assert shape is not None
+        ET.SubElement(shape, _q(A, "effectLst"))
+        source = _rewrite_package(
+            source,
+            replacements={
+                "word/document.xml": serialize_xml(root),
+            },
+            additions={},
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertNotIn("shadow", image)
+        self.assertEqual(document.to_bytes("docx"), source)
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"alt_text": "Neutral effects preserved"},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        with ZipFile(
+            io.BytesIO(result.document.to_bytes("docx"))
+        ) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        effect_list = root.find(f".//{_q(A, 'effectLst')}")
+        assert effect_list is not None
+        self.assertEqual(effect_list.attrib, {})
+        self.assertEqual(len(effect_list), 0)
+
+    def test_picture_outer_shadow_projects_all_alignments_and_full_opacity(
+        self,
+    ) -> None:
+        mappings = {
+            "tl": "top_left",
+            "t": "top",
+            "tr": "top_right",
+            "l": "left",
+            "ctr": "center",
+            "r": "right",
+            "bl": "bottom_left",
+            "b": "bottom",
+            "br": "bottom_right",
+        }
+        for native_alignment, semantic_alignment in mappings.items():
+            source = _image_document(shadowed=True)
+            with ZipFile(io.BytesIO(source)) as package:
+                root = parse_xml(package.read("word/document.xml"))
+            outer_shadow = root.find(f".//{_q(A, 'outerShdw')}")
+            assert outer_shadow is not None
+            outer_shadow.set("algn", native_alignment)
+            mutated = _rewrite_package(
+                source,
+                replacements={
+                    "word/document.xml": serialize_xml(root),
+                },
+                additions={},
+            )
+            with self.subTest(alignment=native_alignment):
+                image = Document.from_docx(mutated).to_spec()["content"][0]
+                self.assertEqual(
+                    image["shadow"]["alignment"],
+                    semantic_alignment,
+                )
+
+        source = _image_document(shadowed=True)
+        with ZipFile(io.BytesIO(source)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        color = root.find(f".//{_q(A, 'outerShdw')}/{_q(A, 'srgbClr')}")
+        assert color is not None
+        alpha = color.find(f"./{_q(A, 'alpha')}")
+        assert alpha is not None
+        color.remove(alpha)
+        without_alpha = _rewrite_package(
+            source,
+            replacements={
+                "word/document.xml": serialize_xml(root),
+            },
+            additions={},
+        )
+        image = Document.from_docx(without_alpha).to_spec()["content"][0]
+        self.assertEqual(image["shadow"]["opacity"], 100.0)
+
+    def test_picture_outline_update_keeps_shadow_after_line(self) -> None:
+        document = Document.from_docx(_image_document(shadowed=True))
+        image = document.to_spec()["content"][0]
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "outline": {
+                            "width": {"value": 1, "unit": "pt"},
+                            "color": "#AABBCC",
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        with ZipFile(
+            io.BytesIO(result.document.to_bytes("docx"))
+        ) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        shape = root.find(f".//{_q(PIC, 'spPr')}")
+        assert shape is not None
+        self.assertEqual(
+            [child.tag for child in shape],
+            [
+                _q(A, "xfrm"),
+                _q(A, "prstGeom"),
+                _q(A, "ln"),
+                _q(A, "effectLst"),
+            ],
+        )
+        reopened = Document.from_docx(result.document.to_bytes("docx"))
+        reopened_image = reopened.to_spec()["content"][0]
+        self.assertEqual(reopened_image["shadow"], image["shadow"])
+        self.assertEqual(reopened_image["outline"]["color"], "#AABBCC")
+
+    def test_inline_shadow_effect_extent_projects_updates_and_clears(
+        self,
+    ) -> None:
+        source = _image_document(shadowed=True)
+        with ZipFile(io.BytesIO(source)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        effect_extent = root.find(f".//{_q(WP, 'effectExtent')}")
+        assert effect_extent is not None
+        effect_extent.attrib.update(
+            {
+                "l": "114935",
+                "t": "0",
+                "r": "114935",
+                "b": "12700",
+            }
+        )
+        source = _rewrite_package(
+            source,
+            replacements={
+                "word/document.xml": serialize_xml(root),
+            },
+            additions={},
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(
+            image["shadow"]["effect_extent"],
+            {
+                "left": {"value": 9.05, "unit": "pt"},
+                "top": {"value": 0.0, "unit": "pt"},
+                "right": {"value": 9.05, "unit": "pt"},
+                "bottom": {"value": 1.0, "unit": "pt"},
+            },
+        )
+        self.assertIn(
+            'data-aioffice-shadow-effect-extent-left-pt="9.05"',
+            document.to_bytes("html").decode(),
+        )
+
+        updated_shadow = copy.deepcopy(image["shadow"])
+        updated_shadow["effect_extent"] = {
+            "left": {"value": 8, "unit": "pt"},
+            "top": {"value": 2, "unit": "pt"},
+            "right": {"value": 10, "unit": "pt"},
+            "bottom": {"value": 4, "unit": "pt"},
+        }
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"shadow": updated_shadow},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        with ZipFile(
+            io.BytesIO(result.document.to_bytes("docx"))
+        ) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        effect_extent = root.find(f".//{_q(WP, 'effectExtent')}")
+        assert effect_extent is not None
+        self.assertEqual(
+            effect_extent.attrib,
+            {
+                "l": "101600",
+                "t": "25400",
+                "r": "127000",
+                "b": "50800",
+            },
+        )
+
+        cleared = result.document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "clear": ["shadow"],
+                }
+            ]
+        )
+        self.assertTrue(cleared.success, cleared.model_dump())
+        assert cleared.document is not None
+        with ZipFile(
+            io.BytesIO(cleared.document.to_bytes("docx"))
+        ) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        effect_extent = root.find(f".//{_q(WP, 'effectExtent')}")
+        assert effect_extent is not None
+        self.assertEqual(
+            effect_extent.attrib,
+            {"l": "0", "t": "0", "r": "0", "b": "0"},
+        )
+        self.assertIsNone(root.find(f".//{_q(A, 'outerShdw')}"))
+
+        unsupported = _image_document()
+        with ZipFile(io.BytesIO(unsupported)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        effect_extent = root.find(f".//{_q(WP, 'effectExtent')}")
+        assert effect_extent is not None
+        effect_extent.set("r", "12700")
+        unsupported = _rewrite_package(
+            unsupported,
+            replacements={
+                "word/document.xml": serialize_xml(root),
+            },
+            additions={},
+        )
+        self.assertEqual(
+            Document.from_docx(unsupported).to_spec()["content"][0]["type"],
+            "opaque",
+        )
+
+    def test_invalid_native_picture_outer_shadow_remains_opaque(
+        self,
+    ) -> None:
+        for case in (
+            "effect_attribute",
+            "duplicate_effect_list",
+            "multiple_effects",
+            "missing_attribute",
+            "unknown_attribute",
+            "non_integer",
+            "negative_blur",
+            "over_blur",
+            "zero_geometry",
+            "bad_direction",
+            "bad_alignment",
+            "bad_boolean",
+            "wrong_color_model",
+            "bad_hex",
+            "duplicate_alpha",
+            "zero_alpha",
+            "over_alpha",
+        ):
+            source = _image_document(shadowed=True)
+            with ZipFile(io.BytesIO(source)) as package:
+                root = parse_xml(package.read("word/document.xml"))
+            shape = root.find(f".//{_q(PIC, 'spPr')}")
+            effect_list = root.find(f".//{_q(A, 'effectLst')}")
+            outer_shadow = root.find(f".//{_q(A, 'outerShdw')}")
+            color = outer_shadow.find(f"./{_q(A, 'srgbClr')}")
+            alpha = root.find(f".//{_q(A, 'outerShdw')}//{_q(A, 'alpha')}")
+            assert shape is not None
+            assert effect_list is not None
+            assert outer_shadow is not None
+            assert color is not None
+            assert alpha is not None
+            if case == "effect_attribute":
+                effect_list.set("future", "1")
+            elif case == "duplicate_effect_list":
+                shape.append(copy.deepcopy(effect_list))
+            elif case == "multiple_effects":
+                ET.SubElement(effect_list, _q(A, "glow"), {"rad": "1"})
+            elif case == "missing_attribute":
+                del outer_shadow.attrib["dist"]
+            elif case == "unknown_attribute":
+                outer_shadow.set("future", "1")
+            elif case == "non_integer":
+                outer_shadow.set("blurRad", "1pt")
+            elif case == "negative_blur":
+                outer_shadow.set("blurRad", "-1")
+            elif case == "over_blur":
+                outer_shadow.set("blurRad", "2147483648")
+            elif case == "zero_geometry":
+                outer_shadow.set("blurRad", "0")
+                outer_shadow.set("dist", "0")
+            elif case == "bad_direction":
+                outer_shadow.set("dir", "21600000")
+            elif case == "bad_alignment":
+                outer_shadow.set("algn", "middle")
+            elif case == "bad_boolean":
+                outer_shadow.set("rotWithShape", "yes")
+            elif case == "wrong_color_model":
+                color.tag = _q(A, "schemeClr")
+            elif case == "bad_hex":
+                color.set("val", "XYZ123")
+            elif case == "duplicate_alpha":
+                color.append(copy.deepcopy(alpha))
+            elif case == "zero_alpha":
+                alpha.set("val", "0")
+            elif case == "over_alpha":
+                alpha.set("val", "100001")
+            mutated = _rewrite_package(
+                source,
+                replacements={
+                    "word/document.xml": serialize_xml(root),
+                },
+                additions={},
+            )
+            with self.subTest(case=case):
+                opaque = Document.from_docx(mutated)
+                self.assertEqual(
+                    opaque.to_spec()["content"][0]["type"],
+                    "opaque",
+                )
+                self.assertEqual(opaque.to_spec()["assets"], [])
+                self.assertEqual(opaque.to_bytes("docx"), mutated)
+
     def test_opacity_update_preserves_blip_extension_metadata(
         self,
     ) -> None:
@@ -4799,6 +5353,81 @@ class DocxImageTests(unittest.TestCase):
                 "target": image["id"],
                 "set": {"opacity": "50"},
             },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"shadow": {}},
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "shadow": {
+                        "color": "#112233",
+                        "opacity": 0,
+                        "blur_radius": {"value": 1, "unit": "pt"},
+                        "distance": {"value": 1, "unit": "pt"},
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "shadow": {
+                        "color": "#112233",
+                        "blur_radius": {"value": 0, "unit": "pt"},
+                        "distance": {"value": 0, "unit": "pt"},
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "shadow": {
+                        "color": "#112233",
+                        "blur_radius": {"value": 1, "unit": "pt"},
+                        "distance": {"value": -1, "unit": "pt"},
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "shadow": {
+                        "color": "#112233",
+                        "blur_radius": {"value": 1, "unit": "pt"},
+                        "distance": {"value": 1, "unit": "pt"},
+                        "direction_degrees_clockwise": 360,
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "shadow": {
+                        "color": "#112233",
+                        "blur_radius": {"value": 1, "unit": "pt"},
+                        "distance": {"value": 1, "unit": "pt"},
+                        "alignment": "middle",
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "shadow": {
+                        "color": "#112233",
+                        "blur_radius": {"value": 1, "unit": "pt"},
+                        "distance": {"value": 1, "unit": "pt"},
+                        "rotate_with_shape": "false",
+                    }
+                },
+            },
         ]
         for operation in invalid_operations:
             with self.subTest(operation=operation):
@@ -5745,6 +6374,7 @@ class DocxImageTests(unittest.TestCase):
             wrap_mode="tight",
             outlined=True,
             opacity_amount="62500",
+            shadowed=True,
             transform_attributes={
                 "rot": "1350000",
                 "flipH": "1",
@@ -5801,6 +6431,7 @@ class DocxImageTests(unittest.TestCase):
             source_image["outline"],
         )
         self.assertEqual(cloned_image["opacity"], source_image["opacity"])
+        self.assertEqual(cloned_image["shadow"], source_image["shadow"])
 
         replaced = cloned.document.replace_image(
             cloned_image["id"],
@@ -5905,6 +6536,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_clone_image["opacity"],
             reopened_source_image["opacity"],
+        )
+        self.assertEqual(
+            reopened_clone_image["shadow"],
+            reopened_source_image["shadow"],
         )
         self.assertEqual(reopened.to_bytes("docx"), output)
 
@@ -6158,6 +6793,21 @@ class DocxImageTests(unittest.TestCase):
                 "dash": "dash",
             },
             opacity=72.3456,
+            shadow={
+                "color": "#102030",
+                "opacity": 41.2346,
+                "blur_radius": {"value": 6, "unit": "pt"},
+                "distance": {"value": 4, "unit": "pt"},
+                "direction_degrees_clockwise": 135,
+                "alignment": "top_left",
+                "rotate_with_shape": True,
+                "effect_extent": {
+                    "left": {"value": 8, "unit": "pt"},
+                    "top": {"value": 2, "unit": "pt"},
+                    "right": {"value": 10, "unit": "pt"},
+                    "bottom": {"value": 4, "unit": "pt"},
+                },
+            },
             paragraph_style={
                 "alignment": "center",
                 "spacing_before": {"value": 6, "unit": "pt"},
@@ -6223,6 +6873,24 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(inserted["opacity"], 72.346)
         self.assertEqual(
+            inserted["shadow"],
+            {
+                "color": "#102030",
+                "opacity": 41.235,
+                "blur_radius": {"value": 6.0, "unit": "pt"},
+                "distance": {"value": 4.0, "unit": "pt"},
+                "direction_degrees_clockwise": 135.0,
+                "alignment": "top_left",
+                "rotate_with_shape": True,
+                "effect_extent": {
+                    "left": {"value": 8.0, "unit": "pt"},
+                    "top": {"value": 2.0, "unit": "pt"},
+                    "right": {"value": 10.0, "unit": "pt"},
+                    "bottom": {"value": 4.0, "unit": "pt"},
+                },
+            },
+        )
+        self.assertEqual(
             inserted["paragraph_style"]["alignment"],
             "center",
         )
@@ -6273,6 +6941,19 @@ class DocxImageTests(unittest.TestCase):
             (inner_extent.get("cx"), inner_extent.get("cy")),
             ("1371600", "685800"),
         )
+        inserted_effect_extent = inserted_paragraph.find(
+            f".//{_q(WP, 'effectExtent')}"
+        )
+        assert inserted_effect_extent is not None
+        self.assertEqual(
+            inserted_effect_extent.attrib,
+            {
+                "l": "101600",
+                "t": "25400",
+                "r": "127000",
+                "b": "50800",
+            },
+        )
         inserted_transform = inserted_paragraph.find(
             f".//{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}"
         )
@@ -6299,6 +6980,21 @@ class DocxImageTests(unittest.TestCase):
         )
         assert inserted_opacity is not None
         self.assertEqual(inserted_opacity.attrib, {"amt": "72346"})
+        inserted_shadow = inserted_paragraph.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'effectLst')}/"
+            f"{_q(A, 'outerShdw')}"
+        )
+        assert inserted_shadow is not None
+        self.assertEqual(
+            inserted_shadow.attrib,
+            {
+                "blurRad": "76200",
+                "dist": "50800",
+                "dir": "8100000",
+                "algn": "tl",
+                "rotWithShape": "1",
+            },
+        )
         inserted_relationship_id = inserted_paragraph.find(
             f".//{_q(A, 'blip')}"
         ).get(_q(R, "embed"))
@@ -6348,6 +7044,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_inserted["opacity"],
             inserted["opacity"],
+        )
+        self.assertEqual(
+            reopened_inserted["shadow"],
+            inserted["shadow"],
         )
         self.assertEqual(reopened.image_bytes("inserted_chart"), JPEG)
 
@@ -7291,6 +7991,7 @@ class DocxImageTests(unittest.TestCase):
             floating_layout_path = root / "floating-layout.json"
             transform_path = root / "transform.json"
             outline_path = root / "outline.json"
+            shadow_path = root / "shadow.json"
             transform = {
                 "rotation_degrees_clockwise": 15,
                 "flip_vertical": True,
@@ -7299,6 +8000,15 @@ class DocxImageTests(unittest.TestCase):
                 "width": {"value": 1, "unit": "pt"},
                 "color": "#0F6B4F",
                 "dash": "dot",
+            }
+            shadow = {
+                "color": "#243040",
+                "opacity": 48.125,
+                "blur_radius": {"value": 5, "unit": "pt"},
+                "distance": {"value": 2, "unit": "pt"},
+                "direction_degrees_clockwise": 90,
+                "alignment": "center",
+                "rotate_with_shape": False,
             }
             floating_layout = {
                 "horizontal": {
@@ -7341,6 +8051,10 @@ class DocxImageTests(unittest.TestCase):
                 json.dumps(outline),
                 encoding="utf-8",
             )
+            shadow_path.write_text(
+                json.dumps(shadow),
+                encoding="utf-8",
+            )
             stdout = io.StringIO()
             with redirect_stdout(stdout):
                 exit_code = main(
@@ -7367,6 +8081,8 @@ class DocxImageTests(unittest.TestCase):
                         str(outline_path),
                         "--opacity",
                         "64.3214",
+                        "--shadow",
+                        str(shadow_path),
                         "--floating-layout",
                         str(floating_layout_path),
                         "--align",
@@ -7396,6 +8112,7 @@ class DocxImageTests(unittest.TestCase):
             )
             self.assertEqual(cli_image["outline"], outline)
             self.assertEqual(cli_image["opacity"], 64.321)
+            self.assertEqual(cli_image["shadow"], shadow)
             self.assertEqual(
                 cli_image["floating"]["horizontal"],
                 floating_layout["horizontal"],
@@ -7414,6 +8131,7 @@ class DocxImageTests(unittest.TestCase):
                 transform=transform,
                 outline=outline,
                 opacity=64.3214,
+                shadow=shadow,
                 floating=floating_layout,
                 paragraph_style={"alignment": "right"},
                 base_revision=tracked.revision,
@@ -7442,6 +8160,7 @@ class DocxImageTests(unittest.TestCase):
             )
             self.assertEqual(workspace_image["outline"], outline)
             self.assertEqual(workspace_image["opacity"], 64.321)
+            self.assertEqual(workspace_image["shadow"], shadow)
             self.assertIn(
                 "insert_image_after",
                 workspace.capabilities(tracked.id)["operations"],
@@ -7496,6 +8215,10 @@ class DocxImageTests(unittest.TestCase):
             self.assertEqual(
                 patch["operations"][0]["image"]["opacity"],
                 64.321,
+            )
+            self.assertEqual(
+                patch["operations"][0]["image"]["shadow"],
+                shadow,
             )
             self.assertEqual(
                 patch["changes"][0]["binary_transport"],

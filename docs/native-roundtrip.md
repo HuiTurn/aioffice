@@ -110,7 +110,8 @@ the DrawingML tree, relationship, binary part, extent, and image identity remain
 unchanged. Image insertion and replacement keep binary payloads outside JSON through
 dedicated bounded APIs, while `image.update` selectively patches accessibility
 metadata, coordinated extents, crop, transform, supported direct-RGB outline, and
-direct fixed opacity. For an already-proven conservative floating picture,
+direct fixed opacity plus one supported direct-RGB outer shadow. For an
+already-proven conservative floating picture,
 `image.anchor.update` selectively patches offset, alignment, or percentage
 positioning, supported wrapping, relative height, and compatibility flags without
 recreating the drawing.

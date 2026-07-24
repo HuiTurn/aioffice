@@ -94,6 +94,11 @@ The clone preserves the exact `a:blip/a:alphaModFix` value and shares the media
 target; later opacity, outline, transform, anchor, paragraph, or binary updates
 remain isolated to the selected story occurrence.
 
+In `0.2.0.dev46`, clone-safe pictures may also carry one strict direct-RGB outer
+shadow. The clone preserves the complete `a:effectLst/a:outerShdw` subtree and
+shares the media target; later shadow, opacity, outline, transform, anchor,
+paragraph, or binary updates remain isolated to the selected story occurrence.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

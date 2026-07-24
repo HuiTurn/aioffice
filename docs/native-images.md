@@ -46,6 +46,15 @@ occurrence lives in its `header_footers[].content`:
         "dash": "dash_dot"
       },
       "opacity": 72.5,
+      "shadow": {
+        "color": "#000000",
+        "opacity": 40,
+        "blur_radius": {"value": 6, "unit": "pt"},
+        "distance": {"value": 3, "unit": "pt"},
+        "direction_degrees_clockwise": 45,
+        "alignment": "center",
+        "rotate_with_shape": false
+      },
       "name": "Expert diagram",
       "alt_text": "A compact expert workflow diagram",
       "title": "Workflow",
@@ -201,7 +210,10 @@ An image becomes an `image` block only when all of these conditions hold:
     the supported default cap, compound, alignment, and round-join semantics;
 12. `a:blip` has at most one direct, strict `a:alphaModFix` opacity from 0 through
     100,000 native thousandths of one percent;
-13. the picture has no other recognized DrawingML visual effect; LibreOffice's
+13. `pic:spPr` has at most one direct `a:effectLst`, which is either empty or
+    contains exactly one strict direct-RGB `a:outerShdw` with explicit blur,
+    distance, direction, alignment, rotate-with-shape, and optional direct alpha;
+14. the picture has no other recognized DrawingML visual effect; LibreOffice's
     optional neutral `pic:spPr/@bwMode="auto"` and at most one empty shape
     `a:noFill` normalization are allowed.
 
@@ -514,6 +526,14 @@ therefore reopens that externally saved file as fully opaque instead of claiming
 removed rule survived. Use Microsoft Word/Office native rendering—not the
 LibreOffice provider—to visually approve opacity-sensitive composition.
 
+The dev46 outer-shadow fixture preserves its complete direct
+`a:effectLst/a:outerShdw` subtree byte-for-byte on exact no-op and unrelated
+AiOffice edits. LibreOffice 26.8 renders the tested direct black shadow and
+preserves the effect when saving, while possibly quantizing blur/distance EMUs,
+adding effect extents, and wrapping the drawing in `mc:AlternateContent`. The latter
+rewritten representation remains losslessly opaque in the current conservative
+projection. Use Microsoft Word/Office for final cross-producer visual approval.
+
 ## Verified binary access
 
 Use the projected image node ID, never a part path:
@@ -556,8 +576,8 @@ filename, size, SHA-256, and output path as JSON.
 ## Selective native updates
 
 `image.update` changes only the supported native picture's accessibility metadata,
-displayed extent, rectangular source crop, picture transform, direct outline, and/or
-fixed opacity:
+displayed extent, rectangular source crop, picture transform, direct outline, fixed
+opacity, and/or direct outer shadow:
 
 ```python
 result = document.apply([
@@ -582,6 +602,15 @@ result = document.apply([
                 "dash": "dash_dot"
             },
             "opacity": 72.5,
+            "shadow": {
+                "color": "#000000",
+                "opacity": 40,
+                "blur_radius": {"value": 6, "unit": "pt"},
+                "distance": {"value": 3, "unit": "pt"},
+                "direction_degrees_clockwise": 45,
+                "alignment": "center",
+                "rotate_with_shape": false
+            },
             "alt_text": "Expert workflow with three approval stages",
             "title": "Expert workflow",
         },
@@ -591,14 +620,22 @@ assert result.success
 ```
 
 The operation accepts `width`, `height`, `crop`, `transform`, `outline`, `opacity`,
-`alt_text`, and `title` in `set`. `crop`, `transform`, `outline`, `opacity`,
-`alt_text`, and `title` are clearable:
+`shadow`, `alt_text`, and `title` in `set`. `crop`, `transform`, `outline`,
+`opacity`, `shadow`, `alt_text`, and `title` are clearable:
 
 ```json
 {
   "op": "image.update",
   "target": "#image_3A17C04E",
-  "clear": ["crop", "transform", "outline", "opacity", "alt_text", "title"]
+  "clear": [
+    "crop",
+    "transform",
+    "outline",
+    "opacity",
+    "shadow",
+    "alt_text",
+    "title"
+  ]
 }
 ```
 
@@ -731,6 +768,44 @@ remain opaque. The native element and unit follow Microsoft's
 contract. Semantic HTML exposes normalized opacity as evidence but does not simulate
 Word composition. LibreOffice 26.8 neither renders nor preserves this tested effect,
 so Microsoft Word/Office output is the visual authority for opacity-sensitive pages.
+
+### Picture outer shadow
+
+`shadow` is one complete `ImageShadow` group. AiOffice lowers it only to the
+picture's direct `pic:spPr/a:effectLst/a:outerShdw`; updating the group replaces
+that effect list, while clearing it removes the direct effect list. An imported
+empty direct `a:effectLst` is a neutral identity and stays raw rather than inventing
+semantic shadow state.
+
+The supported group exposes:
+
+- one direct `#RRGGBB` sRGB color;
+- opacity in `(0, 100]` percentage points, rounded to native thousandths;
+- non-negative `blur_radius` and `distance` explicit lengths within
+  `0..2147483647` EMUs, with at least one non-zero;
+- `direction_degrees_clockwise` in `[0, 360)`, rounded to the native
+  1/60000-degree unit;
+- all nine rectangle alignments from `top_left` through `bottom_right`;
+- strict boolean `rotate_with_shape`;
+- optional four-edge `effect_extent` layout evidence for an inline shadow; floating
+  shadows use the existing `floating.anchor_effect_extent` field. The inline object
+  is published as `aioffice schema --kind image-effect-extent`.
+
+Canonical output writes every supported outer-shadow attribute and one direct
+`a:srgbClr/a:alpha`. An imported color without `a:alpha` projects as 100% shadow
+opacity. Theme/system/preset/HSL/scRGB colors, color transforms, scale or skew
+attributes, multiple effects, effect DAGs, invalid ranges, unknown attributes, and
+malformed child order remain opaque. This boundary follows Microsoft's
+[`OuterShadow`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.outershadow?view=openxml-3.0.1)
+and
+[`EffectList.OuterShadow`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.effectlist.outershadow?view=openxml-3.0.1)
+contracts.
+
+Semantic HTML exposes normalized shadow fields as evidence attributes but does not
+simulate Word composition. LibreOffice 26.8 renders the tested direct black shadow
+and preserves its native effect on save, with possible EMU quantization,
+effect-extent generation, or `mc:AlternateContent` wrapping. Microsoft Word/Office
+remains the final authority for cross-producer shadow-sensitive pages.
 
 The native lowering re-proves the conservative image shape before and after mutation.
 It does not decode, resample, replace, or recompress the image, and it does not change
@@ -995,6 +1070,9 @@ The contract is deliberately explicit:
   width and preset-dash semantics as `image.update`;
 - optional `opacity` sets direct picture opacity in percentage points from 0
   inclusive to 100 exclusive using the same native precision as `image.update`;
+- optional `shadow` sets one complete direct-RGB outer-shadow group using the same
+  strict geometry, opacity, direction, alignment, and rotation semantics as
+  `image.update`;
 - placement defaults to `inline`; a non-null `floating` value selects floating
   placement and must validate as one complete `FloatingImageLayout`;
 - every horizontal and vertical position must select exactly one explicit `offset`,
@@ -1046,17 +1124,20 @@ aioffice insert-image-after \
   --transform image-transform.json \
   --outline image-outline.json \
   --opacity 85 \
+  --shadow image-shadow.json \
   --floating-layout floating-layout.json \
   -o inserted.docx
 ```
 
-`image-transform.json`, `image-outline.json`, and `floating-layout.json` are exactly
-the objects accepted by `aioffice schema --kind image-transform`,
-`aioffice schema --kind image-outline`, and
+`image-transform.json`, `image-outline.json`, `image-shadow.json`, and
+`floating-layout.json` are exactly the objects accepted by
+`aioffice schema --kind image-transform`,
+`aioffice schema --kind image-outline`,
+`aioffice schema --kind image-shadow`, and
 `aioffice schema --kind floating-image-layout`. Omitting the floating-layout flag
 keeps inline placement. The Workspace CLI accepts the same flags and records the
-normalized transform, outline, opacity, placement, and layout in its binary-free
-patch log.
+normalized transform, outline, opacity, shadow, placement, and layout in its
+binary-free patch log.
 
 Tracked insertion creates one new workspace revision without storing binary data in
 the patch log:
@@ -1096,6 +1177,8 @@ These cases remain native and explicit `opaque`/read-only projections:
   custom dashes, extensions, or malformed line structures;
 - malformed, duplicate, nested, or out-of-range opacity and every other picture
   visual effect;
+- unsupported shadow color models, scale/skew geometry, multiple effects, or
+  malformed outer-shadow attributes and children;
 - drawings inside tables;
 - complex header/footer drawings that do not satisfy the same one-picture proof;
 - VML pictures, OLE objects, embedded files, charts, SmartArt, and other graphic
@@ -1111,10 +1194,10 @@ subset are not claimed in this release.
 ## Preview and visual authority
 
 Semantic HTML emits an accessible, dimensioned placeholder with the asset ID, media
-type, placement, and normalized crop, transform, and outline evidence. Markdown
-emits an `aioffice-asset:` reference. Semantic HTML also exposes normalized opacity
-as evidence. Neither exporter embeds binary data or claims to reproduce native
-floating placement, wrapping, crop, transform, outline, opacity, or picture content.
+type, placement, and normalized crop, transform, outline, opacity, and shadow
+evidence. Markdown emits an `aioffice-asset:` reference. Neither exporter embeds
+binary data or claims to reproduce native floating placement, wrapping, crop,
+transform, outline, opacity, shadow, or picture content.
 
 Use the native LibreOffice PDF/PNG provider to judge the actual picture, cropping,
 position, pagination, and surrounding layout. Native rendering remains the visual
