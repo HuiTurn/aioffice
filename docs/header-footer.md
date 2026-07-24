@@ -162,8 +162,10 @@ A strict inline or offset-floating `mc:AlternateContent` picture with one
 projected with explicit compatibility evidence. Only width and height are updateable
 because both branches can be synchronized. A wrapped floating picture does not
 advertise `image.anchor.update`. Binary replacement is advertised only when both
-branches resolve to identical asset bytes and media type. The containing reusable
-part is not yet clone-safe while it contains VML.
+branches resolve to identical asset bytes and media type. A containing reusable part
+is clone-safe only when every VML compatibility wrapper passes that strict proof;
+the clone rebases its DrawingML/VML identities while retaining the complete local
+relationship graph and shared media targets.
 
 Image replacement is occurrence-scoped copy-on-write and allocates the new
 relationship in the containing header/footer part. This makes the expert workflow

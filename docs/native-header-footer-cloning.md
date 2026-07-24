@@ -107,8 +107,16 @@ duplicate producer-specific fallback assets.
 
 In `0.2.0.dev48`, the existing-story projection also accepts the strict
 offset-floating compatibility form. Its position and wrap remain read-only across
-branches, so `image.anchor.update` is not advertised; cloning remains refused for
-the same VML identity and fallback-asset reasons.
+branches, so `image.anchor.update` is not advertised.
+
+In `0.2.0.dev49`, both strict compatibility forms are clone-safe. AiOffice copies
+the complete source-local relationship graph without changing relationship IDs,
+shares the DrawingML and VML media targets, preserves the lexical `wps` namespace
+used by `mc:Choice/@Requires`, and assigns new DrawingML IDs plus a new
+`v:shape/@id`. For the floating form, the DrawingML anchor and VML fallback receive
+the same new `wp14:anchorId`. A later synchronized resize or permitted replacement
+changes only the cloned occurrence; the source story remains byte-exact. Any
+unrecognized VML or unproven wrapper still refuses the complete clone atomically.
 
 ## Clone and bind atomically
 

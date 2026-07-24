@@ -125,7 +125,11 @@ compatibility branch. `image.replace` is available only when both branches
 originally resolve to identical image bytes and media type; it then rewrites both
 branch references to the same new occurrence-scoped relationship. Namespace
 declarations used lexically by `mc:Choice/@Requires` are preserved when the
-containing native part is serialized.
+containing native part is serialized. In headers and footers, the strictly proven
+wrapper is also clone-safe: its part-local relationship graph and media targets are
+retained while DrawingML IDs, VML shape IDs, and the shared cross-branch floating
+anchor ID are collision-safely rebased. Unproven or standalone VML still causes an
+atomic clone refusal.
 
 Supported paragraph surfaces include solid sRGB `w:shd` fills and four physical
 `w:pBdr` edges. Border edges inherit independently through defaults and named styles.

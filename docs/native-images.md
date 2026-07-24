@@ -609,10 +609,16 @@ footer part is rewritten.
 Alignment/percentage-positioned or otherwise unsynchronized anchored wrappers,
 multiple choices, rebound or unknown required prefixes, missing fallbacks,
 non-picture VML, geometry/position/wrap disagreement, external/missing/non-image
-fallback relationships, and unfamiliar VML shape structures remain opaque. A
-header/footer part containing even a projected wrapper is not yet clone-safe because
-VML identities and producer-specific fallback assets are not rebased by the clone
-algorithm.
+fallback relationships, and unfamiliar VML shape structures remain opaque.
+
+A header/footer part containing a strictly projected wrapper is clone-safe. The
+clone retains its complete part-local relationship graph and shares both native
+media targets, while AiOffice assigns fresh DrawingML and VML shape identities,
+keeps the floating branches on one new `wp14:anchorId`, and preserves the lexical
+`wps` declaration. The source story remains byte-exact. A later width/height update
+or permitted same-asset fallback replacement is occurrence-local; distinct fallback
+assets remain shared but replacement stays unavailable. Standalone or unrecognized
+VML still refuses cloning.
 
 ## Verified binary access
 

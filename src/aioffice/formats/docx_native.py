@@ -127,6 +127,7 @@ WP = (
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 VML = "urn:schemas-microsoft-com:vml"
+MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 XML = "http://www.w3.org/XML/1998/namespace"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -456,7 +457,10 @@ def _create_header_footer_package_graph(
 
 
 def _header_footer_clone_unsupported_features(
+    package: NativePackage,
     root: ET.Element,
+    *,
+    source_part_uri: str,
 ) -> list[str]:
     unsupported_word_elements = {
         "altChunk",
@@ -481,6 +485,32 @@ def _header_footer_clone_unsupported_features(
         "sdt",
         "subDoc",
     }
+    supported_compatibility_elements: set[int] = set()
+    for paragraph in root.iter(_q(W, "p")):
+        compatibility_elements = [
+            element
+            for alternate in paragraph.iter(
+                _q(MC, "AlternateContent")
+            )
+            for element in alternate.iter()
+            if element.tag == _q(W, "pict")
+            or (
+                isinstance(element.tag, str)
+                and element.tag.startswith(f"{{{VML}}}")
+            )
+        ]
+        if not compatibility_elements:
+            continue
+        image = simple_native_image(
+            package,
+            paragraph,
+            source_part=source_part_uri,
+        )
+        if image is not None and image.alternate_content is not None:
+            supported_compatibility_elements.update(
+                id(element)
+                for element in compatibility_elements
+            )
     features: set[str] = set()
     for element in root.iter():
         if not isinstance(element.tag, str):
@@ -492,9 +522,16 @@ def _header_footer_clone_unsupported_features(
             )
         else:
             namespace, local_name = "", element.tag
-        if namespace == W and local_name in unsupported_word_elements:
+        if (
+            namespace == W
+            and local_name in unsupported_word_elements
+            and id(element) not in supported_compatibility_elements
+        ):
             features.add(f"w:{local_name}")
-        elif namespace == VML:
+        elif (
+            namespace == VML
+            and id(element) not in supported_compatibility_elements
+        ):
             features.add("VML")
     return sorted(features)
 
@@ -560,6 +597,29 @@ def _native_wp14_drawing_ids(
     return identifiers
 
 
+def _native_vml_shape_ids(
+    package: NativePackage,
+) -> set[str]:
+    identifiers: set[str] = set()
+    for part in package.parts:
+        if (
+            part.state == "deleted"
+            or not part.uri.casefold().endswith(".xml")
+            or not part.uri.startswith("/word/")
+        ):
+            continue
+        payload = package.get_part(part.uri)
+        if b"shape" not in payload:
+            continue
+        root = parse_xml(payload)
+        identifiers.update(
+            identifier
+            for shape in root.iter(_q(VML, "shape"))
+            if (identifier := shape.get("id")) is not None
+        )
+    return identifiers
+
+
 def _clone_native_story_signature(
     root: ET.Element,
 ) -> tuple[Any, ...]:
@@ -578,6 +638,13 @@ def _clone_native_story_signature(
                 {
                     _q(WP14, "anchorId"),
                     _q(WP14, "editId"),
+                }
+            )
+        if element.tag == _q(VML, "shape"):
+            ignored_attributes.update(
+                {
+                    "id",
+                    _q(WP14, "anchorId"),
                 }
             )
         if element.tag in drawing_tags:
@@ -618,7 +685,9 @@ def _clone_header_footer_native_part(
             "header_footer.clone source has the wrong native root."
         )
     unsupported = _header_footer_clone_unsupported_features(
-        source_root
+        package,
+        source_root,
+        source_part_uri=source_part_uri,
     )
     if unsupported:
         raise NativePackageError(
@@ -716,6 +785,7 @@ def _clone_header_footer_native_part(
         )
         element.set("id", str(identifier))
         reserved_drawing_ids.add(identifier)
+    anchor_id_replacements: dict[str, str] = {}
     for anchor_index, anchor in enumerate(
         clone_root.iter(_q(WP, "anchor"))
     ):
@@ -723,6 +793,8 @@ def _clone_header_footer_native_part(
             attribute = _q(WP14, identity_name)
             if anchor.get(attribute) is None:
                 continue
+            original_identifier = anchor.get(attribute)
+            assert original_identifier is not None
             identifier = _fresh_native_paragraph_anchor(
                 reserved_paragraph_ids,
                 (
@@ -732,6 +804,44 @@ def _clone_header_footer_native_part(
             )
             anchor.set(attribute, identifier)
             reserved_paragraph_ids.add(identifier)
+            if identity_name == "anchorId":
+                if original_identifier in anchor_id_replacements:
+                    raise NativePackageError(
+                        "header_footer.clone source reuses a floating "
+                        "anchor identity."
+                    )
+                anchor_id_replacements[original_identifier] = identifier
+    reserved_vml_shape_ids = _native_vml_shape_ids(package)
+    for shape_index, shape in enumerate(
+        clone_root.iter(_q(VML, "shape"))
+    ):
+        ordinal = 0
+        while True:
+            shape_identifier = _fresh_native_paragraph_anchor(
+                set(),
+                (
+                    f"{clone_part_id}:vml-shape:"
+                    f"{shape_index}:{ordinal}"
+                ),
+            )
+            cloned_shape_id = f"shape_{shape_identifier}"
+            if cloned_shape_id not in reserved_vml_shape_ids:
+                break
+            ordinal += 1
+        shape.set("id", cloned_shape_id)
+        reserved_vml_shape_ids.add(cloned_shape_id)
+        original_anchor_id = shape.get(_q(WP14, "anchorId"))
+        if original_anchor_id is None:
+            continue
+        replacement_anchor_id = anchor_id_replacements.get(
+            original_anchor_id
+        )
+        if replacement_anchor_id is None:
+            raise NativePackageError(
+                "header_footer.clone could not match a VML shape to its "
+                "DrawingML anchor identity."
+            )
+        shape.set(_q(WP14, "anchorId"), replacement_anchor_id)
     if (
         _clone_native_story_signature(source_root)
         != _clone_native_story_signature(clone_root)
@@ -740,7 +850,11 @@ def _clone_header_footer_native_part(
             "header_footer.clone changed native content beyond "
             "rebased identity attributes."
         )
-    clone_payload = serialize_xml(clone_root)
+    clone_payload = preserve_namespace_prefixes(
+        serialize_xml(clone_root),
+        source=package.get_part(source_part_uri),
+        prefixes=frozenset({"wps"}),
+    )
     parse_xml(clone_payload)
 
     placeholder = HeaderFooterPart(

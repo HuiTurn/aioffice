@@ -372,6 +372,18 @@ class PatchTests(unittest.TestCase):
             ],
         )
         self.assertIn(
+            "strict_alternate_content_image_with_shared_assets",
+            header_footer_contract[
+                "clone_supported_native_content"
+            ],
+        )
+        self.assertIn(
+            "v:shape@id",
+            header_footer_contract[
+                "clone_rebased_native_identities"
+            ],
+        )
+        self.assertIn(
             "bookmark",
             header_footer_contract[
                 "clone_refused_native_features"

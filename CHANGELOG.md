@@ -56,6 +56,14 @@
   native regions, including exact local-relationship copying, shared media targets,
   rebased paragraph/DrawingML identities, same-Patch binding, and creation-time
   graph proof.
+- Made strictly projected inline and offset-floating DrawingML/VML
+  `mc:AlternateContent` images clone-safe in headers and footers by copying their
+  complete local relationship graph, sharing both native media targets, preserving
+  the lexical `wps` declaration, and collision-safely rebasing VML shape and
+  cross-branch anchor identities.
+- Kept malformed or unproven VML compatibility content fail-closed during cloning,
+  and verified that later resize or conditional replacement remains clone-local
+  while the source story stays byte-exact.
 - Projected conservative simple inline DrawingML pictures in headers and footers as
   stable `ImageBlock` occurrences with shared content-addressed `AssetRef` records.
 - Extended verified image read/extraction, accessibility and geometry updates,
@@ -625,6 +633,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.46`.
 - Advanced the AiOffice Document Spec to `0.2-draft.47`.
 - Advanced the AiOffice Document Spec to `0.2-draft.48`.
+- Advanced the AiOffice Document Spec to `0.2-draft.49`.
 
 ## 0.1.0
 

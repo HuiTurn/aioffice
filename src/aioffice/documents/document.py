@@ -1360,6 +1360,9 @@ class Document:
                 "image_alternate_content_replace_condition": (
                     "vml_fallback_asset_bytes_and_media_type_match_choice"
                 ),
+                "image_alternate_content_header_footer_clone": (
+                    "supported_when_strictly_projected"
+                ),
                 "image_alternate_content_unsupported_updates": [
                     "crop",
                     "transform",
@@ -1923,12 +1926,15 @@ class Document:
                         "wp:docPr@id",
                         "a:cNvPr@id",
                         "pic:cNvPr@id",
+                        "v:shape@id",
+                        "v:shape@wp14:anchorId",
                     ],
                     "clone_supported_native_content": [
                         "ordinary_rich_paragraph",
                         "dynamic_field",
                         "external_hyperlink",
                         "drawingml_image_with_shared_asset",
+                        "strict_alternate_content_image_with_shared_assets",
                         "opaque_content_without_cross_story_identity",
                     ],
                     "clone_refused_native_features": [
@@ -1941,8 +1947,8 @@ class Document:
                         "structured_document_tag",
                         "subdocument",
                         "tracked_change_or_move",
-                        "legacy_pict_or_vml",
-                        "alternate_content_with_vml_fallback",
+                        "standalone_or_unrecognized_legacy_pict_or_vml",
+                        "unproven_alternate_content_with_vml_fallback",
                     ],
                     "clone_content_edit": "subsequent_patch_only",
                     "clone_then_bind_same_patch": True,

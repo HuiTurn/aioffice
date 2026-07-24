@@ -1083,7 +1083,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.48")
+        self.assertEqual(spec["spec_version"], "0.2-draft.49")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -1346,6 +1346,12 @@ class DocxImageTests(unittest.TestCase):
                 "image_alternate_content_synchronized_update_fields"
             ],
             ["width", "height"],
+        )
+        self.assertEqual(
+            capabilities[
+                "image_alternate_content_header_footer_clone"
+            ],
+            "supported_when_strictly_projected",
         )
         formatted = document.apply(
             [
@@ -1684,6 +1690,307 @@ class DocxImageTests(unittest.TestCase):
             header_document.inspect()["header_footers"][0]["blocks"][0][
                 "supported_operations"
             ],
+        )
+
+    def test_header_clone_rebases_supported_alternate_content_images(
+        self,
+    ) -> None:
+        for anchored in (False, True):
+            for fallback_matches_choice in (False, True):
+                source = _alternate_content_image_document(
+                    _header_image_document(anchored=anchored),
+                    part_name="word/header1.xml",
+                    fallback_matches_choice=fallback_matches_choice,
+                    signed_anchor_id=anchored,
+                )
+                collision_shape_id: str | None = None
+                if not anchored and fallback_matches_choice:
+                    collision_shape_id = "shape_" + hashlib.sha256(
+                        (
+                            "compatibility_clone:vml-shape:"
+                            "0:0:0"
+                        ).encode()
+                    ).hexdigest()[:8].upper()
+                    with ZipFile(io.BytesIO(source)) as archive:
+                        collision_root = parse_xml(
+                            archive.read("word/header1.xml")
+                        )
+                    collision_shape = collision_root.find(
+                        f".//{_q(VML, 'shape')}"
+                    )
+                    assert collision_shape is not None
+                    collision_shape.set("id", collision_shape_id)
+                    source = _rewrite_package(
+                        source,
+                        replacements={
+                            "word/header1.xml": _serialize_with_wps(
+                                collision_root
+                            ),
+                        },
+                        additions={},
+                    )
+                document = Document.from_docx(source)
+                source_part = document.to_spec()["header_footers"][0]
+                source_image = source_part["content"][0]
+                result = document.apply(
+                    [
+                        {
+                            "op": "header_footer.clone",
+                            "target": source_part["id"],
+                            "part": {"id": "compatibility_clone"},
+                        }
+                    ]
+                )
+                with self.subTest(
+                    anchored=anchored,
+                    fallback_matches_choice=fallback_matches_choice,
+                ):
+                    self.assertTrue(result.success, result.model_dump())
+                    assert result.document is not None
+                    parts = {
+                        part["id"]: part
+                        for part in result.document.to_spec()[
+                            "header_footers"
+                        ]
+                    }
+                    cloned_image = parts["compatibility_clone"][
+                        "content"
+                    ][0]
+                    self.assertNotEqual(
+                        cloned_image["id"],
+                        source_image["id"],
+                    )
+                    self.assertEqual(
+                        cloned_image["asset_id"],
+                        source_image["asset_id"],
+                    )
+                    self.assertEqual(
+                        cloned_image["alternate_content"],
+                        source_image["alternate_content"],
+                    )
+                    self.assertEqual(
+                        result.document.image_bytes(cloned_image["id"]),
+                        PNG,
+                    )
+
+                    output = result.document.to_bytes("docx")
+                    with (
+                        ZipFile(io.BytesIO(source)) as before,
+                        ZipFile(io.BytesIO(output)) as after,
+                    ):
+                        self.assertEqual(
+                            after.read("word/header1.xml"),
+                            before.read("word/header1.xml"),
+                        )
+                        clone_payload = after.read("word/header2.xml")
+                        self.assertIn(
+                            f'xmlns:wps="{WPS}"'.encode(),
+                            clone_payload,
+                        )
+                        self.assertEqual(
+                            after.read(
+                                "word/_rels/header2.xml.rels"
+                            ),
+                            before.read(
+                                "word/_rels/header1.xml.rels"
+                            ),
+                        )
+                        source_root = parse_xml(
+                            after.read("word/header1.xml")
+                        )
+                        clone_root = parse_xml(clone_payload)
+                    source_shape = source_root.find(
+                        f".//{_q(VML, 'shape')}"
+                    )
+                    clone_shape = clone_root.find(
+                        f".//{_q(VML, 'shape')}"
+                    )
+                    assert source_shape is not None
+                    assert clone_shape is not None
+                    self.assertNotEqual(
+                        source_shape.get("id"),
+                        clone_shape.get("id"),
+                    )
+                    self.assertTrue(
+                        clone_shape.get("id", "").startswith("shape_")
+                    )
+                    if collision_shape_id is not None:
+                        self.assertNotEqual(
+                            clone_shape.get("id"),
+                            collision_shape_id,
+                        )
+                    source_drawing_ids = {
+                        element.get("id")
+                        for element in source_root.iter()
+                        if element.tag
+                        in {
+                            _q(WP, "docPr"),
+                            _q(A, "cNvPr"),
+                            _q(PIC, "cNvPr"),
+                        }
+                    }
+                    clone_drawing_ids = {
+                        element.get("id")
+                        for element in clone_root.iter()
+                        if element.tag
+                        in {
+                            _q(WP, "docPr"),
+                            _q(A, "cNvPr"),
+                            _q(PIC, "cNvPr"),
+                        }
+                    }
+                    self.assertTrue(
+                        source_drawing_ids.isdisjoint(
+                            clone_drawing_ids
+                        )
+                    )
+                    if anchored:
+                        source_anchor = source_root.find(
+                            f".//{_q(WP, 'anchor')}"
+                        )
+                        clone_anchor = clone_root.find(
+                            f".//{_q(WP, 'anchor')}"
+                        )
+                        assert source_anchor is not None
+                        assert clone_anchor is not None
+                        source_anchor_id = source_anchor.get(
+                            _q(WP14, "anchorId")
+                        )
+                        clone_anchor_id = clone_anchor.get(
+                            _q(WP14, "anchorId")
+                        )
+                        self.assertNotEqual(
+                            source_anchor_id,
+                            clone_anchor_id,
+                        )
+                        self.assertEqual(
+                            source_shape.get(_q(WP14, "anchorId")),
+                            source_anchor_id,
+                        )
+                        self.assertEqual(
+                            clone_shape.get(_q(WP14, "anchorId")),
+                            clone_anchor_id,
+                        )
+
+                    resized = result.document.apply(
+                        [
+                            {
+                                "op": "image.update",
+                                "target": cloned_image["id"],
+                                "set": {
+                                    "width": {
+                                        "value": 180,
+                                        "unit": "pt",
+                                    }
+                                },
+                            }
+                        ]
+                    )
+                    self.assertTrue(
+                        resized.success,
+                        resized.model_dump(),
+                    )
+                    assert resized.document is not None
+                    resized_parts = {
+                        part["id"]: part
+                        for part in resized.document.to_spec()[
+                            "header_footers"
+                        ]
+                    }
+                    self.assertEqual(
+                        resized_parts[source_part["id"]]["content"][0][
+                            "width"
+                        ],
+                        {"value": 144.0, "unit": "pt"},
+                    )
+                    self.assertEqual(
+                        resized_parts["compatibility_clone"]["content"][0][
+                            "width"
+                        ],
+                        {"value": 180.0, "unit": "pt"},
+                    )
+                    if fallback_matches_choice:
+                        replaced = resized.document.replace_image(
+                            cloned_image["id"],
+                            JPEG,
+                            media_type="image/jpeg",
+                        )
+                        self.assertTrue(
+                            replaced.success,
+                            replaced.model_dump(),
+                        )
+                        assert replaced.document is not None
+                        self.assertEqual(
+                            replaced.document.image_bytes(
+                                source_image["id"]
+                            ),
+                            PNG,
+                        )
+                        self.assertEqual(
+                            replaced.document.image_bytes(
+                                cloned_image["id"]
+                            ),
+                            JPEG,
+                        )
+                    else:
+                        refused = resized.document.replace_image(
+                            cloned_image["id"],
+                            JPEG,
+                            media_type="image/jpeg",
+                        )
+                        self.assertFalse(refused.success)
+                        self.assertEqual(
+                            refused.diagnostics[0].code,
+                            "UNSUPPORTED_FEATURE",
+                        )
+
+        malformed_source = _alternate_content_image_document(
+            _header_image_document(),
+            part_name="word/header1.xml",
+        )
+        with ZipFile(io.BytesIO(malformed_source)) as archive:
+            malformed_root = parse_xml(
+                archive.read("word/header1.xml")
+            )
+        malformed_shape = malformed_root.find(
+            f".//{_q(VML, 'shape')}"
+        )
+        assert malformed_shape is not None
+        malformed_shape.set("future", "unsafe")
+        malformed_source = _rewrite_package(
+            malformed_source,
+            replacements={
+                "word/header1.xml": _serialize_with_wps(
+                    malformed_root
+                ),
+            },
+            additions={},
+        )
+        malformed_document = Document.from_docx(malformed_source)
+        malformed_part = malformed_document.to_spec()[
+            "header_footers"
+        ][0]
+        self.assertEqual(
+            malformed_part["content"][0]["type"],
+            "opaque",
+        )
+        refused_clone = malformed_document.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": malformed_part["id"],
+                    "part": {"id": "unsafe_compatibility_clone"},
+                }
+            ]
+        )
+        self.assertFalse(refused_clone.success)
+        self.assertEqual(
+            refused_clone.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "VML",
+            refused_clone.diagnostics[0].message,
         )
 
     def test_unrecognized_alternate_content_remains_opaque(self) -> None:
