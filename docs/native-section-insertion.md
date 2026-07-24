@@ -52,7 +52,9 @@ type on a later section as `next_page`.
 Header/footer IDs are inherited from the containing semantic section. Direct
 rebinding is excluded from this operation because it requires a separate proof over
 document relationships, reusable header/footer parts, first/even-page settings, and
-inheritance across neighboring sections.
+inheritance across neighboring sections. Use the separately validated
+[`section.header_footer.bind`](native-header-footer-binding.md) operation after the
+section has been created, including later in the same Patch.
 
 ## Native lowering
 
@@ -94,6 +96,7 @@ read-only until revision markup has its own native model and validation contract
 Native lowering tracks live section boundary objects and ordered section indices.
 After insertion, the new section can immediately receive:
 
+- `section.header_footer.bind` using an existing projected part;
 - `section.format`;
 - `node.insert_before` at its first node, with `start_at` rebound to the created
   predecessor;

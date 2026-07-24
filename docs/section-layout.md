@@ -102,9 +102,11 @@ properties, direct header/footer rebinding in the insertion payload, detached na
 projections, stale or noncontiguous ranges, and any result that cannot reproduce the
 semantic section order. The transaction is atomic.
 
-The new section can receive `section.format`, or have content inserted before its
-start with ordered `start_at` rebinding, later in the same Patch. See
-[the dedicated native insertion contract](native-section-insertion.md).
+The new section can receive `section.format`, reuse existing header/footer parts
+through `section.header_footer.bind`, or have content inserted before its start with
+ordered `start_at` rebinding, later in the same Patch. See
+[the dedicated native insertion contract](native-section-insertion.md) and
+[native header/footer binding](native-header-footer-binding.md).
 
 `page_number_start` and `page_number_format` map to selected attributes of
 `w:pgNumType`. They define section pagination; PAGE/NUMPAGES fields remain separate

@@ -83,9 +83,14 @@ def _q(namespace: str, local: str) -> str:
 
 def _unique_id(prefix: str, hint: str, index: int, seen: set[str]) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.:-]", "_", hint)[:80]
-    candidate = f"{prefix}_{cleaned}" if cleaned else f"{prefix}_{index:06d}"
-    if candidate in seen:
-        candidate = f"{candidate}_{index:06d}"
+    base = f"{prefix}_{cleaned}" if cleaned else f"{prefix}_{index:06d}"
+    candidate = base
+    collision = 0
+    while candidate in seen:
+        collision += 1
+        candidate = f"{base}_{index:06d}"
+        if collision > 1:
+            candidate = f"{candidate}_{collision:02d}"
     seen.add(candidate)
     return candidate
 
@@ -1339,6 +1344,62 @@ def import_docx(
                 field_name: part["id"]
                 for field_name, part in binding_parts.items()
             }
+    for relationship in document_relationships.values():
+        if (
+            relationship.external
+            or relationship.relationship_type
+            not in {
+                HEADER_RELATIONSHIP_TYPE,
+                FOOTER_RELATIONSHIP_TYPE,
+            }
+        ):
+            continue
+        kind = (
+            "header"
+            if relationship.relationship_type
+            == HEADER_RELATIONSHIP_TYPE
+            else "footer"
+        )
+        part_uri = resolve_relationship_target(
+            relationship.source_part,
+            relationship.target,
+        )
+        if part_uri in header_footer_by_uri:
+            continue
+        if not package.has_part(part_uri):
+            header_footer_diagnostics.append(
+                Diagnostic(
+                    severity=Severity.WARNING,
+                    code="HEADER_FOOTER_REFERENCE_INVALID",
+                    message=(
+                        "Document relationship "
+                        f"{relationship.relationship_id!r} targets a "
+                        f"missing {kind} part."
+                    ),
+                    recoverable=True,
+                )
+            )
+            continue
+        try:
+            projected_part = _header_footer_part_projection(
+                package,
+                part_uri=part_uri,
+                kind=kind,
+                seen_ids=seen_ids,
+                named_styles=named_styles,
+            )
+        except NativePackageError as error:
+            header_footer_diagnostics.append(
+                Diagnostic(
+                    severity=Severity.WARNING,
+                    code="HEADER_FOOTER_PROJECTION_FAILED",
+                    message=str(error),
+                    recoverable=True,
+                )
+            )
+            continue
+        header_footer_by_uri[part_uri] = projected_part
+        header_footers.append(projected_part)
     index = 0
     while index < len(body_elements):
         element = body_elements[index]

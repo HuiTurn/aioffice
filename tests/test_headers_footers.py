@@ -7,6 +7,7 @@ from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from aioffice import Document, DocumentBuilder, SpecValidationError
+from aioffice.formats.docx_import import _unique_id
 from aioffice.native.xml import parse_xml, serialize_xml
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -108,7 +109,41 @@ def _document_with_regions() -> Document:
     ).paragraph("Cover", id="cover").paragraph("Body", id="body").build()
 
 
+def _section_elements(root: ET.Element) -> list[ET.Element]:
+    body = root.find(_q(W, "body"))
+    assert body is not None
+    result: list[ET.Element] = []
+    for element in list(body):
+        if element.tag == _q(W, "p"):
+            section = element.find(
+                f"./{_q(W, 'pPr')}/{_q(W, 'sectPr')}"
+            )
+            if section is not None:
+                result.append(section)
+        elif element.tag == _q(W, "sectPr"):
+            result.append(element)
+    return result
+
+
 class HeaderFooterTests(unittest.TestCase):
+    def test_unanchored_native_ids_resolve_repeated_collisions(
+        self,
+    ) -> None:
+        seen: set[str] = set()
+        self.assertEqual(
+            [
+                _unique_id("para", "000000", 0, seen)
+                for _ in range(5)
+            ],
+            [
+                "para_000000",
+                "para_000000_000000",
+                "para_000000_000000_02",
+                "para_000000_000000_03",
+                "para_000000_000000_04",
+            ],
+        )
+
     def test_generation_projection_inheritance_and_settings(self) -> None:
         document = _document_with_regions()
         self.assertTrue(document.validate().valid, document.validate().diagnostics)
@@ -387,6 +422,360 @@ class HeaderFooterTests(unittest.TestCase):
                     ],
                 }
             )
+
+    def test_semantic_header_footer_binding_is_explicit_and_stable(
+        self,
+    ) -> None:
+        document = _document_with_regions()
+        source = document.to_bytes("docx")
+        result = document.apply(
+            [
+                {
+                    "op": "section.header_footer.bind",
+                    "target": "#front",
+                    "set": {
+                        "header_default": "#even_header",
+                    },
+                    "clear": [
+                        "header_even",
+                        "footer_default",
+                    ],
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        self.assertEqual(
+            result.changes,
+            [
+                {
+                    "operation": "section.header_footer.bind",
+                    "section_ids": ["front"],
+                    "binding_changes": [
+                        {
+                            "slot": "footer_default",
+                            "before": "report_footer",
+                            "after": None,
+                        },
+                        {
+                            "slot": "header_default",
+                            "before": "report_header",
+                            "after": "even_header",
+                        },
+                        {
+                            "slot": "header_even",
+                            "before": "even_header",
+                            "after": None,
+                        },
+                    ],
+                }
+            ],
+        )
+        assert result.document is not None
+        self.assertEqual(
+            result.document.to_spec()["sections"][0]["header_footer"],
+            {"header_default": "even_header"},
+        )
+
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        first_section = _section_elements(root)[0]
+        header_references = first_section.findall(
+            _q(W, "headerReference")
+        )
+        self.assertEqual(len(header_references), 1)
+        self.assertEqual(
+            header_references[0].get(_q(W, "type")),
+            "default",
+        )
+        self.assertEqual(
+            first_section.findall(_q(W, "footerReference")),
+            [],
+        )
+
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            reopened.to_spec()["sections"][0]["header_footer"],
+            {"header_default": "even_header"},
+        )
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_native_binding_preserves_parts_and_supports_new_section(
+        self,
+    ) -> None:
+        raw_spec = _document_with_regions().to_spec()
+        raw_spec["content"].append(
+            {
+                "id": "body_detail",
+                "type": "paragraph",
+                "text": "Body detail",
+            }
+        )
+        source = Document.from_spec(raw_spec).to_bytes("docx")
+        with ZipFile(io.BytesIO(source)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        sections = _section_elements(root)
+        sections[0].set(
+            "{urn:aioffice:test}futureBinding",
+            "preserve",
+        )
+        future = ET.SubElement(
+            sections[-1],
+            "{urn:aioffice:test}futureSectionProperty",
+        )
+        future.set("mode", "keep")
+        source = _rewrite_part(
+            source,
+            "word/document.xml",
+            serialize_xml(root),
+        )
+        with ZipFile(io.BytesIO(source)) as package:
+            before_parts = {
+                name: package.read(name)
+                for name in package.namelist()
+            }
+
+        imported = Document.from_docx(source)
+        source_spec = imported.to_spec()
+        front_section_id = source_spec["sections"][0]["id"]
+        body_section_id = source_spec["sections"][1]["id"]
+        detail_id = next(
+            node["id"]
+            for node in source_spec["content"]
+            if node["id"] == "body_detail"
+        )
+        parts_by_text = {
+            "".join(
+                block.get("text", "")
+                for block in part["content"]
+            ): part["id"]
+            for part in source_spec["header_footers"]
+        }
+        report_header_id = parts_by_text["Confidential report"]
+        even_header_id = parts_by_text["Even page"]
+        report_footer_id = parts_by_text["AiOffice"]
+        original_nodes = {
+            node["id"]: [
+                ET.tostring(list(root.find(_q(W, "body")))[index])
+                for index in node["source_ref"]["element_indices"]
+            ]
+            for node in source_spec["content"]
+        }
+
+        result = imported.apply(
+            [
+                {
+                    "op": "section.header_footer.bind",
+                    "target": f"#{front_section_id}",
+                    "set": {
+                        "header_default": even_header_id,
+                    },
+                    "clear": [
+                        "header_even",
+                        "footer_default",
+                    ],
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": f"#{body_section_id}",
+                    "set": {
+                        "header_default": report_header_id,
+                    },
+                },
+                {
+                    "op": "section.insert_before",
+                    "target": f"#{detail_id}",
+                    "section": {
+                        "id": "detail_section",
+                    },
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": "#detail_section",
+                    "set": {
+                        "footer_default": report_footer_id,
+                    },
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(imported.to_bytes("docx"), source)
+        assert result.document is not None
+        assert result.fidelity is not None
+        output = result.document.to_bytes("docx")
+        result_spec = result.document.to_spec()
+        self.assertEqual(
+            result_spec["sections"][0]["header_footer"],
+            {"header_default": even_header_id},
+        )
+        self.assertEqual(
+            result_spec["sections"][-1]["header_footer"],
+            {
+                "header_default": report_header_id,
+                "footer_default": report_footer_id,
+            },
+        )
+        self.assertEqual(
+            result_spec["sections"][-1]["start_at"],
+            detail_id,
+        )
+
+        with ZipFile(io.BytesIO(output)) as package:
+            after_parts = {
+                name: package.read(name)
+                for name in package.namelist()
+            }
+            patched_root = parse_xml(
+                package.read("word/document.xml")
+            )
+        self.assertEqual(set(before_parts), set(after_parts))
+        changed_parts = {
+            name
+            for name in before_parts
+            if before_parts[name] != after_parts[name]
+        }
+        self.assertEqual(
+            changed_parts,
+            {
+                "customXml/aioffice-manifest.xml",
+                "word/document.xml",
+            },
+        )
+        for name in {
+            "word/header1.xml",
+            "word/header2.xml",
+            "word/footer1.xml",
+            "word/_rels/document.xml.rels",
+            "[Content_Types].xml",
+        }:
+            self.assertEqual(
+                before_parts[name],
+                after_parts[name],
+            )
+
+        patched_body = patched_root.find(_q(W, "body"))
+        assert patched_body is not None
+        for node in result_spec["content"]:
+            self.assertEqual(
+                [
+                    ET.tostring(list(patched_body)[index])
+                    for index in (
+                        node["source_ref"]["element_indices"]
+                    )
+                ],
+                original_nodes[node["id"]],
+            )
+        patched_sections = _section_elements(patched_root)
+        self.assertEqual(
+            patched_sections[0].get(
+                "{urn:aioffice:test}futureBinding"
+            ),
+            "preserve",
+        )
+        self.assertIsNotNone(
+            patched_sections[-1].find(
+                "{urn:aioffice:test}futureSectionProperty"
+            )
+        )
+
+        reopened = Document.from_docx(output)
+        reopened_spec = reopened.to_spec()
+        self.assertEqual(
+            [
+                (
+                    section["id"],
+                    section.get("start_at"),
+                    section.get("header_footer"),
+                )
+                for section in reopened_spec["sections"]
+            ],
+            [
+                (
+                    result_spec["sections"][0]["id"],
+                    None,
+                    {"header_default": even_header_id},
+                ),
+                (
+                    result_spec["sections"][1]["id"],
+                    result_spec["sections"][1]["start_at"],
+                    {
+                        "header_default": report_header_id,
+                    },
+                ),
+                (
+                    "detail_section",
+                    detail_id,
+                    {
+                        "header_default": report_header_id,
+                        "footer_default": report_footer_id,
+                    },
+                ),
+            ],
+        )
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_native_binding_failures_are_atomic(self) -> None:
+        document = _document_with_regions()
+        source = document.to_bytes("docx")
+        kind_mismatch = document.apply(
+            [
+                {
+                    "op": "section.header_footer.bind",
+                    "target": "#front",
+                    "set": {
+                        "header_default": "report_footer",
+                    },
+                }
+            ]
+        )
+        self.assertFalse(kind_mismatch.success)
+        self.assertEqual(
+            kind_mismatch.diagnostics[0].code,
+            "TARGET_TYPE_MISMATCH",
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+
+        with ZipFile(io.BytesIO(source)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        first_section = _section_elements(root)[0]
+        default_header = next(
+            reference
+            for reference in first_section.findall(
+                _q(W, "headerReference")
+            )
+            if reference.get(_q(W, "type")) == "default"
+        )
+        first_section.insert(0, copy.deepcopy(default_header))
+        duplicate_source = _rewrite_part(
+            source,
+            "word/document.xml",
+            serialize_xml(root),
+        )
+        imported = Document.from_docx(duplicate_source)
+        first_section_id = imported.to_spec()["sections"][0]["id"]
+        duplicate_result = imported.apply(
+            [
+                {
+                    "op": "section.header_footer.bind",
+                    "target": f"#{first_section_id}",
+                    "clear": ["header_default"],
+                }
+            ]
+        )
+        self.assertFalse(duplicate_result.success)
+        self.assertEqual(
+            duplicate_result.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "existing native header_default reference",
+            duplicate_result.diagnostics[0].message,
+        )
+        self.assertEqual(
+            imported.to_bytes("docx"),
+            duplicate_source,
+        )
 
 
 if __name__ == "__main__":

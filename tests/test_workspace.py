@@ -588,6 +588,117 @@ class WorkspaceTests(unittest.TestCase):
                     "patch_operations"
                 ],
             )
+            self.assertIn(
+                "section.header_footer.bind",
+                workspace.capabilities(document.id)[
+                    "patch_operations"
+                ],
+            )
+
+    def test_workspace_persists_native_header_footer_binding(
+        self,
+    ) -> None:
+        document = (
+            DocumentBuilder(
+                header_footers=[
+                    {
+                        "id": "workspace_primary_header",
+                        "kind": "header",
+                        "content": [
+                            {
+                                "id": "workspace_primary_text",
+                                "type": "paragraph",
+                                "text": "Primary",
+                            }
+                        ],
+                    },
+                    {
+                        "id": "workspace_alternate_header",
+                        "kind": "header",
+                        "content": [
+                            {
+                                "id": "workspace_alternate_text",
+                                "type": "paragraph",
+                                "text": "Alternate",
+                            }
+                        ],
+                    },
+                ],
+                sections=[
+                    {
+                        "id": "workspace_section",
+                        "layout": {
+                            "different_first_page": True,
+                        },
+                        "header_footer": {
+                            "header_default": (
+                                "workspace_primary_header"
+                            ),
+                            "header_first": (
+                                "workspace_alternate_header"
+                            ),
+                        },
+                    }
+                ],
+            )
+            .paragraph("Body", id="workspace_body")
+            .build()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "regions.docx"
+            source.write_bytes(document.to_bytes("docx"))
+            workspace = Workspace.init(root / "project")
+            imported = workspace.import_document(source)
+            result = workspace.apply(
+                imported.id,
+                [
+                    {
+                        "op": "section.header_footer.bind",
+                        "target": "#workspace_section",
+                        "set": {
+                            "header_default": (
+                                "workspace_alternate_header"
+                            ),
+                        },
+                        "clear": ["header_first"],
+                    }
+                ],
+                idempotency_key="alternate-header",
+            )
+            self.assertTrue(result.success, result.model_dump())
+            reopened_workspace = Workspace.open(root / "project")
+            reopened = reopened_workspace.open_document(imported.id)
+            self.assertEqual(
+                reopened.to_spec()["sections"][0][
+                    "header_footer"
+                ],
+                {
+                    "header_default": (
+                        "workspace_alternate_header"
+                    )
+                },
+            )
+            replay = reopened_workspace.apply(
+                imported.id,
+                [
+                    {
+                        "op": "section.header_footer.bind",
+                        "target": "#workspace_section",
+                        "set": {
+                            "header_default": (
+                                "workspace_alternate_header"
+                            ),
+                        },
+                        "clear": ["header_first"],
+                    }
+                ],
+                idempotency_key="alternate-header",
+            )
+            self.assertEqual(
+                replay.result_revision,
+                result.result_revision,
+            )
 
 
 if __name__ == "__main__":

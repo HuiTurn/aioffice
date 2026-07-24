@@ -339,6 +339,31 @@
   all pre-existing content XML and the copied old `w:sectPr` stayed byte-exact,
   the untouched first-page PNG stayed byte-identical, and the wide page rendered
   without clipping or overlap.
+- Added semantic and native `section.header_footer.bind` for explicitly reusing an
+  existing header/footer part in any default, first, or even section slot, or
+  clearing a slot back to Word's native inheritance behavior.
+- Lowered binding changes to only the selected direct `w:headerReference` or
+  `w:footerReference`, preserving reusable part XML, document relationships,
+  unselected references, unknown section properties, and exact OOXML child order.
+- Added strict proof of native part kind, root element, internal relationship type
+  and uniqueness, existing projected references, live section identity, sequential
+  binding state, and final semantic/native binding-map equality.
+- Made binding work on sections created earlier in the same Patch and made later
+  section splits inherit the current explicit binding state.
+- Ensured standalone identity attachment for third-party binding changes and added
+  CLI, Workspace, capabilities, generated/native round-trip, exact-part
+  preservation, same-Patch, kind-mismatch, duplicate-reference, detached-projection,
+  and transaction-atomicity coverage.
+- Projected safe internal header/footer relationships even when their part is
+  temporarily unbound, keeping preserved old regions AI-addressable for later reuse,
+  and fixed deterministic native-ID allocation beyond a second identical fallback
+  collision.
+- Verified a manifest-free, independently generated three-section DOCX by replacing
+  the appendix header with the body header and clearing its footer to inherit: all
+  six region parts, `document.xml.rels`, existing body XML, and unknown section XML
+  remained exact; standalone reopen retained even the unbound old parts; three
+  Letter pages rendered without clipping, while the untouched first two page PNGs
+  stayed byte-identical and only the appendix header/footer changed visually.
 - Added symmetric native `node.insert_before` so AI callers can prepend content to
   the document or place a new paragraph/heading before any complete mapped range,
   including multi-paragraph list anchors.
@@ -363,7 +388,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.28`.
+- Advanced the AiOffice Document Spec to `0.2-draft.29`.
 
 ## 0.1.0
 

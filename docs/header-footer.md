@@ -36,6 +36,10 @@ Imported parts and their ordinary paragraphs receive persistent native identitie
 scoped by part URI. This is important because paragraph IDs and identical XML can
 legitimately occur in different parts.
 
+Safe internal header/footer relationships are projected even when no current section
+references the part. This keeps a region reusable after a binding change instead of
+hiding preserved but temporarily unbound native content from the AI.
+
 `text.replace`, `paragraph.format`, and `text.format` may target an ordinary
 header/footer paragraph ID. Native lowering mutates only that part and the AiOffice
 identity manifest. Unknown XML in the same part remains in place.
@@ -43,6 +47,46 @@ identity manifest. Unknown XML in the same part remains in place.
 Paragraph background, border, paragraph, and text styles use the same inheritance
 and Patch contract as body paragraphs. Semantic HTML resolves those styles for
 header/footer previews; native PDF/PNG remains the pagination and visual authority.
+
+## Section binding edits
+
+`section.header_footer.bind` changes which existing reusable parts a section
+explicitly references:
+
+```json
+{
+  "op": "section.header_footer.bind",
+  "target": "#appendix_section",
+  "set": {
+    "header_default": "appendix_header",
+    "footer_default": "report_footer"
+  },
+  "clear": ["header_first"]
+}
+```
+
+`set` maps one or more of the six binding slots to stable header/footer part IDs.
+The selected part must exist in `header_footers`, have the correct kind, and
+for imported DOCX resolve through exactly one internal relationship from
+`word/document.xml`. A leading `#` on a part ID is accepted and normalized away.
+
+`clear` removes that section's explicit native reference. It does not create a blank
+region: Word inherits the same slot from the preceding section, or uses blank/default
+behavior for the first section. Bind an explicit empty part when the intended result
+is an intentionally blank region.
+
+The operation can target a section created earlier in the same Patch. Only selected
+direct `w:headerReference` or `w:footerReference` children change; the reusable part
+XML, its relationships, unselected section references, and unknown section
+properties remain untouched. A standalone identity manifest is attached when needed
+so section and part IDs remain stable after reopen.
+
+The native transaction refuses a missing or type-incompatible part, external or
+duplicate relationships, duplicate references for one slot, stale section
+boundaries, and clearing an invalid native reference that was not safely projected.
+Creating, deleting, cloning, or copy-on-write editing a reusable part remains a
+separate future operation. See
+[the full native binding contract](native-header-footer-binding.md).
 
 ## Conservative projection boundary
 
@@ -53,9 +97,9 @@ read-only native fields. Malformed field containment, drawings, embedded objects
 tables, and unknown header/footer elements remain non-editable opaque blocks.
 
 Semantic generation currently supports ordinary paragraph blocks, including rich
-text, hyperlinks, and normalized dynamic fields. Tables, images, and binding
-creation/removal on an already imported native package are planned behind explicit
-capabilities. See [the dynamic field contract](dynamic-fields.md).
+text, hyperlinks, and normalized dynamic fields. Tables, images, creating/deleting
+parts, and copy-on-write region content remain planned behind explicit capabilities.
+See [the dynamic field contract](dynamic-fields.md).
 
 ## Preview boundary
 

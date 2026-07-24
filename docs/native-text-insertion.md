@@ -1,6 +1,6 @@
 # Incremental native body-block insertion
 
-AiOffice `0.2.0.dev28` can insert a new paragraph, heading, explicit page break,
+AiOffice `0.2.0.dev29` can insert a new paragraph, heading, explicit page break,
 bullet or numbered list, or table into an imported DOCX without rebuilding the
 document from its JSON projection. JSON remains the AI-facing intent and evidence
 layer; the attached OPC package remains the native authority. This page covers text

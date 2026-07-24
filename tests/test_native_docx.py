@@ -2737,6 +2737,10 @@ class NativeDocxTests(unittest.TestCase):
             "section.insert_before",
             detached.capabilities()["operations"],
         )
+        self.assertNotIn(
+            "section.header_footer.bind",
+            detached.capabilities()["operations"],
+        )
         detached_insert = detached.apply(
             [
                 {
@@ -2813,6 +2817,22 @@ class NativeDocxTests(unittest.TestCase):
         self.assertFalse(detached_section.success)
         self.assertEqual(
             detached_section.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+        detached_binding = detached.apply(
+            [
+                {
+                    "op": "section.header_footer.bind",
+                    "target": "#section_default",
+                    "set": {
+                        "header_default": "detached_header",
+                    },
+                }
+            ]
+        )
+        self.assertFalse(detached_binding.success)
+        self.assertEqual(
+            detached_binding.diagnostics[0].code,
             "UNSUPPORTED_FEATURE",
         )
 

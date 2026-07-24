@@ -34,7 +34,12 @@ from aioffice.formats.docx_named_styles import (
     upsert_named_style,
 )
 from aioffice.formats.docx_header_footer import (
+    FOOTER_RELATIONSHIP_TYPE,
+    HEADER_FOOTER_BINDING_SLOTS,
+    HEADER_RELATIONSHIP_TYPE,
+    binding_references,
     native_ref_for_header_footer_part,
+    patch_header_footer_bindings,
     resolve_relationship_target,
 )
 from aioffice.formats.docx_fields import (
@@ -1558,6 +1563,7 @@ def apply_docx_operations(
         "style.apply",
         "style.define",
         "style.format",
+        "section.header_footer.bind",
         "section.insert_before",
         "section.format",
         "field.update",
@@ -1578,7 +1584,8 @@ def apply_docx_operations(
             "node.append, node.insert_after, node.insert_before, node.move_after, "
             "node.move_before, node.remove, "
             "style.apply, style.define, style.format, "
-            "section.insert_before, section.format, and "
+            "section.header_footer.bind, section.insert_before, "
+            "section.format, and "
             "field.update, image.insert_after, image.replace, image.update, "
             "table.format, "
             "table.column.format, and "
@@ -1780,6 +1787,99 @@ def apply_docx_operations(
         section.id: section.start_at
         for section in spec.sections
     }
+    native_section_bindings = {
+        section.id: (
+            section.header_footer.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+            if section.header_footer is not None
+            else {}
+        )
+        for section in spec.sections
+    }
+    source_header_footer_parts = {
+        part.id: part
+        for part in spec.header_footers
+    }
+    binding_slots = {
+        field_name: (kind, variant)
+        for field_name, kind, variant
+        in HEADER_FOOTER_BINDING_SLOTS
+    }
+
+    def header_footer_relationship_id(
+        part_id: str,
+        field_name: str,
+    ) -> str:
+        slot = binding_slots.get(field_name)
+        part = source_header_footer_parts.get(part_id)
+        if slot is None or part is None:
+            raise NativePackageError(
+                "section.header_footer.bind references an unknown slot "
+                "or header/footer part."
+            )
+        expected_kind, _ = slot
+        if part.kind != expected_kind:
+            raise NativePackageError(
+                f"section.header_footer.bind slot {field_name!r} requires "
+                f"a {expected_kind} part."
+            )
+        source_ref = part.source_ref
+        expected_native_kind = (
+            "w:hdr-part"
+            if expected_kind == "header"
+            else "w:ftr-part"
+        )
+        if (
+            not isinstance(source_ref, NativeRef)
+            or source_ref.format != "docx"
+            or source_ref.native_kind != expected_native_kind
+            or not updated.has_part(source_ref.part_uri)
+        ):
+            raise NativePackageError(
+                f"Header/footer part {part_id!r} has no reusable native "
+                "DOCX part reference."
+            )
+        part_root = part_roots.get(source_ref.part_uri)
+        if part_root is None:
+            part_root = parse_xml(
+                updated.get_part(source_ref.part_uri)
+            )
+            part_roots[source_ref.part_uri] = part_root
+        expected_root = _q(
+            W,
+            "hdr" if expected_kind == "header" else "ftr",
+        )
+        if part_root.tag != expected_root:
+            raise NativePackageError(
+                f"Header/footer part {part_id!r} has the wrong native "
+                "root element."
+            )
+        expected_relationship_type = (
+            HEADER_RELATIONSHIP_TYPE
+            if expected_kind == "header"
+            else FOOTER_RELATIONSHIP_TYPE
+        )
+        relationship_ids = [
+            relationship.relationship_id
+            for relationship in updated.relationships
+            if relationship.source_part == "/word/document.xml"
+            and not relationship.external
+            and relationship.relationship_type
+            == expected_relationship_type
+            and resolve_relationship_target(
+                relationship.source_part,
+                relationship.target,
+            )
+            == source_ref.part_uri
+        ]
+        if len(relationship_ids) != 1:
+            raise NativePackageError(
+                f"Header/footer part {part_id!r} must have exactly one "
+                "internal document relationship."
+            )
+        return relationship_ids[0]
 
     def synchronize_section_start(
         change: Mapping[str, Any],
@@ -1881,6 +1981,7 @@ def apply_docx_operations(
     inserted_images: dict[str, ET.Element] = {}
     inserted_nodes: set[str] = set()
     inserted_sections: set[str] = set()
+    rebound_header_footer_sections: set[str] = set()
     inserted_fields: dict[str, tuple[ET.Element, int]] = {}
     moved_nodes: set[str] = set()
     removed_nodes: set[str] = set()
@@ -1937,6 +2038,133 @@ def apply_docx_operations(
                 text_fields=text_fields,
             )
             styles_changed = True
+            continue
+        if operation_name == "section.header_footer.bind":
+            target_id = _target_id(operation.get("target"))
+            mapped_section = source_sections.get(target_id)
+            current_bindings = native_section_bindings.get(target_id)
+            if mapped_section is None or current_bindings is None:
+                raise NativePackageError(
+                    "section.header_footer.bind target has no live native "
+                    "section boundary."
+                )
+            raw_set = operation.get("set", {})
+            raw_clear = operation.get("clear", [])
+            valid_shape = (
+                isinstance(raw_set, Mapping)
+                and all(
+                    isinstance(field_name, str)
+                    and isinstance(part_id, str)
+                    and bool(part_id)
+                    for field_name, part_id in raw_set.items()
+                )
+                and isinstance(raw_clear, list)
+                and all(
+                    isinstance(field_name, str)
+                    for field_name in raw_clear
+                )
+                and len(raw_clear) == len(set(raw_clear))
+            )
+            if not valid_shape:
+                raise NativePackageError(
+                    "section.header_footer.bind has invalid set/clear "
+                    "evidence."
+                )
+            normalized_set = {
+                field_name: _target_id(part_id)
+                for field_name, part_id in raw_set.items()
+            }
+            changed_fields = set(normalized_set) | set(raw_clear)
+            unknown_fields = changed_fields - set(binding_slots)
+            overlap = set(normalized_set) & set(raw_clear)
+            if (
+                not changed_fields
+                or unknown_fields
+                or overlap
+            ):
+                raise NativePackageError(
+                    "section.header_footer.bind contains unknown, "
+                    "overlapping, or empty binding fields."
+                )
+            next_bindings = dict(current_bindings)
+            next_bindings.update(normalized_set)
+            for field_name in raw_clear:
+                next_bindings.pop(field_name, None)
+            expected_changes = [
+                {
+                    "slot": field_name,
+                    "before": current_bindings.get(field_name),
+                    "after": next_bindings.get(field_name),
+                }
+                for field_name in sorted(changed_fields)
+                if current_bindings.get(field_name)
+                != next_bindings.get(field_name)
+            ]
+            if (
+                change.get("operation") != operation_name
+                or change.get("section_ids") != [target_id]
+                or change.get("binding_changes")
+                != expected_changes
+                or not expected_changes
+            ):
+                raise NativePackageError(
+                    "section.header_footer.bind semantic change evidence "
+                    "does not match the live native binding state."
+                )
+
+            section_element = mapped_section[0]
+            set_relationship_ids: dict[str, str] = {}
+            for field_name in sorted(changed_fields):
+                references = binding_references(
+                    section_element,
+                    field_name,
+                )
+                before_part_id = current_bindings.get(field_name)
+                if before_part_id is not None:
+                    expected_relationship_id = (
+                        header_footer_relationship_id(
+                            before_part_id,
+                            field_name,
+                        )
+                    )
+                    if (
+                        len(references) != 1
+                        or references[0].get(_q(R, "id"))
+                        != expected_relationship_id
+                    ):
+                        raise NativePackageError(
+                            "section.header_footer.bind cannot prove the "
+                            f"existing native {field_name} reference."
+                        )
+                elif field_name in raw_clear and references:
+                    raise NativePackageError(
+                        "section.header_footer.bind refuses to clear an "
+                        f"unprojected native {field_name} reference."
+                    )
+                after_part_id = normalized_set.get(field_name)
+                if after_part_id is not None:
+                    set_relationship_ids[field_name] = (
+                        header_footer_relationship_id(
+                            after_part_id,
+                            field_name,
+                        )
+                    )
+            try:
+                native_changed = patch_header_footer_bindings(
+                    section_element,
+                    set_relationship_ids=set_relationship_ids,
+                    clear=raw_clear,
+                )
+            except ValueError as error:
+                raise NativePackageError(str(error)) from error
+            if not native_changed:
+                raise NativePackageError(
+                    "section.header_footer.bind semantic change did not "
+                    "produce a native reference change."
+                )
+            native_section_bindings[target_id] = next_bindings
+            rebound_header_footer_sections.add(target_id)
+            changed_xml_parts.add("/word/document.xml")
             continue
         if operation_name == "section.insert_before":
             target_id = _target_id(operation.get("target"))
@@ -2044,24 +2272,13 @@ def apply_docx_operations(
                 ),
                 None,
             )
-            result_split_section = next(
-                (
-                    candidate
-                    for candidate in result_spec.sections
-                    if candidate.id == split_section_id
-                ),
-                None,
-            )
             if (
                 result_section is None
-                or result_split_section is None
-                or result_section.header_footer
-                != result_split_section.header_footer
                 or change.get("header_footer_inherited") is not True
             ):
                 raise NativePackageError(
                     "section.insert_before result does not preserve its "
-                    "semantic anchor and header/footer inheritance."
+                    "semantic anchor or inheritance evidence."
                 )
 
             (
@@ -2170,6 +2387,9 @@ def apply_docx_operations(
                     section_indices[section_id] = section_index + 1
             section_indices[new_section_id] = new_section_index
             native_section_starts[new_section_id] = target_id
+            native_section_bindings[new_section_id] = dict(
+                native_section_bindings[split_section_id]
+            )
             inserted_sections.add(new_section_id)
             changed_xml_parts.add("/word/document.xml")
             continue
@@ -3140,6 +3360,22 @@ def apply_docx_operations(
             "Native structural operations did not reproduce the semantic "
             "section-start model."
         )
+    result_section_bindings = {
+        section.id: (
+            section.header_footer.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+            if section.header_footer is not None
+            else {}
+        )
+        for section in result_spec.sections
+    }
+    if result_section_bindings != native_section_bindings:
+        raise NativePackageError(
+            "Native section operations did not reproduce the semantic "
+            "header/footer binding model."
+        )
 
     current_indices = {id(element): index for index, element in enumerate(list(body))}
     identity_updates: dict[str, NativeRef] = {}
@@ -3412,6 +3648,7 @@ def apply_docx_operations(
         inserted_images
         or inserted_nodes
         or inserted_sections
+        or rebound_header_footer_sections
         or moved_nodes
         or removed_nodes
     )

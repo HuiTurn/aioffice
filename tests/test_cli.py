@@ -13,6 +13,51 @@ from aioffice.documents import Document, DocumentBuilder
 
 
 class CliTests(unittest.TestCase):
+    @staticmethod
+    def _header_footer_document() -> Document:
+        return (
+            DocumentBuilder(
+                header_footers=[
+                    {
+                        "id": "primary_header",
+                        "kind": "header",
+                        "content": [
+                            {
+                                "id": "primary_header_text",
+                                "type": "paragraph",
+                                "text": "Primary",
+                            }
+                        ],
+                    },
+                    {
+                        "id": "alternate_header",
+                        "kind": "header",
+                        "content": [
+                            {
+                                "id": "alternate_header_text",
+                                "type": "paragraph",
+                                "text": "Alternate",
+                            }
+                        ],
+                    },
+                ],
+                sections=[
+                    {
+                        "id": "only_section",
+                        "layout": {
+                            "different_first_page": True,
+                        },
+                        "header_footer": {
+                            "header_default": "primary_header",
+                            "header_first": "alternate_header",
+                        },
+                    }
+                ],
+            )
+            .paragraph("Body", id="body")
+            .build()
+        )
+
     def test_page_selection_parser_is_bounded_and_one_based(self) -> None:
         self.assertEqual(
             _parse_page_numbers("1,3-5", max_pages=5),
@@ -216,6 +261,7 @@ class CliTests(unittest.TestCase):
                     "style.apply",
                     "style.define",
                     "style.format",
+                    "section.header_footer.bind",
                     "section.insert_before",
                     "section.format",
                     "field.update",
@@ -563,6 +609,72 @@ class CliTests(unittest.TestCase):
                     ("summary_section", "summary_table"),
                 ],
             )
+
+    def test_apply_rebinds_native_header_footer_section(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "regions.docx"
+            source.write_bytes(
+                self._header_footer_document().to_bytes("docx")
+            )
+            patch = root / "bind.json"
+            patch.write_text(
+                json.dumps(
+                    {
+                        "operations": [
+                            {
+                                "op": (
+                                    "section.header_footer.bind"
+                                ),
+                                "target": "#only_section",
+                                "set": {
+                                    "header_default": (
+                                        "alternate_header"
+                                    ),
+                                },
+                                "clear": ["header_first"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "regions-updated.docx"
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(
+                    main(
+                        [
+                            "apply",
+                            str(source),
+                            str(patch),
+                            "--output",
+                            str(output),
+                        ]
+                    ),
+                    0,
+                )
+            report = json.loads(stdout.getvalue())
+            self.assertTrue(report["success"])
+            self.assertEqual(
+                report["changes"][0]["operation"],
+                "section.header_footer.bind",
+            )
+            reopened = Document.from_docx(output)
+            self.assertEqual(
+                reopened.to_spec()["sections"][0][
+                    "header_footer"
+                ],
+                {"header_default": "alternate_header"},
+            )
+            self.assertEqual(
+                {
+                    part["id"]
+                    for part in reopened.to_spec()["header_footers"]
+                },
+                {"primary_header", "alternate_header"},
+            )
+            self.assertEqual(reopened.to_bytes("docx"), output.read_bytes())
 
 
 if __name__ == "__main__":

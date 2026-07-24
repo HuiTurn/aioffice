@@ -61,6 +61,7 @@ from aioffice.spec.models import (
     BulletList,
     DocumentField,
     DocumentSection,
+    HeaderFooterBindings,
     Heading,
     ImageBlock,
     ImageInsert,
@@ -977,6 +978,7 @@ class Document:
             "style.apply",
             "style.define",
             "style.format",
+            "section.header_footer.bind",
             "section.insert_before",
             "section.format",
             "field.update",
@@ -998,6 +1000,7 @@ class Document:
                 "style.apply",
                 "style.define",
                 "style.format",
+                "section.header_footer.bind",
                 "section.insert_before",
                 "section.format",
                 "field.update",
@@ -1019,6 +1022,7 @@ class Document:
             operations.remove("node.move_after")
             operations.remove("node.move_before")
             operations.remove("node.remove")
+            operations.remove("section.header_footer.bind")
             operations.remove("section.insert_before")
         ambiguous_node_ids = sorted(
             {
@@ -1231,6 +1235,7 @@ class Document:
                         "inherit_existing_semantic_bindings"
                     ),
                     "same_patch_operations": [
+                        "section.header_footer.bind",
                         "section.format",
                         "node.insert_before",
                         "node.insert_after",
@@ -1246,6 +1251,34 @@ class Document:
                     "variants": ["default", "first", "even"],
                     "missing_binding": "inherit_previous_section",
                     "editable_blocks": ["paragraph"],
+                    "binding_operation": (
+                        "section.header_footer.bind"
+                    ),
+                    "binding_fields": sorted(
+                        HeaderFooterBindings.model_fields
+                    ),
+                    "binding_set": (
+                        "existing_type_compatible_header_footer_part_id"
+                    ),
+                    "binding_clear": (
+                        "remove_explicit_reference_and_inherit"
+                    ),
+                    "binding_native_patch_scope": (
+                        "selected_w:headerReference_or_w:footerReference"
+                    ),
+                    "binding_preserves": [
+                        "header_footer_part_xml",
+                        "document_relationships",
+                        "unselected_section_references",
+                        "unbound_region_reusability",
+                    ],
+                    "binding_unsupported": [
+                        "create_part",
+                        "delete_part",
+                        "copy_on_write_part_content",
+                        "external_relationship",
+                        "ambiguous_relationship",
+                    ],
                     "opaque_native_features": [
                         "drawings",
                         "objects",
@@ -2942,6 +2975,7 @@ class Document:
                     "node.move_after",
                     "node.move_before",
                     "node.remove",
+                    "section.header_footer.bind",
                     "section.insert_before",
                 }
                 for operation in operations
@@ -2954,7 +2988,7 @@ class Document:
                 message=(
                     "node.append, node.insert_after, node.insert_before, "
                     "node.move_after, node.move_before, node.remove, and "
-                    "section.insert_before "
+                    "section.header_footer.bind and section.insert_before "
                     "require the attached native DOCX package for a "
                     "native-authority projection; detached JSON cannot prove "
                     "or mutate the complete XML element range."
@@ -4522,6 +4556,254 @@ class Document:
                 ],
             }
 
+        if operation_name == "section.header_footer.bind":
+            unexpected = sorted(
+                set(operation) - {"op", "target", "set", "clear"}
+            )
+            _, section = Document._find_section(
+                payload,
+                operation.get("target"),
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.header_footer.bind received unknown "
+                            f"fields: {', '.join(unexpected)}."
+                        ),
+                        node_ids=[section["id"]],
+                    )
+                )
+            set_values = operation.get("set", {})
+            clear_values = operation.get("clear", [])
+            valid_shape = (
+                isinstance(set_values, dict)
+                and all(
+                    isinstance(field_name, str)
+                    for field_name in set_values
+                )
+                and all(
+                    isinstance(value, str) and bool(value)
+                    for value in set_values.values()
+                )
+                and isinstance(clear_values, list)
+                and all(
+                    isinstance(value, str)
+                    for value in clear_values
+                )
+                and len(clear_values) == len(set(clear_values))
+            )
+            if (
+                not valid_shape
+                or not set_values
+                and not clear_values
+            ):
+                detail = (
+                    "set must map slots to part IDs and clear must be a "
+                    "unique string list"
+                    if not valid_shape
+                    else "at least one binding change is required"
+                )
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "Invalid section.header_footer.bind: "
+                            f"{detail}."
+                        ),
+                        node_ids=[section["id"]],
+                    )
+                )
+            known_fields = set(HeaderFooterBindings.model_fields)
+            unknown = sorted(
+                (set(set_values) | set(clear_values)) - known_fields
+            )
+            overlap = sorted(
+                set(set_values) & set(clear_values)
+            )
+            if unknown or overlap:
+                detail = (
+                    f"unknown slots: {', '.join(unknown)}"
+                    if unknown
+                    else (
+                        "slots both set and cleared: "
+                        f"{', '.join(overlap)}"
+                    )
+                )
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "Invalid section.header_footer.bind: "
+                            f"{detail}."
+                        ),
+                        node_ids=[section["id"]],
+                        suggested_actions=[
+                            {
+                                "action": (
+                                    "inspect_header_footer_bindings"
+                                ),
+                                "slots": sorted(known_fields),
+                            }
+                        ],
+                    )
+                )
+
+            normalized_set: dict[str, str] = {}
+            for field_name, raw_part_id in set_values.items():
+                part_id = Document._target_id(raw_part_id)
+                matches = [
+                    part
+                    for part in payload.get("header_footers", [])
+                    if part.get("id") == part_id
+                ]
+                if not matches:
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="TARGET_NOT_FOUND",
+                            message=(
+                                "No header/footer part matched "
+                                f"#{part_id}."
+                            ),
+                            node_ids=[section["id"]],
+                            suggested_actions=[
+                                {
+                                    "action": (
+                                        "inspect_header_footers"
+                                    )
+                                }
+                            ],
+                        )
+                    )
+                if len(matches) > 1:
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="AMBIGUOUS_SELECTOR",
+                            message=(
+                                "Multiple header/footer parts matched "
+                                f"#{part_id}."
+                            ),
+                            node_ids=[section["id"], part_id],
+                        )
+                    )
+                expected_kind = (
+                    "header"
+                    if field_name.startswith("header_")
+                    else "footer"
+                )
+                if matches[0].get("kind") != expected_kind:
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="TARGET_TYPE_MISMATCH",
+                            message=(
+                                f"Slot {field_name!r} requires a "
+                                f"{expected_kind} part, but #{part_id} is "
+                                f"{matches[0].get('kind')!r}."
+                            ),
+                            node_ids=[section["id"], part_id],
+                            suggested_actions=[
+                                {
+                                    "action": (
+                                        "choose_type_compatible_part"
+                                    ),
+                                    "kind": expected_kind,
+                                }
+                            ],
+                        )
+                    )
+                normalized_set[field_name] = part_id
+
+            before = deepcopy(section.get("header_footer", {}))
+            candidate = {
+                **before,
+                **normalized_set,
+            }
+            for field_name in clear_values:
+                candidate.pop(field_name, None)
+            try:
+                normalized = (
+                    HeaderFooterBindings.model_validate(
+                        candidate
+                    ).model_dump(
+                        mode="json",
+                        exclude_none=True,
+                    )
+                )
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.header_footer.bind has invalid "
+                            "binding values."
+                        ),
+                        node_ids=[section["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "fix_header_footer_bindings",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in (
+                                        _validation_error_diagnostics(
+                                            error
+                                        )
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            requested_fields = sorted(
+                set(normalized_set) | set(clear_values)
+            )
+            binding_changes = [
+                {
+                    "slot": field_name,
+                    "before": before.get(field_name),
+                    "after": normalized.get(field_name),
+                }
+                for field_name in requested_fields
+                if before.get(field_name)
+                != normalized.get(field_name)
+            ]
+            if not binding_changes:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.header_footer.bind does not change "
+                            "any explicit binding."
+                        ),
+                        node_ids=[section["id"]],
+                        suggested_actions=[
+                            {
+                                "action": (
+                                    "inspect_header_footer_bindings"
+                                )
+                            }
+                        ],
+                    )
+                )
+            if normalized:
+                section["header_footer"] = normalized
+            else:
+                section.pop("header_footer", None)
+            section["revision_updated"] = next_revision
+            return {
+                "operation": "section.header_footer.bind",
+                "section_ids": [section["id"]],
+                "binding_changes": binding_changes,
+            }
+
         if operation_name == "section.insert_before":
             unexpected = sorted(
                 set(operation) - {"op", "target", "section"}
@@ -5951,7 +6233,8 @@ class Document:
                     "node.move_after, node.move_before, "
                     "node.remove, "
                     "node.update, style.apply, "
-                    "style.define, style.format, section.insert_before, "
+                    "style.define, style.format, "
+                    "section.header_footer.bind, section.insert_before, "
                     "section.format, field.update, "
                     "image.insert_after, image.replace, image.update, "
                     "table.format, table.column.format, and table.cell.format."

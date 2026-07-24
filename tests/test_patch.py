@@ -340,6 +340,28 @@ class PatchTests(unittest.TestCase):
             section_contract["insert_default_start_type"],
             "next_page",
         )
+        header_footer_contract = document.capabilities()[
+            "formatting"
+        ]["header_footer_contract"]
+        self.assertEqual(
+            header_footer_contract["binding_operation"],
+            "section.header_footer.bind",
+        )
+        self.assertEqual(
+            header_footer_contract["binding_clear"],
+            "remove_explicit_reference_and_inherit",
+        )
+        self.assertEqual(
+            header_footer_contract["binding_fields"],
+            [
+                "footer_default",
+                "footer_even",
+                "footer_first",
+                "header_default",
+                "header_even",
+                "header_first",
+            ],
+        )
         result = document.apply(
             [
                 {

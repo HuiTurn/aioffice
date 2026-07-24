@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 import posixpath
 from xml.etree import ElementTree as ET
 
@@ -33,7 +34,7 @@ SETTINGS_CONTENT_TYPE = (
     "wordprocessingml.settings+xml"
 )
 
-_BINDING_SLOTS = (
+HEADER_FOOTER_BINDING_SLOTS = (
     ("header_default", "header", "default"),
     ("header_first", "header", "first"),
     ("header_even", "header", "even"),
@@ -62,11 +63,132 @@ def binding_field(kind: str, variant: str) -> str | None:
     return next(
         (
             field_name
-            for field_name, candidate_kind, candidate_variant in _BINDING_SLOTS
+            for field_name, candidate_kind, candidate_variant
+            in HEADER_FOOTER_BINDING_SLOTS
             if candidate_kind == kind and candidate_variant == variant
         ),
         None,
     )
+
+
+def binding_slot(field_name: str) -> tuple[str, str] | None:
+    return next(
+        (
+            (kind, variant)
+            for candidate, kind, variant in HEADER_FOOTER_BINDING_SLOTS
+            if candidate == field_name
+        ),
+        None,
+    )
+
+
+def binding_references(
+    section: ET.Element,
+    field_name: str,
+) -> list[ET.Element]:
+    slot = binding_slot(field_name)
+    if slot is None:
+        raise ValueError(f"Unknown header/footer binding field {field_name!r}.")
+    kind, variant = slot
+    return [
+        child
+        for child in list(section)
+        if child.tag == _q(W, f"{kind}Reference")
+        and child.get(_q(W, "type"), "default") == variant
+    ]
+
+
+def patch_header_footer_bindings(
+    section: ET.Element,
+    *,
+    set_relationship_ids: Mapping[str, str],
+    clear: Iterable[str],
+) -> bool:
+    """Patch selected section references while preserving all other XML."""
+
+    clear_fields = tuple(clear)
+    known_fields = {
+        field_name
+        for field_name, _, _ in HEADER_FOOTER_BINDING_SLOTS
+    }
+    unknown = (
+        set(set_relationship_ids)
+        | set(clear_fields)
+    ) - known_fields
+    overlap = set(set_relationship_ids) & set(clear_fields)
+    if unknown:
+        raise ValueError(
+            "Unknown header/footer binding fields: "
+            f"{', '.join(sorted(unknown))}."
+        )
+    if overlap:
+        raise ValueError(
+            "Header/footer binding fields cannot be both set and cleared: "
+            f"{', '.join(sorted(overlap))}."
+        )
+
+    changed = False
+    for field_name, _, _ in HEADER_FOOTER_BINDING_SLOTS:
+        references = binding_references(section, field_name)
+        if len(references) > 1:
+            raise ValueError(
+                f"Section contains duplicate {field_name} references."
+            )
+        if field_name in clear_fields:
+            if references:
+                section.remove(references[0])
+                changed = True
+            continue
+        relationship_id = set_relationship_ids.get(field_name)
+        if relationship_id is None:
+            continue
+        if not relationship_id:
+            raise ValueError(
+                f"{field_name} relationship ID cannot be empty."
+            )
+        if references:
+            reference = references[0]
+            if reference.get(_q(R, "id")) != relationship_id:
+                reference.set(_q(R, "id"), relationship_id)
+                changed = True
+            continue
+
+        slot = binding_slot(field_name)
+        assert slot is not None
+        kind, variant = slot
+        reference = ET.Element(
+            _q(W, f"{kind}Reference"),
+            {
+                _q(R, "id"): relationship_id,
+                _q(W, "type"): variant,
+            },
+        )
+        children = list(section)
+        if kind == "header":
+            insert_index = next(
+                (
+                    index
+                    for index, child in enumerate(children)
+                    if child.tag != _q(W, "headerReference")
+                ),
+                len(children),
+            )
+        else:
+            insert_index = next(
+                (
+                    index
+                    for index, child in enumerate(children)
+                    if child.tag
+                    not in {
+                        _q(W, "headerReference"),
+                        _q(W, "footerReference"),
+                    }
+                ),
+                len(children),
+            )
+        section.insert(insert_index, reference)
+        changed = True
+    return changed
 
 
 def native_ref_for_header_footer_part(
@@ -95,7 +217,7 @@ def apply_header_footer_bindings(
     if bindings is None:
         return
     insert_index = 0
-    for field_name, kind, variant in _BINDING_SLOTS:
+    for field_name, kind, variant in HEADER_FOOTER_BINDING_SLOTS:
         part_id = getattr(bindings, field_name)
         if part_id is None:
             continue
@@ -160,13 +282,17 @@ def settings_xml(
 __all__ = [
     "FOOTER_CONTENT_TYPE",
     "FOOTER_RELATIONSHIP_TYPE",
+    "HEADER_FOOTER_BINDING_SLOTS",
     "HEADER_CONTENT_TYPE",
     "HEADER_RELATIONSHIP_TYPE",
     "SETTINGS_CONTENT_TYPE",
     "SETTINGS_RELATIONSHIP_TYPE",
     "apply_header_footer_bindings",
     "binding_field",
+    "binding_references",
+    "binding_slot",
     "native_ref_for_header_footer_part",
+    "patch_header_footer_bindings",
     "read_even_and_odd_headers",
     "read_update_fields_on_open",
     "resolve_relationship_target",
