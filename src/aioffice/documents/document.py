@@ -1349,6 +1349,7 @@ class Document:
                     "paragraph",
                     "heading",
                     "page_break",
+                    "table",
                 ],
                 "inserted_inline_content": [
                     "styled_text_spans",
@@ -1377,8 +1378,59 @@ class Document:
                 "append_empty_document": True,
                 "native_scope": "word_document_body_top_level",
                 "native_insert_strategy": (
-                    "compile_only_the_new_w:p_and_preserve_existing_xml"
+                    "compile_only_the_new_native_block_and_preserve_existing_xml"
                 ),
+                "native_block_lowering": {
+                    "paragraph": "w:p",
+                    "heading": "w:p",
+                    "page_break": "w:p/w:r/w:br",
+                    "table": "w:tbl",
+                },
+                "table_insertion": {
+                    "default_style_ref": "TableGrid",
+                    "style_policy": "must_exist_exactly_once",
+                    "component_native_kinds": {
+                        "table": "w:tbl",
+                        "column": "w:gridCol",
+                        "row": "w:tr",
+                        "cell": "w:tc",
+                        "rich_cell_paragraph": "w:tc/w:p",
+                    },
+                    "cell_content": [
+                        "scalar_value",
+                        "rich_paragraphs",
+                        "column_span",
+                        "row_span",
+                    ],
+                    "unsupported_cell_content": [
+                        "dynamic_fields",
+                        "images",
+                        "nested_tables",
+                        "lists",
+                    ],
+                    "same_patch_operations": [
+                        "table.format",
+                        "table.column.format",
+                        "table.cell.format",
+                        "text.replace",
+                        "paragraph.format",
+                        "text.format",
+                        "style.apply",
+                        "node.insert_after",
+                        "node.insert_before",
+                        "node.move_after",
+                        "node.move_before",
+                        "node.remove",
+                    ],
+                    "column_width_editing": "regular_grid_only",
+                    "generated_component_ids": (
+                        "semantic_normalization_reused_by_native_lowering"
+                    ),
+                    "hyperlinks": {
+                        "external": "new_collision_safe_relationship",
+                        "internal": "relationship_free_w:anchor",
+                    },
+                },
                 "multi_element_nodes": "move_as_one_contiguous_group",
                 "section_policy": "same_section_only",
                 "section_start_anchor_movable": False,

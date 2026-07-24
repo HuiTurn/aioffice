@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev25`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev26`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -27,9 +27,9 @@ extraction, selective native image metadata and geometry updates, occurrence-sco
 copy-on-write image replacement, addressable native inline image insertion, direct
 image-paragraph layout formatting, semantic diffs, isolated LibreOffice/Poppler
 native rendering, root append plus bidirectional stable-ID native
-paragraph/heading/page-break insertion and block reordering, consistent multi-page
-evidence, page occupancy diagnostics, visual-regression contracts, and fidelity
-reports.
+paragraph/heading/page-break/table insertion and block reordering, consistent
+multi-page evidence, page occupancy diagnostics, visual-regression contracts, and
+fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
 
 ## Install
@@ -733,8 +733,8 @@ assert result.success
 preview = result.document
 ```
 
-Imported DOCX documents can receive a new paragraph, heading, or explicit page
-break without rebuilding their existing content:
+Imported DOCX documents can receive a new paragraph, heading, explicit page break,
+or complete semantic table without rebuilding their existing content:
 
 ```python
 result = doc.apply([
@@ -758,22 +758,76 @@ result = doc.apply([
 assert result.success
 ```
 
-Only the new `w:p` is compiled. Existing XML, DrawingML, relationships, and
+Only the new native block is compiled. Existing XML, DrawingML, relationships, and
 unsupported native features remain untouched. A caller-selected new ID can be
 targeted again later in the same Patch; an omitted ID is returned in change
 evidence. Rich text, direct formatting, internal/external hyperlinks, and normalized
-document fields are supported. Use `node.insert_before` for symmetric placement,
-including insertion at the beginning of the document. Inserting before a later
-section's first node safely rebinds that section's `start_at`. Use `node.append`
-with target `$` when the AI should add content to the last section without first
-discovering the final content ID; native lowering inserts it before the terminal
-body `w:sectPr`. See
+document fields are supported in text blocks. Use `node.insert_before` for symmetric
+placement, including insertion at the beginning of the document. Inserting before a
+later section's first node safely rebinds that section's `start_at`. Use
+`node.append` with target `$` when the AI should add content to the last section
+without first discovering the final content ID; native lowering inserts it before
+the terminal body `w:sectPr`. See
 [native text insertion](docs/native-text-insertion.md).
 
 Use the same operations with `{"type": "page_break"}` to insert one native
 `w:p/w:r/w:br` pagination control. The break has its own stable ID, can be targeted
 later in the Patch, and is verified by native rendering rather than approximated by
 the JSON projection.
+
+Tables use the same stable-ID placement contract:
+
+```python
+result = doc.apply([
+    {
+        "op": "node.insert_after",
+        "target": "#recommendation",
+        "content": {
+            "id": "decision_table",
+            "type": "table",
+            "columns": [
+                {"id": "metric_column", "key": "metric", "title": "Metric"},
+                {"id": "value_column", "key": "value", "title": "Value"},
+            ],
+            "rows": [
+                {
+                    "id": "growth_row",
+                    "cells": [
+                        {
+                            "id": "growth_label",
+                            "column_key": "metric",
+                            "value": "Growth",
+                        },
+                        {
+                            "id": "growth_value",
+                            "column_key": "value",
+                            "value": "18%",
+                        },
+                    ],
+                }
+            ],
+            "layout": {
+                "style_ref": "TableGrid",
+                "algorithm": "fixed",
+                "repeat_header": True,
+            },
+        },
+    },
+    {
+        "op": "table.cell.format",
+        "target": "#decision_table",
+        "cell": "#growth_value",
+        "set": {"background_color": "#E2F0D9"},
+    },
+])
+assert result.success
+```
+
+AiOffice compiles only the new `w:tbl`, assigns native references to its columns,
+rows, cells, and rich cell paragraphs, and leaves every existing body element
+untouched. Regular and merged cells, explicit geometry, direct table/cell formatting,
+and internal/external links in rich cell paragraphs are supported. See
+[native table insertion](docs/native-table-insertion.md).
 
 Existing top-level content can be reordered without reconstructing it or addressing
 an array index:
@@ -793,7 +847,7 @@ For imported DOCX, AiOffice moves the target's complete mapped XML range. A
 multi-paragraph list remains one contiguous unit, DrawingML and unknown XML stay in
 their original elements, and every native reference is reindexed. `node.move_after`
 and `node.move_before` cover every relative position without array indexes. The
-conservative dev25 boundary permits moves only within one semantic section, refuses
+conservative dev26 boundary permits moves only within one semantic section, refuses
 moving a section start anchor, and rebinds `section.start_at` when prepending within
 a later section. Native elements carrying `w:sectPr` remain immovable. See
 [the structural editing contract](docs/structural-editing.md).
@@ -809,8 +863,8 @@ Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `section.format`, `field.update`,
 `table.format`, `table.column.format`, and `table.cell.format`. Imported DOCX
 documents support incremental before/after insertion for paragraphs and headings
-plus root append, and additionally expose safe native image operations reported by
-`capabilities()`.
+plus page breaks and tables, root append, and safe native image operations reported
+by `capabilities()`.
 Selectors use stable content, section, header/footer block, field, image, table,
 column, row, cell, or rich cell-paragraph identities in this release.
 

@@ -416,6 +416,33 @@ class CliTests(unittest.TestCase):
                                 "type": "page_break",
                             },
                         },
+                        {
+                            "op": "node.append",
+                            "target": "$",
+                            "content": {
+                                "id": "summary_table",
+                                "type": "table",
+                                "columns": [
+                                    {
+                                        "id": "summary_column",
+                                        "key": "summary",
+                                        "title": "Summary",
+                                    }
+                                ],
+                                "rows": [
+                                    {
+                                        "id": "summary_row",
+                                        "cells": [
+                                            {
+                                                "id": "summary_cell",
+                                                "column_key": "summary",
+                                                "value": "Published",
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                        },
                     ]
                 ),
                 encoding="utf-8",
@@ -452,6 +479,10 @@ class CliTests(unittest.TestCase):
                 report["changes"][3]["operation"],
                 "node.append",
             )
+            self.assertEqual(
+                report["changes"][4]["operation"],
+                "node.append",
+            )
             reopened = Document.from_docx(output)
             self.assertEqual(
                 [
@@ -463,7 +494,19 @@ class CliTests(unittest.TestCase):
                     ("c", "paragraph"),
                     ("a", "paragraph"),
                     ("final_break", "page_break"),
+                    ("summary_table", "table"),
                 ],
+            )
+            summary_table = reopened.to_spec()["content"][-1]
+            self.assertEqual(
+                summary_table["rows"][0]["cells"][0]["id"],
+                "summary_cell",
+            )
+            self.assertEqual(
+                summary_table["rows"][0]["cells"][0]["source_ref"][
+                    "native_kind"
+                ],
+                "w:tc",
             )
 
 

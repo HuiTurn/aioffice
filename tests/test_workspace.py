@@ -480,6 +480,33 @@ class WorkspaceTests(unittest.TestCase):
                             "type": "page_break",
                         },
                     },
+                    {
+                        "op": "node.append",
+                        "target": "$",
+                        "content": {
+                            "id": "summary_table",
+                            "type": "table",
+                            "columns": [
+                                {
+                                    "id": "summary_column",
+                                    "key": "summary",
+                                    "title": "Summary",
+                                }
+                            ],
+                            "rows": [
+                                {
+                                    "id": "summary_row",
+                                    "cells": [
+                                        {
+                                            "id": "summary_cell",
+                                            "column_key": "summary",
+                                            "value": "Persisted",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    },
                 ],
                 base_revision=inserted.result_revision,
             )
@@ -496,7 +523,15 @@ class WorkspaceTests(unittest.TestCase):
                     ("a", "paragraph"),
                     ("appended", "heading"),
                     ("final_break", "page_break"),
+                    ("summary_table", "table"),
                 ],
+            )
+            summary_table = after_append.to_spec()["content"][-1]
+            self.assertEqual(
+                summary_table["rows"][0]["cells"][0]["source_ref"][
+                    "native_kind"
+                ],
+                "w:tc",
             )
 
 

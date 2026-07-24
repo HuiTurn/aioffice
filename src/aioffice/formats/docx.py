@@ -141,7 +141,7 @@ def _native_anchor(node_id: str, ordinal: int = 0) -> str:
 
 
 @dataclass
-class _DocxContext:
+class DocxCompileContext:
     hyperlinks: list[tuple[str, str]] = field(default_factory=list)
 
     def add_hyperlink(self, target: str) -> str:
@@ -180,7 +180,7 @@ def _merge_text_style(
 def _add_run(
     parent: ET.Element,
     span: TextSpan,
-    context: _DocxContext,
+    context: DocxCompileContext,
     *,
     default_style: TextStyle | None = None,
 ) -> None:
@@ -228,7 +228,7 @@ def _add_run(
 def _add_inline(
     parent: ET.Element,
     inline: InlineContent,
-    context: _DocxContext,
+    context: DocxCompileContext,
     *,
     default_style: TextStyle | None = None,
 ) -> None:
@@ -250,7 +250,7 @@ def _add_inline(
 def _add_paragraph(
     body: ET.Element,
     spans: Sequence[InlineContent],
-    context: _DocxContext,
+    context: DocxCompileContext,
     *,
     style: str | None = None,
     numbering_id: int | None = None,
@@ -305,7 +305,11 @@ def _register_field_refs(
         )
 
 
-def _add_table(body: ET.Element, table: Table, context: _DocxContext) -> ET.Element:
+def compile_table_element(
+    body: ET.Element,
+    table: Table,
+    context: DocxCompileContext,
+) -> ET.Element:
     element = _child(body, "tbl")
     grid = _child(element, "tblGrid")
     native_widths = [
@@ -490,7 +494,7 @@ def _semantic_table_cell_placements(
     return result
 
 
-def _register_table_refs(
+def register_table_refs(
     refs: dict[str, NativeRef],
     element: ET.Element,
     table_index: int,
@@ -537,7 +541,7 @@ def _register_table_refs(
 
 def _document_xml(
     spec: AiOfficeDocumentSpec,
-    context: _DocxContext,
+    context: DocxCompileContext,
     header_footer_relationship_ids: dict[str, str],
 ) -> tuple[bytes, dict[str, NativeRef]]:
     root = ET.Element(
@@ -666,14 +670,14 @@ def _document_xml(
                 native_id=elements[0].attrib.get(_q(W14, "paraId")),
             )
         elif isinstance(block, Table):
-            element = _add_table(body, block, context)
+            element = compile_table_element(body, block, context)
             index = len(body) - 1
             refs[block.id] = native_ref_for_elements(
                 [element],
                 [index],
                 native_kind="w:tbl",
             )
-            _register_table_refs(refs, element, index, block)
+            register_table_refs(refs, element, index, block)
         elif isinstance(block, ImageBlock):
             raise ValueError(
                 "Semantic DOCX generation cannot compile a native-only "
@@ -726,7 +730,7 @@ def _header_footer_xml(
         _q(W, root_name),
         {_q(MC, "Ignorable"): "w14"},
     )
-    context = _DocxContext()
+    context = DocxCompileContext()
     refs: dict[str, NativeRef] = {
         part.id: native_ref_for_header_footer_part(
             root,
@@ -924,7 +928,9 @@ def _root_relationships_xml() -> bytes:
     return _xml(root)
 
 
-def _hyperlink_relationships_xml(context: _DocxContext) -> bytes:
+def _hyperlink_relationships_xml(
+    context: DocxCompileContext,
+) -> bytes:
     root = ET.Element("Relationships", {"xmlns": REL})
     for rel_id, target in context.hyperlinks:
         _relationship(
@@ -938,7 +944,7 @@ def _hyperlink_relationships_xml(context: _DocxContext) -> bytes:
 
 
 def _document_relationships_xml(
-    context: _DocxContext,
+    context: DocxCompileContext,
     header_footer_relationships: list[tuple[str, str, str]],
     *,
     has_settings: bool,
@@ -1008,7 +1014,7 @@ def _write_part(archive: ZipFile, path: str, data: bytes) -> None:
 def compile_docx(spec: AiOfficeDocumentSpec) -> bytes:
     """Compile a validated document into a deterministic OOXML package."""
 
-    context = _DocxContext()
+    context = DocxCompileContext()
     header_footers = _compile_header_footers(spec)
     document_xml, refs = _document_xml(
         spec,

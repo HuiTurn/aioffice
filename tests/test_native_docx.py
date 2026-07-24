@@ -323,6 +323,66 @@ class NativeDocxTests(unittest.TestCase):
             ["first"],
         )
 
+    def test_native_append_table_populates_an_empty_document_body(
+        self,
+    ) -> None:
+        source = DocumentBuilder().build().to_bytes("docx")
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "first_table",
+                        "type": "table",
+                        "columns": [
+                            {
+                                "id": "first_column",
+                                "key": "value",
+                                "title": "Value",
+                            }
+                        ],
+                        "rows": [
+                            {
+                                "id": "first_row",
+                                "cells": [
+                                    {
+                                        "id": "first_cell",
+                                        "column_key": "value",
+                                        "value": "First content",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        output_root = parse_xml(
+            ZipFile(io.BytesIO(output)).read("word/document.xml")
+        )
+        output_body = output_root.find(_q(W, "body"))
+        assert output_body is not None
+        self.assertEqual(
+            [element.tag for element in list(output_body)],
+            [_q(W, "tbl"), _q(W, "sectPr")],
+        )
+        reopened_table = Document.from_docx(output).to_spec()[
+            "content"
+        ][0]
+        self.assertEqual(reopened_table["id"], "first_table")
+        self.assertEqual(
+            reopened_table["rows"][0]["cells"][0]["source_ref"][
+                "native_kind"
+            ],
+            "w:tc",
+        )
+
     def test_native_append_refuses_nonterminal_body_section_properties(
         self,
     ) -> None:
@@ -626,7 +686,7 @@ class NativeDocxTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.diagnostics[0].code, "NATIVE_PATCH_FAILED")
         self.assertIn(
-            "only paragraph, heading, and page_break",
+            "only paragraph, heading, page_break, and table",
             result.diagnostics[0].message,
         )
         self.assertEqual(document.revision, 1)
@@ -652,7 +712,7 @@ class NativeDocxTests(unittest.TestCase):
             "NATIVE_PATCH_FAILED",
         )
         self.assertIn(
-            "only paragraph, heading, and page_break",
+            "only paragraph, heading, page_break, and table",
             unsupported_insert.diagnostics[0].message,
         )
         invalid_xml_insert = document.apply(
@@ -905,6 +965,819 @@ class NativeDocxTests(unittest.TestCase):
                 "https://example.com/report",
                 "#appendix",
             ],
+        )
+
+    def test_native_insert_table_maps_components_and_is_batch_addressable(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Anchor", id="anchor")
+            .paragraph("Tail", id="tail")
+            .build()
+            .to_bytes("docx")
+        )
+        with ZipFile(io.BytesIO(source)) as before:
+            before_root = parse_xml(before.read("word/document.xml"))
+            before_relationships = parse_xml(
+                before.read("word/_rels/document.xml.rels")
+            )
+        before_body = before_root.find(_q(W, "body"))
+        assert before_body is not None
+        existing_payloads = {
+            "anchor": ET.tostring(list(before_body)[0]),
+            "tail": ET.tostring(list(before_body)[1]),
+            "section": ET.tostring(list(before_body)[2]),
+        }
+        existing_relationships = {
+            tuple(sorted(relationship.attrib.items()))
+            for relationship in before_relationships.findall(
+                _q(REL, "Relationship")
+            )
+        }
+
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": "#anchor",
+                    "content": {
+                        "id": "metrics_table",
+                        "type": "table",
+                        "columns": [
+                            {
+                                "key": "metric",
+                                "title": "Metric",
+                                "width": {
+                                    "value": 120,
+                                    "unit": "pt",
+                                },
+                            },
+                            {
+                                "id": "value_column",
+                                "key": "value",
+                                "title": "Value",
+                                "width": {
+                                    "value": 96,
+                                    "unit": "pt",
+                                },
+                            },
+                        ],
+                        "rows": [
+                            {
+                                "id": "growth_row",
+                                "cells": [
+                                    {
+                                        "id": "growth_label",
+                                        "column_key": "metric",
+                                        "value": "Growth",
+                                    },
+                                    {
+                                        "id": "growth_value",
+                                        "column_key": "value",
+                                        "value": "18%",
+                                    },
+                                ],
+                            },
+                            {
+                                "id": "evidence_row",
+                                "cells": [
+                                    {
+                                        "id": "evidence_cell",
+                                        "column_key": "metric",
+                                        "content": [
+                                            {
+                                                "id": "evidence_paragraph",
+                                                "type": "paragraph",
+                                                "content": [
+                                                    {
+                                                        "type": "text",
+                                                        "text": "Evidence",
+                                                        "marks": [
+                                                            "strong"
+                                                        ],
+                                                    },
+                                                    {
+                                                        "type": "text",
+                                                        "text": " source",
+                                                        "marks": [
+                                                            "link"
+                                                        ],
+                                                        "href": (
+                                                            "https://"
+                                                            "example.com/"
+                                                            "evidence"
+                                                        ),
+                                                    },
+                                                    {
+                                                        "type": "text",
+                                                        "text": " / appendix",
+                                                        "marks": [
+                                                            "link"
+                                                        ],
+                                                        "href": "#appendix",
+                                                    },
+                                                ],
+                                                "paragraph_style": {
+                                                    "alignment": "center"
+                                                },
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "id": "evidence_status",
+                                        "column_key": "value",
+                                        "value": "Reviewed",
+                                    },
+                                ],
+                            },
+                            {
+                                "cells": [
+                                    {
+                                        "column_key": "metric",
+                                        "value": "Generated IDs",
+                                    },
+                                    {
+                                        "column_key": "value",
+                                        "value": "mapped",
+                                    },
+                                ]
+                            },
+                        ],
+                        "layout": {
+                            "style_ref": "TableGrid",
+                            "alignment": "center",
+                            "algorithm": "fixed",
+                            "repeat_header": True,
+                        },
+                    },
+                },
+                {
+                    "op": "table.format",
+                    "target": "#metrics_table",
+                    "set": {
+                        "alignment": "right",
+                        "cell_margin_left": {
+                            "value": 6,
+                            "unit": "pt",
+                        },
+                    },
+                },
+                {
+                    "op": "table.column.format",
+                    "target": "#metrics_table",
+                    "column": "#value_column",
+                    "set": {
+                        "width": {
+                            "value": 144,
+                            "unit": "pt",
+                        }
+                    },
+                },
+                {
+                    "op": "table.cell.format",
+                    "target": "#metrics_table",
+                    "cell": "#growth_value",
+                    "set": {
+                        "vertical_alignment": "center",
+                        "background_color": "#E2F0D9",
+                    },
+                },
+                {
+                    "op": "text.replace",
+                    "target": "#evidence_paragraph",
+                    "search": "Evidence",
+                    "replacement": "Audited evidence",
+                },
+                {
+                    "op": "node.insert_after",
+                    "target": "#metrics_table",
+                    "content": {
+                        "id": "after_table",
+                        "type": "paragraph",
+                        "text": "After table",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.document is not None
+        self.assertEqual(
+            [
+                node["id"]
+                for node in result.document.to_spec()["content"]
+            ],
+            [
+                "anchor",
+                "metrics_table",
+                "after_table",
+                "tail",
+            ],
+        )
+        inserted_table = next(
+            node
+            for node in result.document.to_spec()["content"]
+            if node["id"] == "metrics_table"
+        )
+        self.assertEqual(
+            inserted_table["source_ref"]["native_kind"],
+            "w:tbl",
+        )
+        self.assertTrue(
+            all(
+                component["source_ref"]["native_kind"]
+                == expected_kind
+                for components, expected_kind in (
+                    (inserted_table["columns"], "w:gridCol"),
+                    (inserted_table["rows"], "w:tr"),
+                    (
+                        [
+                            cell
+                            for row in inserted_table["rows"]
+                            for cell in row["cells"]
+                        ],
+                        "w:tc",
+                    ),
+                )
+                for component in components
+            )
+        )
+        evidence_paragraph = inserted_table["rows"][1]["cells"][0][
+            "content"
+        ][0]
+        self.assertEqual(
+            evidence_paragraph["source_ref"]["native_kind"],
+            "w:tc/w:p",
+        )
+        self.assertEqual(
+            _semantic_text(evidence_paragraph),
+            "Audited evidence source / appendix",
+        )
+
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as after:
+            after_root = parse_xml(after.read("word/document.xml"))
+            after_relationships = parse_xml(
+                after.read("word/_rels/document.xml.rels")
+            )
+        after_body = after_root.find(_q(W, "body"))
+        assert after_body is not None
+        self.assertEqual(
+            ET.tostring(list(after_body)[0]),
+            existing_payloads["anchor"],
+        )
+        self.assertEqual(
+            ET.tostring(list(after_body)[3]),
+            existing_payloads["tail"],
+        )
+        self.assertEqual(
+            ET.tostring(list(after_body)[4]),
+            existing_payloads["section"],
+        )
+        native_table = list(after_body)[1]
+        self.assertEqual(native_table.tag, _q(W, "tbl"))
+        properties = native_table.find(_q(W, "tblPr"))
+        assert properties is not None
+        self.assertEqual(
+            properties.find(_q(W, "tblStyle")).get(_q(W, "val")),
+            "TableGrid",
+        )
+        self.assertEqual(
+            properties.find(_q(W, "jc")).get(_q(W, "val")),
+            "right",
+        )
+        margins = properties.find(_q(W, "tblCellMar"))
+        assert margins is not None
+        self.assertEqual(
+            margins.find(_q(W, "left")).get(_q(W, "w")),
+            "120",
+        )
+        self.assertEqual(
+            native_table.findall(
+                f"./{_q(W, 'tblGrid')}/{_q(W, 'gridCol')}"
+            )[1].get(_q(W, "w")),
+            "2880",
+        )
+        growth_cell = native_table.findall(_q(W, "tr"))[1].findall(
+            _q(W, "tc")
+        )[1]
+        growth_properties = growth_cell.find(_q(W, "tcPr"))
+        assert growth_properties is not None
+        self.assertEqual(
+            growth_properties.find(_q(W, "vAlign")).get(
+                _q(W, "val")
+            ),
+            "center",
+        )
+        self.assertEqual(
+            growth_properties.find(_q(W, "shd")).get(
+                _q(W, "fill")
+            ),
+            "E2F0D9",
+        )
+        self.assertIn(
+            "Audited evidence source / appendix",
+            "".join(
+                text.text or ""
+                for text in native_table.iter(_q(W, "t"))
+            ),
+        )
+        internal_link = next(
+            hyperlink
+            for hyperlink in native_table.iter(_q(W, "hyperlink"))
+            if hyperlink.get(_q(W, "anchor")) is not None
+        )
+        self.assertEqual(
+            internal_link.get(_q(W, "anchor")),
+            "appendix",
+        )
+        external_link = next(
+            hyperlink
+            for hyperlink in native_table.iter(_q(W, "hyperlink"))
+            if hyperlink.get(_q(R, "id")) is not None
+        )
+        hyperlink_relationships = [
+            relationship
+            for relationship in after_relationships.findall(
+                _q(REL, "Relationship")
+            )
+            if relationship.get("Type")
+            == HYPERLINK_RELATIONSHIP_TYPE
+        ]
+        self.assertEqual(len(hyperlink_relationships), 1)
+        self.assertEqual(
+            hyperlink_relationships[0].get("Target"),
+            "https://example.com/evidence",
+        )
+        self.assertEqual(
+            hyperlink_relationships[0].get("TargetMode"),
+            "External",
+        )
+        self.assertEqual(
+            external_link.get(_q(R, "id")),
+            hyperlink_relationships[0].get("Id"),
+        )
+        self.assertTrue(
+            existing_relationships.issubset(
+                {
+                    tuple(sorted(relationship.attrib.items()))
+                    for relationship in after_relationships.findall(
+                        _q(REL, "Relationship")
+                    )
+                }
+            )
+        )
+        para_ids = [
+            paragraph.get(
+                "{http://schemas.microsoft.com/office/"
+                "word/2010/wordml}paraId"
+            )
+            for paragraph in after_root.iter(_q(W, "p"))
+            if paragraph.get(
+                "{http://schemas.microsoft.com/office/"
+                "word/2010/wordml}paraId"
+            )
+            is not None
+        ]
+        self.assertEqual(len(para_ids), len(set(para_ids)))
+
+        reopened = Document.from_docx(output)
+        reopened_table = next(
+            node
+            for node in reopened.to_spec()["content"]
+            if node["id"] == "metrics_table"
+        )
+        self.assertEqual(
+            [
+                column["id"]
+                for column in reopened_table["columns"]
+            ],
+            [
+                column["id"]
+                for column in inserted_table["columns"]
+            ],
+        )
+        self.assertEqual(
+            [
+                row["id"]
+                for row in reopened_table["rows"]
+            ],
+            [
+                row["id"]
+                for row in inserted_table["rows"]
+            ],
+        )
+        self.assertEqual(
+            [
+                cell["id"]
+                for row in reopened_table["rows"]
+                for cell in row["cells"]
+            ],
+            [
+                cell["id"]
+                for row in inserted_table["rows"]
+                for cell in row["cells"]
+            ],
+        )
+        self.assertEqual(
+            reopened_table["rows"][1]["cells"][0]["content"][0]["id"],
+            "evidence_paragraph",
+        )
+
+    def test_native_merged_tables_support_all_insertion_positions(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder(
+                sections=[
+                    {"id": "front", "start_at": None},
+                    {
+                        "id": "body_section",
+                        "start_at": "body",
+                        "layout": {"start_type": "continuous"},
+                    },
+                ]
+            )
+            .paragraph("Cover", id="cover")
+            .paragraph("Body", id="body")
+            .paragraph("Conclusion", id="conclusion")
+            .build()
+            .to_bytes("docx")
+        )
+        before_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        before_body = before_root.find(_q(W, "body"))
+        assert before_body is not None
+        terminal_section = ET.tostring(list(before_body)[-1])
+
+        def merged_table(table_id: str, label: str) -> dict[str, object]:
+            return {
+                "id": table_id,
+                "type": "table",
+                "columns": [
+                    {
+                        "id": f"{table_id}_left",
+                        "key": "left",
+                        "title": "Left",
+                    },
+                    {
+                        "id": f"{table_id}_right",
+                        "key": "right",
+                        "title": "Right",
+                    },
+                ],
+                "rows": [
+                    {
+                        "id": f"{table_id}_row",
+                        "cells": [
+                            {
+                                "id": f"{table_id}_cell",
+                                "column_key": "left",
+                                "column_span": 2,
+                                "content": [
+                                    {
+                                        "id": f"{table_id}_paragraph",
+                                        "type": "paragraph",
+                                        "text": label,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+                "layout": {
+                    "style_ref": "TableGrid",
+                    "algorithm": "fixed",
+                },
+            }
+
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": "#cover",
+                    "content": merged_table(
+                        "after_cover_table",
+                        "After cover",
+                    ),
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#body",
+                    "content": merged_table(
+                        "body_table",
+                        "New section start",
+                    ),
+                },
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": merged_table(
+                        "final_table",
+                        "Final table",
+                    ),
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.document is not None
+        result_spec = result.document.to_spec()
+        self.assertEqual(
+            [node["id"] for node in result_spec["content"]],
+            [
+                "cover",
+                "after_cover_table",
+                "body_table",
+                "body",
+                "conclusion",
+                "final_table",
+            ],
+        )
+        self.assertEqual(
+            result_spec["sections"][1]["start_at"],
+            "body_table",
+        )
+        self.assertEqual(
+            result.changes[1]["section_start_updated"],
+            {
+                "section_id": "body_section",
+                "from": "body",
+                "to": "body_table",
+            },
+        )
+
+        output = result.document.to_bytes("docx")
+        output_root = parse_xml(
+            ZipFile(io.BytesIO(output)).read("word/document.xml")
+        )
+        output_body = output_root.find(_q(W, "body"))
+        assert output_body is not None
+        self.assertEqual(
+            ET.tostring(list(output_body)[-1]),
+            terminal_section,
+        )
+        inserted_tables = [
+            node
+            for node in result_spec["content"]
+            if node["type"] == "table"
+        ]
+        self.assertEqual(len(inserted_tables), 3)
+        for table in inserted_tables:
+            self.assertEqual(
+                table["source_ref"]["native_kind"],
+                "w:tbl",
+            )
+            native_table = list(output_body)[
+                table["source_ref"]["element_index"]
+            ]
+            self.assertEqual(native_table.tag, _q(W, "tbl"))
+            merged_cell = native_table.findall(_q(W, "tr"))[1].find(
+                _q(W, "tc")
+            )
+            assert merged_cell is not None
+            self.assertEqual(
+                merged_cell.find(
+                    f"./{_q(W, 'tcPr')}/{_q(W, 'gridSpan')}"
+                ).get(_q(W, "val")),
+                "2",
+            )
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            [
+                (node["id"], node["type"])
+                for node in reopened.to_spec()["content"]
+            ],
+            [
+                ("cover", "paragraph"),
+                ("after_cover_table", "table"),
+                ("body_table", "table"),
+                ("body", "paragraph"),
+                ("conclusion", "paragraph"),
+                ("final_table", "table"),
+            ],
+        )
+        self.assertEqual(
+            reopened.to_spec()["sections"][1]["start_at"],
+            "body_table",
+        )
+
+    def test_native_table_insert_rejects_forged_refs_and_missing_style(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Anchor", id="anchor")
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        anchor_ref = document.to_spec()["content"][0]["source_ref"]
+        forged = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": "#anchor",
+                    "content": {
+                        "id": "forged_table",
+                        "type": "table",
+                        "columns": [
+                            {
+                                "id": "forged_column",
+                                "key": "value",
+                                "title": "Value",
+                                "source_ref": anchor_ref,
+                            }
+                        ],
+                        "rows": [
+                            {
+                                "id": "forged_row",
+                                "cells": [
+                                    {
+                                        "id": "forged_cell",
+                                        "column_key": "value",
+                                        "value": "Unsafe",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                }
+            ]
+        )
+        self.assertFalse(forged.success)
+        self.assertEqual(
+            forged.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "cannot claim existing native source references: "
+            "forged_column",
+            forged.diagnostics[0].message,
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+
+        with ZipFile(io.BytesIO(source)) as package:
+            styles_root = parse_xml(package.read("word/styles.xml"))
+        for style in list(styles_root):
+            if (
+                style.tag == _q(W, "style")
+                and style.get(_q(W, "type")) == "table"
+                and style.get(_q(W, "styleId")) == "TableGrid"
+            ):
+                styles_root.remove(style)
+        without_table_grid = _rewrite_package(
+            source,
+            {"word/styles.xml": serialize_xml(styles_root)},
+        )
+        missing_style_document = Document.from_docx(
+            without_table_grid
+        )
+        missing_style = missing_style_document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "unstyled_table",
+                        "type": "table",
+                        "columns": [
+                            {
+                                "id": "unstyled_column",
+                                "key": "value",
+                                "title": "Value",
+                            }
+                        ],
+                        "rows": [
+                            {
+                                "id": "unstyled_row",
+                                "cells": [
+                                    {
+                                        "id": "unstyled_cell",
+                                        "column_key": "value",
+                                        "value": "Safe failure",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                }
+            ]
+        )
+        self.assertFalse(missing_style.success)
+        self.assertEqual(
+            missing_style.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "requires exactly one table style 'TableGrid'",
+            missing_style.diagnostics[0].message,
+        )
+        self.assertEqual(
+            missing_style_document.to_bytes("docx"),
+            without_table_grid,
+        )
+
+    def test_native_inserted_tables_can_move_and_remove_in_same_patch(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Anchor", id="anchor")
+            .paragraph("Tail", id="tail")
+            .build()
+            .to_bytes("docx")
+        )
+
+        def table_payload(table_id: str) -> dict[str, object]:
+            return {
+                "id": table_id,
+                "type": "table",
+                "columns": [
+                    {
+                        "id": f"{table_id}_column",
+                        "key": "value",
+                        "title": "Value",
+                    }
+                ],
+                "rows": [
+                    {
+                        "id": f"{table_id}_row",
+                        "cells": [
+                            {
+                                "id": f"{table_id}_cell",
+                                "column_key": "value",
+                                "value": table_id,
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": "#anchor",
+                    "content": table_payload("movable_table"),
+                },
+                {
+                    "op": "node.move_after",
+                    "target": "#movable_table",
+                    "after": "#tail",
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#tail",
+                    "content": table_payload("temporary_table"),
+                },
+                {
+                    "op": "node.remove",
+                    "target": "#temporary_table",
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.document is not None
+        self.assertEqual(
+            [
+                (node["id"], node["type"])
+                for node in result.document.to_spec()["content"]
+            ],
+            [
+                ("anchor", "paragraph"),
+                ("tail", "paragraph"),
+                ("movable_table", "table"),
+            ],
+        )
+        output = result.document.to_bytes("docx")
+        output_root = parse_xml(
+            ZipFile(io.BytesIO(output)).read("word/document.xml")
+        )
+        output_body = output_root.find(_q(W, "body"))
+        assert output_body is not None
+        self.assertEqual(
+            [element.tag for element in list(output_body)],
+            [
+                _q(W, "p"),
+                _q(W, "p"),
+                _q(W, "tbl"),
+                _q(W, "sectPr"),
+            ],
+        )
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            [
+                node["id"]
+                for node in reopened.to_spec()["content"]
+            ],
+            ["anchor", "tail", "movable_table"],
         )
 
     def test_native_inserted_nodes_are_batch_addressable(self) -> None:

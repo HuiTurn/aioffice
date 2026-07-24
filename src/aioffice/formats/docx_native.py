@@ -12,6 +12,11 @@ from xml.etree import ElementTree as ET
 from pydantic import ValidationError
 
 from aioffice.core.errors import NativePackageError
+from aioffice.formats.docx import (
+    DocxCompileContext,
+    compile_table_element,
+    register_table_refs,
+)
 from aioffice.formats.docx_style import (
     apply_paragraph_mark_text_style,
     apply_paragraph_style,
@@ -183,9 +188,16 @@ def _native_paragraph_anchor(
 ) -> str:
     existing = {
         value
-        for paragraph in container.findall(_q(W, "p"))
+        for paragraph in container.iter(_q(W, "p"))
         if (value := paragraph.get(_q(W14, "paraId"))) is not None
     }
+    return _fresh_native_paragraph_anchor(existing, node_id)
+
+
+def _fresh_native_paragraph_anchor(
+    existing: set[str],
+    node_id: str,
+) -> str:
     ordinal = 0
     while True:
         candidate = hashlib.sha256(
@@ -407,6 +419,282 @@ def _compile_inserted_body_block(
     return paragraph, inserted_fields
 
 
+def _compile_inserted_table(
+    package: NativePackage,
+    container: ET.Element,
+    table: Table,
+    *,
+    source_part: str,
+    styles_root: ET.Element | None,
+) -> ET.Element:
+    components: list[Any] = [
+        table,
+        *table.columns,
+        *table.rows,
+        *(
+            cell
+            for row in table.rows
+            for cell in row.cells
+        ),
+        *(
+            paragraph
+            for row in table.rows
+            for cell in row.cells
+            for paragraph in cell.content
+        ),
+    ]
+    forged_ids = [
+        component.id
+        for component in components
+        if component.source_ref is not None
+    ]
+    if forged_ids:
+        raise NativePackageError(
+            "Inserted table content cannot claim existing native "
+            f"source references: {', '.join(forged_ids)}."
+        )
+    table_style_ref = table.layout.style_ref or "TableGrid"
+    if styles_root is None:
+        raise NativePackageError(
+            f"Native DOCX has no styles.xml part required by inserted "
+            f"table style {table_style_ref!r}."
+        )
+    table_style_matches = [
+        style
+        for style in styles_root.findall(_q(W, "style"))
+        if style.get(_q(W, "type"), "paragraph") == "table"
+        and style.get(_q(W, "styleId")) == table_style_ref
+    ]
+    if len(table_style_matches) != 1:
+        raise NativePackageError(
+            f"Native DOCX requires exactly one table style "
+            f"{table_style_ref!r} for inserted table {table.id!r}; "
+            f"found {len(table_style_matches)}."
+        )
+    for paragraph in (
+        paragraph
+        for row in table.rows
+        for cell in row.cells
+        for paragraph in cell.content
+        if paragraph.style_ref is not None
+    ):
+        assert paragraph.style_ref is not None
+        if find_named_style(
+            styles_root,
+            paragraph.style_ref,
+        ) is None:
+            raise NativePackageError(
+                f"Native DOCX has no paragraph style "
+                f"{paragraph.style_ref!r} required by table-cell "
+                f"paragraph {paragraph.id!r}."
+            )
+    context = DocxCompileContext()
+    temporary_container = ET.Element(_q(W, "body"))
+    try:
+        element = compile_table_element(
+            temporary_container,
+            table,
+            context,
+        )
+    except (ValidationError, ValueError) as error:
+        raise NativePackageError(
+            f"Could not compile inserted table {table.id!r}: {error}"
+        ) from error
+    for temporary_id, target in context.hyperlinks:
+        hyperlinks = [
+            hyperlink
+            for hyperlink in element.iter(_q(W, "hyperlink"))
+            if hyperlink.get(_q(R, "id")) == temporary_id
+        ]
+        if len(hyperlinks) != 1:
+            raise NativePackageError(
+                "Inserted table hyperlink compilation produced "
+                "ambiguous relationship evidence."
+            )
+        hyperlink = hyperlinks[0]
+        if target.startswith("#"):
+            anchor = target[1:]
+            if not anchor:
+                raise NativePackageError(
+                    "A native internal hyperlink requires a non-empty "
+                    "anchor."
+                )
+            hyperlink.attrib.pop(_q(R, "id"), None)
+            hyperlink.set(_q(W, "anchor"), anchor)
+        else:
+            hyperlink.set(
+                _q(R, "id"),
+                _attach_hyperlink_relationship(
+                    package,
+                    source_part=source_part,
+                    target=target,
+                ),
+            )
+    preliminary_refs: dict[str, NativeRef] = {}
+    try:
+        register_table_refs(
+            preliminary_refs,
+            element,
+            0,
+            table,
+        )
+    except ValueError as error:
+        raise NativePackageError(
+            f"Could not map inserted table {table.id!r}: {error}"
+        ) from error
+    reserved_paragraph_ids = {
+        para_id
+        for paragraph in container.iter(_q(W, "p"))
+        if (
+            para_id := paragraph.get(_q(W14, "paraId"))
+        )
+        is not None
+    }
+    for paragraph in (
+        paragraph
+        for row in table.rows
+        for cell in row.cells
+        for paragraph in cell.content
+    ):
+        paragraph_ref = preliminary_refs.get(paragraph.id)
+        if paragraph_ref is None:
+            raise NativePackageError(
+                f"Inserted table paragraph {paragraph.id!r} has no "
+                "compiled native reference."
+            )
+        try:
+            _, native_paragraph = table_cell_paragraph_from_ref(
+                element,
+                paragraph_ref,
+            )
+        except ValueError as error:
+            raise NativePackageError(
+                f"Could not resolve inserted table paragraph "
+                f"{paragraph.id!r}: {error}"
+            ) from error
+        native_paragraph.set(
+            _q(W14, "paraId"),
+            _fresh_native_paragraph_anchor(
+                reserved_paragraph_ids,
+                paragraph.id,
+            ),
+        )
+        reserved_paragraph_ids.add(
+            native_paragraph.get(_q(W14, "paraId"), "")
+        )
+    try:
+        parse_xml(serialize_xml(element))
+    except (
+        NativePackageError,
+        UnicodeError,
+        ValueError,
+    ) as error:
+        raise NativePackageError(
+            "Native table insertion generated content that is not "
+            "valid, safe XML."
+        ) from error
+    return element
+
+
+def _assign_inserted_table_refs(
+    table: Table,
+    refs: Mapping[str, NativeRef],
+) -> None:
+    components = [
+        *table.columns,
+        *table.rows,
+        *(
+            cell
+            for row in table.rows
+            for cell in row.cells
+        ),
+        *(
+            paragraph
+            for row in table.rows
+            for cell in row.cells
+            for paragraph in cell.content
+        ),
+    ]
+    missing_ids = [
+        component.id
+        for component in components
+        if component.id not in refs
+    ]
+    if missing_ids:
+        raise NativePackageError(
+            "Inserted table identity mapping is incomplete: "
+            f"{', '.join(missing_ids)}."
+        )
+    for component in components:
+        component.source_ref = refs[component.id]
+
+
+def _synchronize_inserted_table_ids(
+    table: Table,
+    result_table: Table,
+) -> None:
+    """Reuse IDs assigned by semantic normalization for native lowering."""
+
+    if table.id != result_table.id:
+        raise NativePackageError(
+            "Inserted table semantic and native root IDs do not match."
+        )
+    if (
+        len(table.columns) != len(result_table.columns)
+        or len(table.rows) != len(result_table.rows)
+    ):
+        raise NativePackageError(
+            f"Inserted table {table.id!r} changed structural shape "
+            "between semantic normalization and native lowering."
+        )
+    for source_column, result_column in zip(
+        table.columns,
+        result_table.columns,
+        strict=True,
+    ):
+        if source_column.key != result_column.key:
+            raise NativePackageError(
+                f"Inserted table {table.id!r} changed column ordering "
+                "between semantic normalization and native lowering."
+            )
+        source_column.id = result_column.id
+    for source_row, result_row in zip(
+        table.rows,
+        result_table.rows,
+        strict=True,
+    ):
+        if len(source_row.cells) != len(result_row.cells):
+            raise NativePackageError(
+                f"Inserted table row {source_row.id!r} changed cell "
+                "shape between semantic normalization and native lowering."
+            )
+        source_row.id = result_row.id
+        for source_cell, result_cell in zip(
+            source_row.cells,
+            result_row.cells,
+            strict=True,
+        ):
+            if (
+                source_cell.column_key != result_cell.column_key
+                or source_cell.column_span != result_cell.column_span
+                or source_cell.row_span != result_cell.row_span
+                or len(source_cell.content)
+                != len(result_cell.content)
+            ):
+                raise NativePackageError(
+                    f"Inserted table row {source_row.id!r} changed "
+                    "cell structure between semantic normalization and "
+                    "native lowering."
+                )
+            source_cell.id = result_cell.id
+            for source_paragraph, result_paragraph in zip(
+                source_cell.content,
+                result_cell.content,
+                strict=True,
+            ):
+                source_paragraph.id = result_paragraph.id
+
+
 def _ensure_identity_manifest_parts(package: NativePackage) -> None:
     """Attach the AiOffice identity part to a third-party OPC package."""
 
@@ -619,33 +907,6 @@ def _find_image(
             f"Image {target_id!r} has no editable DOCX paragraph reference."
         )
     return image, source_ref
-
-
-def _find_table(
-    spec: AiOfficeDocumentSpec,
-    target: Any,
-) -> tuple[Table, NativeRef]:
-    target_id = _target_id(target)
-    matches = [
-        node
-        for node in spec.content
-        if isinstance(node, Table) and node.id == target_id
-    ]
-    if len(matches) != 1:
-        raise NativePackageError(
-            f"Native DOCX table target #{target_id} matched "
-            f"{len(matches)} tables."
-        )
-    table = matches[0]
-    source_ref = table.source_ref
-    if (
-        not isinstance(source_ref, NativeRef)
-        or source_ref.format != "docx"
-    ):
-        raise NativePackageError(
-            f"Table {target_id!r} has no editable DOCX source reference."
-        )
-    return table, source_ref
 
 
 def _find_table_column(
@@ -1018,7 +1279,7 @@ def apply_docx_operations(
         "style.define",
         "style.format",
     }.intersection(str(operation.get("op")) for operation in operations)
-    has_text_insert = any(
+    has_body_insert = any(
         operation.get("op")
         in {"node.append", "node.insert_after", "node.insert_before"}
         for operation in operations
@@ -1032,7 +1293,7 @@ def apply_docx_operations(
                 "Native DOCX has no /word/styles.xml part for named-style editing."
             )
         styles_root = parse_xml(updated.get_part("/word/styles.xml"))
-    elif has_text_insert and updated.has_part("/word/styles.xml"):
+    elif has_body_insert and updated.has_part("/word/styles.xml"):
         styles_root = parse_xml(updated.get_part("/word/styles.xml"))
     original_elements = list(body)
     part_roots: dict[str, ET.Element] = {
@@ -1150,6 +1411,29 @@ def apply_docx_operations(
             mapped_elements[0],
             source_ref,
         )
+
+    def live_table_for_target(
+        target: Any,
+    ) -> tuple[Table, ET.Element, NativeRef]:
+        target_id = _target_id(target)
+        mapped = source_tables.get(target_id)
+        if mapped is None:
+            raise NativePackageError(
+                f"No mapped native table matched {target_id!r}."
+            )
+        source_table, table_element, source_ref = mapped
+        container = part_containers.get(source_ref.part_uri)
+        if (
+            source_ref.part_uri != "/word/document.xml"
+            or container is not body
+            or table_element not in list(body)
+        ):
+            raise NativePackageError(
+                f"Table {target_id!r} is no longer a mapped top-level "
+                "document body table."
+            )
+        return source_table, table_element, source_ref
+
     source_sections: dict[
         str,
         tuple[ET.Element, ET.Element, str],
@@ -1655,7 +1939,7 @@ def apply_docx_operations(
             candidate_payload["id"] = created_id
             try:
                 if candidate_payload.get("type") == "paragraph":
-                    candidate: Heading | PageBreak | Paragraph = (
+                    candidate: Heading | PageBreak | Paragraph | Table = (
                         Paragraph.model_validate(candidate_payload)
                     )
                 elif candidate_payload.get("type") == "heading":
@@ -1664,71 +1948,157 @@ def apply_docx_operations(
                     candidate = PageBreak.model_validate(
                         candidate_payload
                     )
+                elif candidate_payload.get("type") == "table":
+                    candidate = Table.model_validate(
+                        candidate_payload
+                    )
                 else:
                     raise NativePackageError(
                         f"Imported DOCX {operation_name} currently "
-                        "supports only paragraph, heading, and page_break "
-                        "content."
+                        "supports only paragraph, heading, page_break, "
+                        "and table content."
                     )
             except ValidationError as error:
                 raise NativePackageError(
                     f"Could not lower {operation_name} content: {error}"
                 ) from error
-            paragraph, new_fields = _compile_inserted_body_block(
-                updated,
-                body,
-                candidate,
-                source_part="/word/document.xml",
-                styles_root=styles_root,
-            )
-            body.insert(insert_index, paragraph)
+            if isinstance(candidate, Table):
+                matching_result_tables = [
+                    result_node
+                    for result_node in result_spec.content
+                    if isinstance(result_node, Table)
+                    and result_node.id == created_id
+                ]
+                if len(matching_result_tables) > 1:
+                    raise NativePackageError(
+                        f"Inserted table {created_id!r} is ambiguous in "
+                        "the semantic patch result."
+                    )
+                if matching_result_tables:
+                    _synchronize_inserted_table_ids(
+                        candidate,
+                        matching_result_tables[0],
+                    )
+                inserted_element = _compile_inserted_table(
+                    updated,
+                    body,
+                    candidate,
+                    source_part="/word/document.xml",
+                    styles_root=styles_root,
+                )
+                new_fields: list[DocumentField] = []
+            else:
+                (
+                    inserted_element,
+                    new_fields,
+                ) = _compile_inserted_body_block(
+                    updated,
+                    body,
+                    candidate,
+                    source_part="/word/document.xml",
+                    styles_root=styles_root,
+                )
+            body.insert(insert_index, inserted_element)
             if target_id is not None:
                 synchronize_section_start(
                     change,
                     operation_name=str(operation_name),
                     anchor_id=target_id,
                     new_start_id=created_id,
-                    new_start_elements=[paragraph],
+                    new_start_elements=[inserted_element],
                     can_rebind=(
                         operation_name == "node.insert_before"
                     ),
                 )
             temporary_ref = native_ref_for_part_elements(
-                [paragraph],
+                [inserted_element],
                 [insert_index],
                 part_uri="/word/document.xml",
                 native_kind=(
-                    "w:page-break"
-                    if isinstance(candidate, PageBreak)
-                    else "w:p"
+                    "w:tbl"
+                    if isinstance(candidate, Table)
+                    else (
+                        "w:page-break"
+                        if isinstance(candidate, PageBreak)
+                        else "w:p"
+                    )
                 ),
                 root_path="/w:document/w:body",
-                native_id=paragraph.get(_q(W14, "paraId")),
+                native_id=inserted_element.get(
+                    _q(W14, "paraId")
+                ),
             )
+            if isinstance(candidate, Table):
+                candidate.source_ref = temporary_ref
+                component_refs: dict[str, NativeRef] = {}
+                try:
+                    register_table_refs(
+                        component_refs,
+                        inserted_element,
+                        insert_index,
+                        candidate,
+                    )
+                except ValueError as error:
+                    raise NativePackageError(
+                        f"Could not map inserted table "
+                        f"{candidate.id!r}: {error}"
+                    ) from error
+                _assign_inserted_table_refs(
+                    candidate,
+                    component_refs,
+                )
+                source_tables[created_id] = (
+                    candidate,
+                    inserted_element,
+                    temporary_ref,
+                )
+                for row in candidate.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.content:
+                            paragraph_ref = paragraph.source_ref
+                            assert isinstance(
+                                paragraph_ref,
+                                NativeRef,
+                            )
+                            try:
+                                _, native_paragraph = (
+                                    table_cell_paragraph_from_ref(
+                                        inserted_element,
+                                        paragraph_ref,
+                                    )
+                                )
+                            except ValueError as error:
+                                raise NativePackageError(
+                                    "Could not register inserted table "
+                                    f"paragraph {paragraph.id!r}: {error}"
+                                ) from error
+                            source_elements[paragraph.id] = (
+                                [native_paragraph],
+                                paragraph_ref,
+                            )
             source_elements[created_id] = (
-                [paragraph],
+                [inserted_element],
                 temporary_ref,
             )
             for field_ordinal, document_field in enumerate(
                 new_fields
             ):
                 inserted_fields[document_field.id] = (
-                    paragraph,
+                    inserted_element,
                     field_ordinal,
                 )
             inserted_nodes.add(created_id)
             changed_xml_parts.add("/word/document.xml")
             continue
         if operation_name == "table.format":
-            source_table, source_ref = _find_table(
-                spec,
+            (
+                source_table,
+                table_element,
+                source_ref,
+            ) = live_table_for_target(
                 operation.get("target"),
             )
-            _, mapped_elements = elements_for_ref(source_ref)
-            if (
-                len(mapped_elements) != 1
-                or mapped_elements[0].tag != _q(W, "tbl")
-            ):
+            if table_element.tag != _q(W, "tbl"):
                 raise NativePackageError(
                     "table.format requires a native reference to one w:tbl."
                 )
@@ -1752,7 +2122,7 @@ def apply_docx_operations(
             try:
                 TableLayout.model_validate(operation.get("set", {}))
                 patch_table_layout(
-                    mapped_elements[0],
+                    table_element,
                     result_table.layout,
                     fields,
                 )
@@ -1763,19 +2133,18 @@ def apply_docx_operations(
             changed_xml_parts.add(source_ref.part_uri)
             continue
         if operation_name == "table.column.format":
-            source_table, source_ref = _find_table(
-                spec,
+            (
+                source_table,
+                table_element,
+                source_ref,
+            ) = live_table_for_target(
                 operation.get("target"),
             )
             column_index, column_id = _find_table_column(
                 source_table,
                 operation.get("column"),
             )
-            _, mapped_elements = elements_for_ref(source_ref)
-            if (
-                len(mapped_elements) != 1
-                or mapped_elements[0].tag != _q(W, "tbl")
-            ):
+            if table_element.tag != _q(W, "tbl"):
                 raise NativePackageError(
                     "table.column.format requires a native reference "
                     "to one w:tbl."
@@ -1808,7 +2177,7 @@ def apply_docx_operations(
                 )
             try:
                 patch_table_column_width(
-                    mapped_elements[0],
+                    table_element,
                     column_index,
                     result_column.width,
                 )
@@ -1819,8 +2188,11 @@ def apply_docx_operations(
             changed_xml_parts.add(source_ref.part_uri)
             continue
         if operation_name == "table.cell.format":
-            source_table, source_ref = _find_table(
-                spec,
+            (
+                source_table,
+                table_element,
+                source_ref,
+            ) = live_table_for_target(
                 operation.get("target"),
             )
             source_cell = _find_table_cell(
@@ -1832,11 +2204,7 @@ def apply_docx_operations(
                     f"Table cell {source_cell.id!r} has no editable "
                     "DOCX source reference."
                 )
-            _, mapped_elements = elements_for_ref(source_ref)
-            if (
-                len(mapped_elements) != 1
-                or mapped_elements[0].tag != _q(W, "tbl")
-            ):
+            if table_element.tag != _q(W, "tbl"):
                 raise NativePackageError(
                     "table.cell.format requires a native reference "
                     "to one w:tbl."
@@ -1876,7 +2244,7 @@ def apply_docx_operations(
                     operation.get("set", {})
                 )
                 native_cell = table_cell_from_ref(
-                    mapped_elements[0],
+                    table_element,
                     source_cell.source_ref,
                 )
                 patch_table_cell_format(

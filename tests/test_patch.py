@@ -257,7 +257,7 @@ class PatchTests(unittest.TestCase):
         )
         self.assertEqual(
             structural_capabilities["insertable_native_blocks"],
-            ["paragraph", "heading", "page_break"],
+            ["paragraph", "heading", "page_break", "table"],
         )
         self.assertEqual(
             structural_capabilities["insert_operations"],
@@ -265,6 +265,33 @@ class PatchTests(unittest.TestCase):
                 "after": "node.insert_after",
                 "before": "node.insert_before",
             },
+        )
+        self.assertEqual(
+            structural_capabilities["native_block_lowering"]["table"],
+            "w:tbl",
+        )
+        table_insertion = structural_capabilities["table_insertion"]
+        self.assertEqual(
+            table_insertion["component_native_kinds"],
+            {
+                "table": "w:tbl",
+                "column": "w:gridCol",
+                "row": "w:tr",
+                "cell": "w:tc",
+                "rich_cell_paragraph": "w:tc/w:p",
+            },
+        )
+        self.assertEqual(
+            table_insertion["column_width_editing"],
+            "regular_grid_only",
+        )
+        self.assertIn(
+            "table.cell.format",
+            table_insertion["same_patch_operations"],
+        )
+        self.assertEqual(
+            table_insertion["hyperlinks"]["internal"],
+            "relationship_free_w:anchor",
         )
         self.assertEqual(
             structural_capabilities["move_operations"],

@@ -259,6 +259,32 @@
 - Added exact XML tests for all three placement modes and rendered a real third-party
   DOCX to prove that the explicit break changes pagination while existing image,
   table, relationship, and section payloads remain unchanged.
+- Added incremental native table lowering through `node.append`,
+  `node.insert_after`, and `node.insert_before`, compiling only the new `w:tbl`
+  while preserving every existing body element.
+- Reused the semantic table compiler for regular and merged cells, rich cell
+  paragraphs, table/row/cell geometry and formatting, borders, and repeated headers;
+  inserted external links receive collision-safe native relationships while internal
+  links remain relationship-free bookmarks.
+- Assigned persistent native references to inserted tables, columns, rows, cells,
+  and rich cell paragraphs, including IDs generated during semantic normalization.
+  Those objects survive standalone reopen and are immediately addressable later in
+  the same Patch.
+- Enabled same-Patch table, column, cell, paragraph, and text formatting for inserted
+  tables, plus use of the new table as an insertion, move, or removal anchor.
+- Exposed machine-readable table-insertion capabilities covering native component
+  kinds, supported and unsupported cell content, style policy, hyperlink lowering,
+  same-Patch operations, generated-ID behavior, and the regular-grid width boundary.
+- Added table-aware section-start rebinding, terminal-section root append,
+  CLI/Workspace persistence, generated-ID reconciliation, and exact XML/relationship
+  preservation tests for all three placement modes.
+- Rendered and visually inspected a real two-section third-party DOCX after inserting
+  a fixed-width rich table: page count and Letter geometry remained stable, the
+  untouched first-page PNG stayed byte-identical, and existing image, table,
+  relationship, section, and body-element evidence remained exact.
+- Added atomic refusal for recursively forged native references, missing table or
+  cell-paragraph styles, invalid table grids, unsafe XML, and column-width edits on
+  merged grids.
 - Added symmetric native `node.insert_before` so AI callers can prepend content to
   the document or place a new paragraph/heading before any complete mapped range,
   including multi-paragraph list anchors.
@@ -283,7 +309,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.25`.
+- Advanced the AiOffice Document Spec to `0.2-draft.26`.
 
 ## 0.1.0
 

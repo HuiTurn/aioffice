@@ -1,9 +1,10 @@
 # Incremental native body-block insertion
 
-AiOffice `0.2.0.dev25` can insert a new paragraph, heading, or explicit page break
-into an imported DOCX without rebuilding the document from its JSON projection.
-JSON remains the AI-facing intent and evidence layer; the attached OPC package
-remains the native authority.
+AiOffice `0.2.0.dev26` can insert a new paragraph, heading, explicit page break, or
+table into an imported DOCX without rebuilding the document from its JSON
+projection. JSON remains the AI-facing intent and evidence layer; the attached OPC
+package remains the native authority. This page covers text and breaks; see
+[native table insertion](native-table-insertion.md) for the table contract.
 
 ## Operations
 
@@ -35,10 +36,10 @@ Use the symmetric operation to place content before an anchor:
 ```
 
 The target must be a mapped top-level body node. AiOffice resolves its complete
-native range and inserts one freshly compiled `w:p` after its last element or before
-its first element. This makes a multi-paragraph list a valid anchor without placing
-the new paragraph inside the list. `node.insert_before` also reaches the beginning
-of the document without a synthetic root or array index.
+native range and inserts one freshly compiled native block after its last element or
+before its first element. This makes a multi-paragraph list a valid anchor without
+placing the new block inside the list. `node.insert_before` also reaches the
+beginning of the document without a synthetic root or array index.
 
 Use the document root when the content belongs at the end of the final section:
 
@@ -57,7 +58,7 @@ Use the document root when the content belongs at the end of the final section:
 
 Unlike `node.insert_after`, root append does not require an existing anchor and
 therefore works for an empty document. In native DOCX, AiOffice inserts the new
-`w:p` immediately before the optional final body-level `w:sectPr`. The original
+block immediately before the optional final body-level `w:sectPr`. The original
 section properties stay terminal and unchanged, so the block belongs to the final
 semantic section.
 
@@ -67,7 +68,7 @@ multi-operation agent plans because later operations can refer to them directly.
 
 ## Supported content
 
-The native subset accepts:
+For text-oriented blocks, the native subset accepts:
 
 - `paragraph`, `heading`, and `page_break` blocks;
 - plain text or ordered rich `TextSpan` / normalized `DocumentField` content;
@@ -81,8 +82,9 @@ The native subset accepts:
   `style_ref` uses the document's `Heading1` through `Heading6` style.
 
 Native-only field instructions are read-only and cannot be inserted from their
-display projection. Lists, tables, images, and opaque blocks require dedicated
-native operations rather than generic body insertion.
+display projection. Tables use the same generic body insertion operations with a
+separate fail-closed compilation contract. Lists, images, and opaque blocks still
+require dedicated native support.
 
 A page break uses only its ID and type:
 
@@ -178,6 +180,11 @@ Before relative insertion AiOffice proves that:
 5. the required named style exists in the native style catalog;
 6. generated text, page-break controls, and attributes form safe, valid XML;
 7. the generated field count matches its semantic field identities.
+
+For tables, the corresponding proof covers the table style, every rich cell
+paragraph style, complete logical grid, recursive absence of forged `source_ref`
+values, relationship remapping, and complete component identity mapping. See
+[native table insertion](native-table-insertion.md).
 
 For root append, AiOffice separately proves that a direct body-level `w:sectPr`, if
 present, is unique and terminal. A malformed or ambiguous body layout is refused
