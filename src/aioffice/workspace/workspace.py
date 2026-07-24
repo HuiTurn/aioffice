@@ -154,6 +154,7 @@ class Workspace:
                 "style.apply",
                 "style.define",
                 "style.format",
+                "section.insert_before",
                 "section.format",
                 "field.update",
                 "image.update",

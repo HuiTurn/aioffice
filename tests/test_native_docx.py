@@ -2733,6 +2733,10 @@ class NativeDocxTests(unittest.TestCase):
             "node.remove",
             detached.capabilities()["operations"],
         )
+        self.assertNotIn(
+            "section.insert_before",
+            detached.capabilities()["operations"],
+        )
         detached_insert = detached.apply(
             [
                 {
@@ -2793,6 +2797,22 @@ class NativeDocxTests(unittest.TestCase):
         self.assertFalse(detached_result.success)
         self.assertEqual(
             detached_result.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+        detached_section = detached.apply(
+            [
+                {
+                    "op": "section.insert_before",
+                    "target": ids["B"],
+                    "section": {
+                        "id": "detached_section",
+                    },
+                }
+            ]
+        )
+        self.assertFalse(detached_section.success)
+        self.assertEqual(
+            detached_section.diagnostics[0].code,
             "UNSUPPORTED_FEATURE",
         )
 

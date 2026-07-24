@@ -17,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.27"
+SPEC_VERSION = "0.2-draft.28"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1188,6 +1188,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.25",
         "0.2-draft.26",
         "0.2-draft.27",
+        "0.2-draft.28",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

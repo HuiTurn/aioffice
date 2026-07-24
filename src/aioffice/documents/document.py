@@ -60,6 +60,7 @@ from aioffice.spec.models import (
     DOCUMENT_SCHEMA_URL,
     BulletList,
     DocumentField,
+    DocumentSection,
     Heading,
     ImageBlock,
     ImageInsert,
@@ -976,6 +977,7 @@ class Document:
             "style.apply",
             "style.define",
             "style.format",
+            "section.insert_before",
             "section.format",
             "field.update",
             "table.format",
@@ -996,6 +998,7 @@ class Document:
                 "style.apply",
                 "style.define",
                 "style.format",
+                "section.insert_before",
                 "section.format",
                 "field.update",
                 "image.insert_after",
@@ -1016,6 +1019,7 @@ class Document:
             operations.remove("node.move_after")
             operations.remove("node.move_before")
             operations.remove("node.remove")
+            operations.remove("section.insert_before")
         ambiguous_node_ids = sorted(
             {
                 node_id
@@ -1210,7 +1214,32 @@ class Document:
                     "ordered": True,
                     "first_section_start_at": None,
                     "later_sections_start_at": "existing_content_node_id",
-                    "native_patch_scope": "one mapped w:sectPr",
+                    "format_native_patch_scope": "one mapped w:sectPr",
+                    "insert_operation": "section.insert_before",
+                    "insert_target": "existing_top_level_content_node_id",
+                    "insert_strategy": (
+                        "split_containing_section_with_hidden_boundary_carrier"
+                    ),
+                    "insert_layout": (
+                        "inherit_containing_section_then_apply_overrides"
+                    ),
+                    "insert_default_start_type": "next_page",
+                    "insert_native_patch_scope": (
+                        "one_new_hidden_w:p_boundary_and_one_existing_w:sectPr"
+                    ),
+                    "insert_header_footer": (
+                        "inherit_existing_semantic_bindings"
+                    ),
+                    "same_patch_operations": [
+                        "section.format",
+                        "node.insert_before",
+                        "node.insert_after",
+                    ],
+                    "unsupported_insertions": [
+                        "empty_section",
+                        "direct_header_footer_rebinding",
+                        "tracked_section_properties",
+                    ],
                 },
                 "header_footer_contract": {
                     "part_model": "shared_reusable_parts",
@@ -2913,6 +2942,7 @@ class Document:
                     "node.move_after",
                     "node.move_before",
                     "node.remove",
+                    "section.insert_before",
                 }
                 for operation in operations
             )
@@ -2923,7 +2953,8 @@ class Document:
                 code="UNSUPPORTED_FEATURE",
                 message=(
                     "node.append, node.insert_after, node.insert_before, "
-                    "node.move_after, node.move_before, and node.remove "
+                    "node.move_after, node.move_before, node.remove, and "
+                    "section.insert_before "
                     "require the attached native DOCX package for a "
                     "native-authority projection; detached JSON cannot prove "
                     "or mutate the complete XML element range."
@@ -4491,6 +4522,221 @@ class Document:
                 ],
             }
 
+        if operation_name == "section.insert_before":
+            unexpected = sorted(
+                set(operation) - {"op", "target", "section"}
+            )
+            target_index, target_node = Document._find_content_node(
+                payload,
+                operation.get("target"),
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.insert_before received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[target_node["id"]],
+                    )
+                )
+            raw_section = operation.get("section")
+            if not isinstance(raw_section, dict):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.insert_before requires an object in "
+                            "section."
+                        ),
+                        node_ids=[target_node["id"]],
+                    )
+                )
+            unknown_section_fields = sorted(
+                set(raw_section)
+                - {"id", "type", "layout", "metadata"}
+            )
+            if unknown_section_fields:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.insert_before section received unknown "
+                            "fields: "
+                            f"{', '.join(unknown_section_fields)}."
+                        ),
+                        node_ids=[target_node["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "use_supported_section_fields",
+                                "fields": [
+                                    "id",
+                                    "type",
+                                    "layout",
+                                    "metadata",
+                                ],
+                            }
+                        ],
+                    )
+                )
+            raw_layout = raw_section.get("layout", {})
+            if not isinstance(raw_layout, dict):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.insert_before section.layout must be "
+                            "an object."
+                        ),
+                        node_ids=[target_node["id"]],
+                    )
+                )
+            if (
+                "start_type" in raw_layout
+                and raw_layout["start_type"] is None
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.insert_before start_type cannot be null; "
+                            "omit it to use next_page."
+                        ),
+                        node_ids=[target_node["id"]],
+                    )
+                )
+
+            content_positions = {
+                str(node["id"]): index
+                for index, node in enumerate(payload["content"])
+            }
+            section_starts: list[tuple[int, int]] = [(0, 0)]
+            for section_index, section in enumerate(
+                payload.get("sections", [])[1:],
+                start=1,
+            ):
+                start_at = section.get("start_at")
+                if not isinstance(start_at, str):
+                    continue
+                start_position = content_positions.get(start_at)
+                if start_position is not None:
+                    section_starts.append(
+                        (start_position, section_index)
+                    )
+            containing_start, containing_section_index = max(
+                (
+                    (start, section_index)
+                    for start, section_index in section_starts
+                    if start <= target_index
+                ),
+                default=(0, 0),
+            )
+            containing_section = payload["sections"][
+                containing_section_index
+            ]
+            if target_index == containing_start:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="EMPTY_SECTION_UNSUPPORTED",
+                        message=(
+                            "section.insert_before requires at least one "
+                            "existing content node before the target in its "
+                            "containing section."
+                        ),
+                        node_ids=[
+                            containing_section["id"],
+                            target_node["id"],
+                        ],
+                        suggested_actions=[
+                            {
+                                "action": "choose_later_target",
+                                "section_id": containing_section["id"],
+                            }
+                        ],
+                    )
+                )
+
+            inherited_layout = deepcopy(
+                containing_section.get("layout", {})
+            )
+            candidate_layout = {
+                **inherited_layout,
+                **deepcopy(raw_layout),
+            }
+            candidate_layout["start_type"] = raw_layout.get(
+                "start_type",
+                "next_page",
+            )
+            candidate_payload = {
+                key: deepcopy(value)
+                for key, value in raw_section.items()
+                if key in {"id", "type", "metadata"}
+            }
+            candidate_payload.update(
+                {
+                    "start_at": target_node["id"],
+                    "layout": candidate_layout,
+                    "header_footer": deepcopy(
+                        containing_section.get("header_footer")
+                    ),
+                    "revision_added": next_revision,
+                    "revision_updated": next_revision,
+                }
+            )
+            try:
+                candidate_section = DocumentSection.model_validate(
+                    candidate_payload
+                ).model_dump(mode="json", exclude_none=True)
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "section.insert_before contains invalid section "
+                            "values."
+                        ),
+                        node_ids=[target_node["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "fix_section",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in (
+                                        _validation_error_diagnostics(
+                                            error
+                                        )
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            containing_section["revision_updated"] = next_revision
+            new_section_index = containing_section_index + 1
+            payload["sections"].insert(
+                new_section_index,
+                candidate_section,
+            )
+            return {
+                "operation": "section.insert_before",
+                "created_sections": [candidate_section["id"]],
+                "split_section_id": containing_section["id"],
+                "section_index": new_section_index,
+                "start_at": target_node["id"],
+                "layout_fields": sorted(
+                    set(raw_layout) | {"start_type"}
+                ),
+                "header_footer_inherited": True,
+            }
+
         if operation_name == "section.format":
             unexpected = sorted(set(operation) - {"op", "target", "set", "clear"})
             if unexpected:
@@ -5705,7 +5951,8 @@ class Document:
                     "node.move_after, node.move_before, "
                     "node.remove, "
                     "node.update, style.apply, "
-                    "style.define, style.format, section.format, field.update, "
+                    "style.define, style.format, section.insert_before, "
+                    "section.format, field.update, "
                     "image.insert_after, image.replace, image.update, "
                     "table.format, table.column.format, and table.cell.format."
                 ),

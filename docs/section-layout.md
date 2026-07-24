@@ -50,6 +50,62 @@ lowering changes the corresponding known OOXML values in one mapped `w:sectPr`.
 Unknown attributes, unknown children, relationship references, and all untouched
 package parts are preserved. Patch validation and lowering are atomic.
 
+## Inserting a section boundary
+
+`section.insert_before` splits the section containing an existing top-level content
+node:
+
+```json
+{
+  "op": "section.insert_before",
+  "target": "#wide_appendix",
+  "section": {
+    "id": "wide_appendix_section",
+    "layout": {
+      "page_size": {
+        "preset": "a4",
+        "orientation": "landscape"
+      },
+      "margin_left": {"value": 18, "unit": "mm"},
+      "margin_right": {"value": 18, "unit": "mm"}
+    }
+  }
+}
+```
+
+The target becomes the new section's `start_at`. The new section inherits all other
+known layout properties and the containing section's semantic header/footer
+bindings. When `start_type` is omitted, it becomes `next_page`. A null
+`start_type` is rejected because a missing native type on a later Word section also
+means `next_page`; accepting null would make the JSON result disagree after reopen.
+
+For imported DOCX, AiOffice:
+
+1. proves the target's complete native range is top-level and contiguous;
+2. proves there is semantic content before it in the same section;
+3. copies the containing section's exact `w:sectPr` into one new hidden boundary
+   paragraph before the target;
+4. keeps the original `w:sectPr` as the new section's ending boundary;
+5. patches only `start_type` and caller-selected layout fields on that original
+   boundary;
+6. remaps both section identities and every shifted native reference.
+
+Existing content elements are never reconstructed. A multi-paragraph list is a
+valid target and remains intact after the new boundary. Unknown section attributes,
+children, header/footer references, page-border settings, and other supported or
+opaque native properties are copied for the preceding section and retained on the
+following section.
+
+The operation refuses a target that already starts its containing section because
+that would create an empty section. It also refuses tracked `w:sectPrChange`
+properties, direct header/footer rebinding in the insertion payload, detached native
+projections, stale or noncontiguous ranges, and any result that cannot reproduce the
+semantic section order. The transaction is atomic.
+
+The new section can receive `section.format`, or have content inserted before its
+start with ordered `start_at` rebinding, later in the same Patch. See
+[the dedicated native insertion contract](native-section-insertion.md).
+
 `page_number_start` and `page_number_format` map to selected attributes of
 `w:pgNumType`. They define section pagination; PAGE/NUMPAGES fields remain separate
 inline content. See [the dynamic field contract](dynamic-fields.md).

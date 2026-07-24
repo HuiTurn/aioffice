@@ -1558,6 +1558,7 @@ def apply_docx_operations(
         "style.apply",
         "style.define",
         "style.format",
+        "section.insert_before",
         "section.format",
         "field.update",
         "image.insert_after",
@@ -1576,7 +1577,8 @@ def apply_docx_operations(
             "text.replace, paragraph.format, text.format, "
             "node.append, node.insert_after, node.insert_before, node.move_after, "
             "node.move_before, node.remove, "
-            "style.apply, style.define, style.format, section.format, and "
+            "style.apply, style.define, style.format, "
+            "section.insert_before, section.format, and "
             "field.update, image.insert_after, image.replace, image.update, "
             "table.format, "
             "table.column.format, and "
@@ -1832,9 +1834,21 @@ def apply_docx_operations(
                 f"{operation_name} section-start evidence does not "
                 "match the semantic section model."
             )
-        previous_section_id = spec.sections[
-            section_index - 1
-        ].id
+        previous_section_id = next(
+            (
+                candidate_id
+                for candidate_id, candidate_index in (
+                    section_indices.items()
+                )
+                if candidate_index == section_index - 1
+            ),
+            None,
+        )
+        if previous_section_id is None:
+            raise NativePackageError(
+                f"{operation_name} cannot resolve the section preceding "
+                "its target."
+            )
         previous_boundary = source_sections.get(
             previous_section_id
         )
@@ -1866,6 +1880,7 @@ def apply_docx_operations(
 
     inserted_images: dict[str, ET.Element] = {}
     inserted_nodes: set[str] = set()
+    inserted_sections: set[str] = set()
     inserted_fields: dict[str, tuple[ET.Element, int]] = {}
     moved_nodes: set[str] = set()
     removed_nodes: set[str] = set()
@@ -1923,25 +1938,276 @@ def apply_docx_operations(
             )
             styles_changed = True
             continue
-        if operation_name == "section.format":
-            target_id, source_ref = _find_section_source_ref(
-                spec,
-                operation.get("target"),
+        if operation_name == "section.insert_before":
+            target_id = _target_id(operation.get("target"))
+            mapped_target = source_elements.get(target_id)
+            if mapped_target is None:
+                raise NativePackageError(
+                    "section.insert_before target has no mapped native "
+                    "body elements."
+                )
+            target_elements, target_ref = mapped_target
+            if (
+                target_ref.part_uri != "/word/document.xml"
+                or part_containers.get(target_ref.part_uri) is not body
+            ):
+                raise NativePackageError(
+                    "section.insert_before requires a top-level document "
+                    "body target."
+                )
+            current_body_elements = list(body)
+            if (
+                not target_elements
+                or any(
+                    element not in current_body_elements
+                    for element in target_elements
+                )
+            ):
+                raise NativePackageError(
+                    "section.insert_before target is no longer in the "
+                    "document body."
+                )
+            target_indices = [
+                current_body_elements.index(element)
+                for element in target_elements
+            ]
+            if target_indices != list(
+                range(
+                    target_indices[0],
+                    target_indices[0] + len(target_indices),
+                )
+            ):
+                raise NativePackageError(
+                    "section.insert_before target native range is not "
+                    "contiguous."
+                )
+
+            created_sections = change.get("created_sections")
+            split_section_id = change.get("split_section_id")
+            new_section_index = change.get("section_index")
+            if (
+                change.get("operation") != operation_name
+                or not isinstance(created_sections, list)
+                or len(created_sections) != 1
+                or not isinstance(created_sections[0], str)
+                or not isinstance(split_section_id, str)
+                or not isinstance(new_section_index, int)
+            ):
+                raise NativePackageError(
+                    "section.insert_before requires one trusted semantic "
+                    "created-section record."
+                )
+            new_section_id = created_sections[0]
+            split_section_index = section_indices.get(
+                split_section_id
             )
-            section, _, _ = _section_element(original_elements, source_ref)
+            split_boundary = source_sections.get(split_section_id)
+            if (
+                split_section_index is None
+                or new_section_index != split_section_index + 1
+                or split_boundary is None
+                or change.get("start_at") != target_id
+                or new_section_id in source_sections
+                or new_section_id in native_section_starts
+            ):
+                raise NativePackageError(
+                    "section.insert_before semantic section evidence does "
+                    "not match the native section model."
+                )
+            if target_id in native_section_starts.values():
+                raise NativePackageError(
+                    "section.insert_before refuses to create an empty "
+                    "section before an existing section start."
+                )
+            raw_section = operation.get("section")
+            raw_layout = (
+                raw_section.get("layout", {})
+                if isinstance(raw_section, Mapping)
+                else None
+            )
+            if not isinstance(raw_layout, Mapping):
+                raise NativePackageError(
+                    "section.insert_before section.layout must be an "
+                    "object."
+                )
+            layout_fields = set(raw_layout) | {"start_type"}
+            if change.get("layout_fields") != sorted(layout_fields):
+                raise NativePackageError(
+                    "section.insert_before layout evidence does not match "
+                    "the requested fields."
+                )
+            result_section = next(
+                (
+                    candidate
+                    for candidate in result_spec.sections
+                    if candidate.id == new_section_id
+                ),
+                None,
+            )
+            result_split_section = next(
+                (
+                    candidate
+                    for candidate in result_spec.sections
+                    if candidate.id == split_section_id
+                ),
+                None,
+            )
+            if (
+                result_section is None
+                or result_split_section is None
+                or result_section.header_footer
+                != result_split_section.header_footer
+                or change.get("header_footer_inherited") is not True
+            ):
+                raise NativePackageError(
+                    "section.insert_before result does not preserve its "
+                    "semantic anchor and header/footer inheritance."
+                )
+
+            (
+                split_section_element,
+                split_boundary_container,
+                split_container_kind,
+            ) = split_boundary
+            if (
+                split_boundary_container not in current_body_elements
+                or current_body_elements.index(
+                    split_boundary_container
+                )
+                < target_indices[-1]
+            ):
+                raise NativePackageError(
+                    "section.insert_before target is not contained by its "
+                    "proven native section boundary."
+                )
+            if (
+                split_section_element.find(
+                    _q(W, "sectPrChange")
+                )
+                is not None
+            ):
+                raise NativePackageError(
+                    "section.insert_before refuses tracked section "
+                    "properties."
+                )
+            if split_section_index > 0:
+                previous_section_id = next(
+                    (
+                        candidate_id
+                        for candidate_id, candidate_index in (
+                            section_indices.items()
+                        )
+                        if candidate_index == split_section_index - 1
+                    ),
+                    None,
+                )
+                previous_boundary = (
+                    source_sections.get(previous_section_id)
+                    if previous_section_id is not None
+                    else None
+                )
+                if (
+                    previous_boundary is None
+                    or previous_boundary[1]
+                    not in current_body_elements
+                    or current_body_elements.index(
+                        previous_boundary[1]
+                    )
+                    >= target_indices[0]
+                ):
+                    raise NativePackageError(
+                        "section.insert_before cannot prove content before "
+                        "the target inside its containing section."
+                    )
+
+            reserved_paragraph_ids = {
+                para_id
+                for paragraph in body.iter(_q(W, "p"))
+                if (
+                    para_id := paragraph.get(_q(W14, "paraId"))
+                )
+                is not None
+            }
+            carrier = ET.Element(
+                _q(W, "p"),
+                {
+                    _q(W14, "paraId"): (
+                        _fresh_native_paragraph_anchor(
+                            reserved_paragraph_ids,
+                            f"{new_section_id}:boundary",
+                        )
+                    )
+                },
+            )
+            carrier_properties = ET.SubElement(
+                carrier,
+                _q(W, "pPr"),
+            )
+            copied_boundary = deepcopy(split_section_element)
+            copied_boundary.tail = None
+            carrier_properties.append(copied_boundary)
+            body.insert(target_indices[0], carrier)
+            patch_section_layout(
+                split_section_element,
+                result_section.layout,
+                layout_fields,
+            )
+
+            source_sections[split_section_id] = (
+                copied_boundary,
+                carrier,
+                "paragraph",
+            )
+            source_sections[new_section_id] = (
+                split_section_element,
+                split_boundary_container,
+                split_container_kind,
+            )
+            for section_id, section_index in list(
+                section_indices.items()
+            ):
+                if section_index >= new_section_index:
+                    section_indices[section_id] = section_index + 1
+            section_indices[new_section_id] = new_section_index
+            native_section_starts[new_section_id] = target_id
+            inserted_sections.add(new_section_id)
+            changed_xml_parts.add("/word/document.xml")
+            continue
+        if operation_name == "section.format":
+            target_id = _target_id(operation.get("target"))
+            mapped_section = source_sections.get(target_id)
+            if mapped_section is None:
+                raise NativePackageError(
+                    f"Semantic section {target_id!r} has no editable "
+                    "DOCX section boundary."
+                )
+            section, _, _ = mapped_section
             fields = set(operation.get("set", {})) | set(
                 operation.get("clear", [])
             )
             try:
-                layout = SectionLayout.model_validate(operation.get("set", {}))
+                SectionLayout.model_validate(operation.get("set", {}))
             except ValidationError as error:
                 raise NativePackageError(
                     f"Could not lower section.format values: {error}"
                 ) from error
-            patch_section_layout(section, layout, fields)
-            source_sections[target_id] = _section_element(
-                original_elements,
-                source_ref,
+            result_section = next(
+                (
+                    candidate
+                    for candidate in result_spec.sections
+                    if candidate.id == target_id
+                ),
+                None,
+            )
+            if result_section is None:
+                raise NativePackageError(
+                    f"Patch result no longer contains section "
+                    f"{target_id!r}."
+                )
+            patch_section_layout(
+                section,
+                result_section.layout,
+                fields,
             )
             changed_xml_parts.add("/word/document.xml")
             continue
@@ -3145,6 +3411,7 @@ def apply_docx_operations(
     structural_identity_required = bool(
         inserted_images
         or inserted_nodes
+        or inserted_sections
         or moved_nodes
         or removed_nodes
     )

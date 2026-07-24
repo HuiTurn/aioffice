@@ -329,6 +329,17 @@ class PatchTests(unittest.TestCase):
             structural_capabilities["native_remove_orphan_policy"],
             "preserve_unreferenced_relationships_and_parts",
         )
+        section_contract = document.capabilities()["formatting"][
+            "section_contract"
+        ]
+        self.assertEqual(
+            section_contract["insert_operation"],
+            "section.insert_before",
+        )
+        self.assertEqual(
+            section_contract["insert_default_start_type"],
+            "next_page",
+        )
         result = document.apply(
             [
                 {

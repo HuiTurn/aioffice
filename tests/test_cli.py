@@ -215,11 +215,12 @@ class CliTests(unittest.TestCase):
                     "node.remove",
                     "style.apply",
                     "style.define",
-                "style.format",
-                "section.format",
-                "field.update",
-                "image.insert_after",
-                "table.format",
+                    "style.format",
+                    "section.insert_before",
+                    "section.format",
+                    "field.update",
+                    "image.insert_after",
+                    "table.format",
                     "table.column.format",
                     "table.cell.format",
                 ],
@@ -444,6 +445,20 @@ class CliTests(unittest.TestCase):
                             },
                         },
                         {
+                            "op": "section.insert_before",
+                            "target": "#summary_table",
+                            "section": {
+                                "id": "summary_section",
+                                "layout": {
+                                    "start_type": "next_page",
+                                    "page_size": {
+                                        "preset": "a4",
+                                        "orientation": "landscape",
+                                    },
+                                },
+                            },
+                        },
+                        {
                             "op": "node.append",
                             "target": "$",
                             "content": {
@@ -497,6 +512,10 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(
                 report["changes"][5]["operation"],
+                "section.insert_before",
+            )
+            self.assertEqual(
+                report["changes"][6]["operation"],
                 "node.append",
             )
             reopened = Document.from_docx(output)
@@ -533,6 +552,16 @@ class CliTests(unittest.TestCase):
             self.assertEqual(
                 release_checklist["source_ref"]["native_kind"],
                 "w:p-group",
+            )
+            self.assertEqual(
+                [
+                    (section["id"], section.get("start_at"))
+                    for section in reopened.to_spec()["sections"]
+                ],
+                [
+                    ("section_default", None),
+                    ("summary_section", "summary_table"),
+                ],
             )
 
 

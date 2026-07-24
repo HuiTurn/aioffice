@@ -346,6 +346,498 @@ class SectionTests(unittest.TestCase):
         self.assertEqual(result.diagnostics[0].code, "INVALID_SPEC")
         self.assertEqual(document.to_bytes("docx"), source)
 
+    def test_section_insert_before_splits_semantic_and_generated_docx(
+        self,
+    ) -> None:
+        document = (
+            DocumentBuilder()
+            .paragraph("Introduction", id="intro")
+            .heading("Appendix", level=1, id="appendix")
+            .paragraph("Appendix body", id="appendix_body")
+            .build()
+        )
+        source = document.to_bytes("docx")
+        result = document.apply(
+            [
+                {
+                    "op": "section.insert_before",
+                    "target": "#appendix",
+                    "section": {
+                        "id": "appendix_section",
+                        "metadata": {"purpose": "wide appendix"},
+                        "layout": {
+                            "page_size": {
+                                "preset": "a4",
+                                "orientation": "landscape",
+                            },
+                            "margin_left": {
+                                "value": 54,
+                                "unit": "pt",
+                            },
+                            "margin_right": {
+                                "value": 54,
+                                "unit": "pt",
+                            },
+                        },
+                    },
+                },
+                {
+                    "op": "section.format",
+                    "target": "#appendix_section",
+                    "set": {
+                        "vertical_alignment": "center",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        self.assertEqual(
+            result.changes[0],
+            {
+                "operation": "section.insert_before",
+                "created_sections": ["appendix_section"],
+                "split_section_id": "section_default",
+                "section_index": 1,
+                "start_at": "appendix",
+                "layout_fields": [
+                    "margin_left",
+                    "margin_right",
+                    "page_size",
+                    "start_type",
+                ],
+                "header_footer_inherited": True,
+            },
+        )
+        assert result.document is not None
+        spec = result.document.to_spec()
+        self.assertEqual(
+            [
+                (section["id"], section.get("start_at"))
+                for section in spec["sections"]
+            ],
+            [
+                ("section_default", None),
+                ("appendix_section", "appendix"),
+            ],
+        )
+        appendix_section = spec["sections"][1]
+        self.assertEqual(
+            appendix_section["layout"]["start_type"],
+            "next_page",
+        )
+        self.assertEqual(
+            appendix_section["layout"]["page_size"],
+            {
+                "preset": "a4",
+                "orientation": "landscape",
+            },
+        )
+        self.assertEqual(
+            appendix_section["layout"]["margin_top"],
+            {"value": 72.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            appendix_section["layout"]["vertical_alignment"],
+            "center",
+        )
+        self.assertEqual(
+            appendix_section["metadata"],
+            {"purpose": "wide appendix"},
+        )
+
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as archive:
+            root = parse_xml(archive.read("word/document.xml"))
+        body = root.find(_q("body"))
+        assert body is not None
+        self.assertEqual(
+            [child.tag for child in list(body)],
+            [
+                _q("p"),
+                _q("p"),
+                _q("p"),
+                _q("p"),
+                _q("sectPr"),
+            ],
+        )
+        carrier_section = list(body)[1].find(
+            f"./{_q('pPr')}/{_q('sectPr')}"
+        )
+        terminal_section = list(body)[-1]
+        assert carrier_section is not None
+        carrier_size = carrier_section.find(_q("pgSz"))
+        terminal_size = terminal_section.find(_q("pgSz"))
+        assert carrier_size is not None
+        assert terminal_size is not None
+        self.assertEqual(carrier_size.get(_q("w")), "12240")
+        self.assertEqual(carrier_size.get(_q("h")), "15840")
+        self.assertEqual(terminal_size.get(_q("w")), "16838")
+        self.assertEqual(terminal_size.get(_q("h")), "11906")
+        self.assertEqual(
+            terminal_size.get(_q("orient")),
+            "landscape",
+        )
+
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            [
+                (section["id"], section.get("start_at"))
+                for section in reopened.to_spec()["sections"]
+            ],
+            [
+                ("section_default", None),
+                ("appendix_section", "appendix"),
+            ],
+        )
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_native_section_insert_preserves_content_and_supports_batch_ops(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder(
+                sections=[
+                    {
+                        "id": "front_section",
+                        "start_at": None,
+                    },
+                    {
+                        "id": "body_section",
+                        "start_at": "body_start",
+                        "layout": {
+                            "start_type": "next_page",
+                            "page_size": {
+                                "preset": "letter",
+                                "orientation": "portrait",
+                            },
+                        },
+                    },
+                ]
+            )
+            .paragraph("Cover", id="cover")
+            .bullet_list(
+                ["Front detail one", "Front detail two"],
+                id="front_detail",
+            )
+            .heading("Body", level=1, id="body_start")
+            .paragraph("Body detail", id="body_detail")
+            .paragraph("Closing", id="closing")
+            .build()
+            .to_bytes("docx")
+        )
+        with ZipFile(io.BytesIO(source)) as archive:
+            root = parse_xml(archive.read("word/document.xml"))
+            before_parts = {
+                name: archive.read(name)
+                for name in archive.namelist()
+            }
+        body = root.find(_q("body"))
+        assert body is not None
+        paragraph_boundary = body.find(
+            f"./{_q('p')}/{_q('pPr')}/{_q('sectPr')}"
+        )
+        terminal_boundary = body.find(_q("sectPr"))
+        assert paragraph_boundary is not None
+        assert terminal_boundary is not None
+        ET.SubElement(
+            paragraph_boundary,
+            "{urn:aioffice:test}frontFuture",
+            {"mode": "preserve"},
+        )
+        ET.SubElement(
+            terminal_boundary,
+            "{urn:aioffice:test}bodyFuture",
+            {"mode": "preserve"},
+        )
+        source = _rewrite_document_xml(source, root)
+        imported = Document.from_docx(source)
+        before_spec = imported.to_spec()
+        front_section_id = before_spec["sections"][0]["id"]
+        body_section_id = before_spec["sections"][1]["id"]
+        with ZipFile(io.BytesIO(source)) as archive:
+            before_root = parse_xml(
+                archive.read("word/document.xml")
+            )
+            before_parts = {
+                name: archive.read(name)
+                for name in archive.namelist()
+            }
+        before_body = before_root.find(_q("body"))
+        assert before_body is not None
+        original_nodes = {
+            node["id"]: [
+                ET.tostring(list(before_body)[index])
+                for index in node["source_ref"]["element_indices"]
+            ]
+            for node in before_spec["content"]
+        }
+
+        result = imported.apply(
+            [
+                {
+                    "op": "section.insert_before",
+                    "target": "#front_detail",
+                    "section": {
+                        "id": "front_detail_section",
+                        "layout": {
+                            "start_type": "continuous",
+                            "columns": {
+                                "count": 2,
+                                "spacing": {
+                                    "value": 24,
+                                    "unit": "pt",
+                                },
+                                "separator": True,
+                            },
+                        },
+                    },
+                },
+                {
+                    "op": "section.insert_before",
+                    "target": "#body_detail",
+                    "section": {
+                        "id": "body_detail_section",
+                        "layout": {
+                            "page_size": {
+                                "preset": "a4",
+                                "orientation": "landscape",
+                            },
+                            "margin_left": {
+                                "value": 48,
+                                "unit": "pt",
+                            },
+                            "margin_right": {
+                                "value": 48,
+                                "unit": "pt",
+                            },
+                        },
+                    },
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#body_detail",
+                    "content": {
+                        "id": "body_detail_intro",
+                        "type": "paragraph",
+                        "text": "Wide-format analysis",
+                    },
+                },
+                {
+                    "op": "section.format",
+                    "target": f"#{front_section_id}",
+                    "set": {
+                        "margin_left": {
+                            "value": 78,
+                            "unit": "pt",
+                        },
+                    },
+                },
+                {
+                    "op": "section.format",
+                    "target": "#body_detail_section",
+                    "set": {
+                        "vertical_alignment": "bottom",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(imported.to_bytes("docx"), source)
+        assert result.document is not None
+        result_spec = result.document.to_spec()
+        self.assertEqual(
+            [
+                (section["id"], section.get("start_at"))
+                for section in result_spec["sections"]
+            ],
+            [
+                (front_section_id, None),
+                ("front_detail_section", "front_detail"),
+                (body_section_id, "body_start"),
+                ("body_detail_section", "body_detail_intro"),
+            ],
+        )
+        self.assertEqual(
+            result.changes[2]["section_start_updated"],
+            {
+                "section_id": "body_detail_section",
+                "from": "body_detail",
+                "to": "body_detail_intro",
+            },
+        )
+
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as archive:
+            after_root = parse_xml(
+                archive.read("word/document.xml")
+            )
+            after_parts = {
+                name: archive.read(name)
+                for name in archive.namelist()
+            }
+        after_body = after_root.find(_q("body"))
+        assert after_body is not None
+        for node in result_spec["content"]:
+            if node["id"] not in original_nodes:
+                continue
+            self.assertEqual(
+                [
+                    ET.tostring(list(after_body)[index])
+                    for index in node["source_ref"][
+                        "element_indices"
+                    ]
+                ],
+                original_nodes[node["id"]],
+                node["id"],
+            )
+        changed_parts = {
+            name
+            for name in before_parts
+            if before_parts[name] != after_parts[name]
+        }
+        self.assertEqual(
+            changed_parts,
+            {
+                "customXml/aioffice-manifest.xml",
+                "word/document.xml",
+            },
+        )
+        paragraph_sections = [
+            paragraph.find(
+                f"./{_q('pPr')}/{_q('sectPr')}"
+            )
+            for paragraph in after_body.findall(_q("p"))
+        ]
+        paragraph_sections = [
+            section
+            for section in paragraph_sections
+            if section is not None
+        ]
+        self.assertEqual(len(paragraph_sections), 3)
+        self.assertIsNotNone(after_body.find(_q("sectPr")))
+        self.assertTrue(
+            any(
+                section.find(
+                    "{urn:aioffice:test}frontFuture"
+                )
+                is not None
+                for section in paragraph_sections
+            )
+        )
+        self.assertTrue(
+            any(
+                section.find(
+                    "{urn:aioffice:test}bodyFuture"
+                )
+                is not None
+                for section in paragraph_sections
+            )
+        )
+        final_section = after_body.find(_q("sectPr"))
+        assert final_section is not None
+        self.assertIsNotNone(
+            final_section.find(
+                "{urn:aioffice:test}bodyFuture"
+            )
+        )
+        final_size = final_section.find(_q("pgSz"))
+        assert final_size is not None
+        self.assertEqual(final_size.get(_q("orient")), "landscape")
+        final_vertical = final_section.find(_q("vAlign"))
+        assert final_vertical is not None
+        self.assertEqual(final_vertical.get(_q("val")), "bottom")
+
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            [
+                (section["id"], section.get("start_at"))
+                for section in reopened.to_spec()["sections"]
+            ],
+            [
+                (front_section_id, None),
+                ("front_detail_section", "front_detail"),
+                (body_section_id, "body_start"),
+                ("body_detail_section", "body_detail_intro"),
+            ],
+        )
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_section_insert_failures_are_atomic(self) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("First", id="first")
+            .paragraph("Second", id="second")
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        empty = document.apply(
+            [
+                {
+                    "op": "section.insert_before",
+                    "target": "#first",
+                    "section": {"id": "empty_section"},
+                }
+            ]
+        )
+        self.assertFalse(empty.success)
+        self.assertEqual(
+            empty.diagnostics[0].code,
+            "EMPTY_SECTION_UNSUPPORTED",
+        )
+        unknown = document.apply(
+            [
+                {
+                    "op": "section.insert_before",
+                    "target": "#second",
+                    "section": {
+                        "id": "bad_section",
+                        "header_footer": {},
+                    },
+                }
+            ]
+        )
+        self.assertFalse(unknown.success)
+        self.assertIn(
+            "unknown fields",
+            unknown.diagnostics[0].message,
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+
+        with ZipFile(io.BytesIO(source)) as archive:
+            root = parse_xml(
+                archive.read("word/document.xml")
+            )
+        body = root.find(_q("body"))
+        assert body is not None
+        terminal_section = body.find(_q("sectPr"))
+        assert terminal_section is not None
+        ET.SubElement(
+            terminal_section,
+            _q("sectPrChange"),
+        )
+        tracked_source = _rewrite_document_xml(source, root)
+        tracked_document = Document.from_docx(tracked_source)
+        tracked = tracked_document.apply(
+            [
+                {
+                    "op": "section.insert_before",
+                    "target": "#second",
+                    "section": {"id": "tracked_section"},
+                }
+            ]
+        )
+        self.assertFalse(tracked.success)
+        self.assertIn(
+            "refuses tracked section properties",
+            tracked.diagnostics[0].message,
+        )
+        self.assertEqual(
+            tracked_document.to_bytes("docx"),
+            tracked_source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

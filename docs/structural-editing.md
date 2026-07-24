@@ -1,6 +1,6 @@
 # Stable-ID structural editing
 
-AiOffice structural edits address semantic nodes, not array positions. The dev27
+AiOffice structural edits address semantic nodes, not array positions. The dev28
 contract exposes insertion, a deliberately narrow pair of relative moves, and
 removal:
 
@@ -44,7 +44,7 @@ because another unknown native consumer may still depend on them.
 ## Native insertion versus movement
 
 `node.append`, `node.insert_after`, and `node.insert_before` create a new semantic
-node. For an imported DOCX, dev27 accepts new `paragraph`, `heading`, `page_break`,
+node. For an imported DOCX, dev28 accepts new `paragraph`, `heading`, `page_break`,
 `bullet_list`, `ordered_list`, and `table` blocks. Text and break blocks compile to
 one new `w:p`; a list compiles to one contiguous `w:p` range; and a table compiles
 to one new `w:tbl`. Root append targets `$` and works even when the document has no
@@ -101,7 +101,7 @@ carrier remains in place and the semantic section's `start_at` is rebound to the
 moved node. The change evidence records the section ID and old/new anchors. A
 text-bearing paragraph that itself carries `w:sectPr` is refused. Cross-section
 movement will require an explicit future operation that updates section ownership
-and proves header/footer semantics together; dev27 does not approximate it.
+and proves header/footer semantics together; dev28 does not approximate it.
 
 Insertion is placed before or after the anchor's complete contiguous range. An
 after-insertion anchor that carries `w:sectPr` is refused because placement after
@@ -113,6 +113,12 @@ native lowering proves that both remain after the preceding section boundary.
 Root append always belongs to the last semantic section. AiOffice inserts before a
 unique terminal body `w:sectPr`, never after it. If direct body-level section
 properties are duplicated or nonterminal, the Patch fails atomically.
+
+Creating a new section boundary is an explicit `section.insert_before` operation,
+not an accidental side effect of moving or inserting a block. It splits the
+containing semantic section, inserts one hidden native boundary before the target's
+complete range, and assigns the target as the new section's stable `start_at`.
+See [native section insertion](native-section-insertion.md).
 
 ## Identity and third-party packages
 

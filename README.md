@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev27`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev28`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -409,6 +409,37 @@ result = doc.apply([
     }
 ])
 ```
+
+Split an existing section before a stable top-level content node when the following
+content needs a different page design:
+
+```python
+result = doc.apply([
+    {
+        "op": "section.insert_before",
+        "target": "#wide_appendix",
+        "section": {
+            "id": "wide_appendix_section",
+            "layout": {
+                "page_size": {
+                    "preset": "a4",
+                    "orientation": "landscape",
+                },
+                "margin_left": {"value": 18, "unit": "mm"},
+                "margin_right": {"value": 18, "unit": "mm"},
+            },
+        },
+    }
+])
+```
+
+The new section inherits the containing section's remaining layout and
+header/footer bindings, defaults to a `next_page` break, and can be formatted or
+prepended to later in the same Patch. Imported DOCX lowering inserts one hidden
+boundary paragraph before the target's complete native range, copies the old
+section properties for the preceding content, and patches only the requested
+properties on the existing boundary. See
+[native section insertion](docs/native-section-insertion.md).
 
 Generated multi-section DOCX uses Word's native section placement rules. Imported
 paragraph-level and final body-level `w:sectPr` elements are projected separately,
@@ -876,7 +907,7 @@ For imported DOCX, AiOffice moves the target's complete mapped XML range. A
 multi-paragraph list remains one contiguous unit, DrawingML and unknown XML stay in
 their original elements, and every native reference is reindexed. `node.move_after`
 and `node.move_before` cover every relative position without array indexes. The
-conservative dev27 boundary permits moves only within one semantic section, refuses
+conservative dev28 boundary permits moves only within one semantic section, refuses
 moving a section start anchor, and rebinds `section.start_at` when prepending within
 a later section. Native elements carrying `w:sectPr` remain immovable. See
 [the structural editing contract](docs/structural-editing.md).
@@ -889,7 +920,7 @@ relationships or parts rather than guessing that they are safe to delete.
 Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `node.append`, `node.insert_after`, `node.insert_before`, `node.move_after`,
 `node.move_before`, `node.remove`, `node.update`, `style.define`, `style.apply`, `style.format`,
-`section.format`, `field.update`,
+`section.insert_before`, `section.format`, `field.update`,
 `table.format`, `table.column.format`, and `table.cell.format`. Imported DOCX
 documents support incremental before/after insertion for paragraphs, headings, page
 breaks, bullet/ordered lists, and tables, plus root append and safe native image

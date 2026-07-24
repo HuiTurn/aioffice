@@ -508,6 +508,23 @@ class WorkspaceTests(unittest.TestCase):
                         },
                     },
                     {
+                        "op": "section.insert_before",
+                        "target": "#summary_table",
+                        "section": {
+                            "id": "summary_section",
+                            "layout": {
+                                "start_type": "continuous",
+                                "columns": {
+                                    "count": 2,
+                                    "spacing": {
+                                        "value": 24,
+                                        "unit": "pt",
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    {
                         "op": "node.append",
                         "target": "$",
                         "content": {
@@ -554,6 +571,22 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(
                 next_steps["source_ref"]["native_kind"],
                 "w:p-group",
+            )
+            self.assertEqual(
+                [
+                    (section["id"], section.get("start_at"))
+                    for section in after_append.to_spec()["sections"]
+                ],
+                [
+                    ("section_default", None),
+                    ("summary_section", "summary_table"),
+                ],
+            )
+            self.assertIn(
+                "section.insert_before",
+                workspace.capabilities(document.id)[
+                    "patch_operations"
+                ],
             )
 
 

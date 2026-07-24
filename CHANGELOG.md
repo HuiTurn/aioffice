@@ -312,6 +312,33 @@
   independent numbered lists and one bullet list: numbering restarted correctly,
   hanging-indent wrapping and bullet weight were clean, page count and Letter
   geometry remained stable, and the untouched first-page PNG stayed byte-identical.
+- Added semantic and native `section.insert_before` so an AI can split the section
+  containing any non-leading top-level content node without addressing a body
+  position or reconstructing existing content.
+- Made the target the new section's stable `start_at`, inherited all unselected
+  layout values and semantic header/footer bindings, and defaulted an omitted
+  section-start type to `next_page`.
+- Lowered imported section insertion through one collision-safe hidden `w:p`
+  boundary carrying an exact copy of the old `w:sectPr`, while retaining the
+  original boundary for the new section and patching only requested layout fields.
+- Preserved unknown section XML and relationship references on both sides of the
+  split, including multi-paragraph list targets, while refreshing all content,
+  section, table, field, and header/footer identities.
+- Added live same-Patch section state so newly created sections can receive
+  `section.format`, and content inserted before their first node rebinds `start_at`
+  against the newly created native boundary.
+- Added CLI and Workspace persistence plus machine-readable insertion strategy,
+  inheritance, default-break, native-scope, same-Patch, and unsupported-case
+  capabilities.
+- Added atomic refusal for empty-section requests, detached native projections,
+  direct header/footer rebinding, tracked section properties, stale/noncontiguous
+  targets, forged semantic evidence, and unsafe boundary placement.
+- Verified a real two-section, third-party DOCX by splitting its second section
+  before an existing table, prepending a heading and paragraph in the same Patch,
+  and rendering two Letter portrait pages followed by one Letter landscape page:
+  all pre-existing content XML and the copied old `w:sectPr` stayed byte-exact,
+  the untouched first-page PNG stayed byte-identical, and the wide page rendered
+  without clipping or overlap.
 - Added symmetric native `node.insert_before` so AI callers can prepend content to
   the document or place a new paragraph/heading before any complete mapped range,
   including multi-paragraph list anchors.
@@ -336,7 +363,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.27`.
+- Advanced the AiOffice Document Spec to `0.2-draft.28`.
 
 ## 0.1.0
 
