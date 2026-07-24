@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev34`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev35`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -26,6 +26,7 @@ background/border surfaces, conservative body and header/footer image projection
 verified asset extraction, selective native image metadata and geometry updates,
 bounded rectangular source cropping,
 conservative floating-image anchor projection,
+selective floating-anchor layout updates,
 occurrence-scoped copy-on-write image replacement, addressable native inline image
 insertion, direct image-paragraph layout formatting, semantic diffs, isolated
 LibreOffice/Poppler native rendering, safe reusable native header/footer creation,
@@ -118,9 +119,37 @@ part first, then update or replace its projected image in a subsequent Patch.
 For a supported floating picture, `image["floating"]` preserves explicit horizontal
 and vertical reference frames and offsets, square-wrap side and text distances,
 relative height, behind-text behavior, anchor locking, cell layout, and overlap
-policy. That layout is read-only evidence in dev34: extraction, crop, resize,
-metadata update, and occurrence-scoped replacement preserve it exactly, while native
-DOCX rendering remains the visual authority.
+policy. In dev35, `image.anchor.update` can selectively change those proven fields
+without rebuilding the drawing or touching its image bytes, relationship, crop,
+extent, accessibility metadata, or Office 2010 anchor identities. Native DOCX
+rendering remains the visual authority.
+
+```python
+result = doc.apply([
+    {
+        "op": "image.anchor.update",
+        "target": f"#{image['id']}",
+        "set": {
+            "horizontal": {
+                "relative_to": "page",
+                "offset": {"value": 1, "unit": "in"},
+            },
+            "vertical": {
+                "relative_to": "paragraph",
+                "offset": {"value": 12, "unit": "pt"},
+            },
+            "behind_text": False,
+            "allow_overlap": True,
+        },
+    }
+])
+assert result.success
+```
+
+Horizontal, vertical, and square-wrap changes replace their complete grouped value;
+scalar flags and relative height remain independently selectable. The operation
+requires an attached native DOCX and an image already projected as a supported
+floating anchor—it never converts an inline or opaque drawing.
 
 Supported projected images can be resized, cropped, or given accessible metadata
 without rewriting their binary part or relationship:
@@ -280,8 +309,9 @@ commit is refused when native identity is ambiguous. The detailed invariants are
 Native DOCX lowering in this development version supports `text.replace`,
 `paragraph.format`, `text.format`, `node.remove`, `style.define`, `style.apply`,
 `style.format`, `section.format`, `field.update`, `image.insert_after`,
-`image.replace`, `image.update`, `table.format`, `table.column.format`, and
-`table.cell.format`. Ask the artifact before planning an edit:
+`image.replace`, `image.update`, `image.anchor.update`, `table.format`,
+`table.column.format`, and `table.cell.format`. Ask the artifact before planning an
+edit:
 
 ```python
 capabilities = doc.capabilities()

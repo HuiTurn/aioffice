@@ -79,6 +79,16 @@
   preserving the complete anchor layout.
 - Rebased present Office 2010 `wp14:anchorId` and `wp14:editId` identities while
   cloning floating header/footer stories, preventing cross-story identity reuse.
+- Added strict `FloatingImageLayoutUpdate` semantics and native
+  `image.anchor.update` lowering for the proven offset-and-square-wrap floating
+  subset, including complete position/wrap groups, scalar stacking and boolean
+  flags, exact re-projection, and fail-closed validation.
+- Kept anchor edits occurrence- and story-local across body, header, and footer
+  parts while preserving image bytes, relationships, crop, extent, accessibility
+  metadata, host paragraphs, and `wp14` anchor identities.
+- Made `image.anchor.update` compose with `image.update` in either order within one
+  atomic Patch and exposed occurrence-specific operations, strict schema, and
+  machine-readable capability fields for AI planning.
 - Preserved story-local relationship semantics while replacing a cloned header or
   footer logo copy-on-write, leaving the source story, relationship, media, body, and
   unrelated pages untouched.
@@ -432,6 +442,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.32`.
 - Advanced the AiOffice Document Spec to `0.2-draft.33`.
 - Advanced the AiOffice Document Spec to `0.2-draft.34`.
+- Advanced the AiOffice Document Spec to `0.2-draft.35`.
 
 ## 0.1.0
 

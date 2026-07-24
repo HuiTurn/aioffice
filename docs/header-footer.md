@@ -151,7 +151,9 @@ inline picture or offset-positioned, square-wrapped floating picture is projecte
 a stable `ImageBlock`: its bytes can be verified or extracted, and its accessibility
 metadata, extent, bounded rectangular source crop, paragraph layout, or binary can
 be changed through the same native image APIs as a body picture. Floating anchor
-layout is explicit read-only evidence and remains native-authoritative.
+layout is explicit native-authoritative evidence; for the conservative projected
+subset, `image.anchor.update` can selectively change its offset positions,
+square-wrap group, relative height, and boolean flags.
 
 Image replacement is occurrence-scoped copy-on-write and allocates the new
 relationship in the containing header/footer part. This makes the expert workflow
@@ -162,6 +164,11 @@ and unrelated sections remain unchanged.
 The same story-local rule applies to `image.update`: changing or clearing a cloned
 logo's `crop` mutates only that cloned header/footer XML. The source story,
 relationship, and media payload remain byte-exact.
+
+`image.anchor.update` is likewise story-local. On a projected floating logo it
+changes only the selected anchor fields in that header/footer part; the main
+document, part-local relationships, media payload, crop, extent, and source story
+remain unchanged.
 
 Malformed field containment, complex drawings, embedded objects, tables, and unknown
 header/footer elements remain non-editable opaque blocks.

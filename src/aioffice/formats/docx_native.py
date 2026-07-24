@@ -56,6 +56,7 @@ from aioffice.formats.docx_fields import (
 )
 from aioffice.formats.docx_images import (
     insert_simple_inline_image_after,
+    patch_simple_native_image_anchor,
     patch_simple_native_image,
     replace_simple_native_image,
     simple_native_image,
@@ -2183,6 +2184,7 @@ def apply_docx_operations(
         "section.insert_before",
         "section.format",
         "field.update",
+        "image.anchor.update",
         "image.insert_after",
         "image.replace",
         "image.update",
@@ -2204,7 +2206,8 @@ def apply_docx_operations(
             "section.header_footer.bind, "
             "section.insert_before, "
             "section.format, and "
-            "field.update, image.insert_after, image.replace, image.update, "
+            "field.update, image.anchor.update, image.insert_after, "
+            "image.replace, image.update, "
             "table.format, "
             "table.column.format, and "
             "table.cell.format; "
@@ -3664,6 +3667,41 @@ def apply_docx_operations(
                 source_part=source_ref.part_uri,
                 result=result_image,
                 fields=fields,
+            )
+            changed_xml_parts.add(source_ref.part_uri)
+            continue
+        if operation_name == "image.anchor.update":
+            source_image, source_ref = _find_image(
+                spec,
+                operation.get("target"),
+            )
+            _, mapped_elements = elements_for_ref(source_ref)
+            if (
+                len(mapped_elements) != 1
+                or mapped_elements[0].tag != _q(W, "p")
+            ):
+                raise NativePackageError(
+                    "image.anchor.update requires a native reference to one w:p."
+                )
+            result_image = next(
+                (
+                    candidate
+                    for candidate in _images(result_spec)
+                    if candidate.id == source_image.id
+                ),
+                None,
+            )
+            if result_image is None:
+                raise NativePackageError(
+                    f"Patch result no longer contains image "
+                    f"{source_image.id!r}."
+                )
+            patch_simple_native_image_anchor(
+                updated,
+                mapped_elements[0],
+                source_part=source_ref.part_uri,
+                result=result_image,
+                fields=set(operation.get("set", {})),
             )
             changed_xml_parts.add(source_ref.part_uri)
             continue

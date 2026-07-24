@@ -21,7 +21,10 @@ from aioffice.core.errors import (
     UnsupportedFormatError,
 )
 from aioffice.formats.docx import compile_docx, export_docx
-from aioffice.formats.docx_images import simple_native_image_from_ref
+from aioffice.formats.docx_images import (
+    floating_image_layout_matches,
+    simple_native_image_from_ref,
+)
 from aioffice.formats.docx_import import import_docx
 from aioffice.formats.docx_native import apply_docx_operations
 from aioffice.formats.html import export_html
@@ -61,6 +64,7 @@ from aioffice.spec.models import (
     BulletList,
     DocumentField,
     DocumentSection,
+    FloatingImageLayoutUpdate,
     HeaderFooterBindings,
     HeaderFooterImageBlock,
     HeaderFooterPart,
@@ -356,7 +360,10 @@ class Document:
             or asset.sha256 != native_image.sha256
             or asset.media_type != native_image.media_type
             or image.placement != native_image.placement
-            or image.floating != native_image.floating
+            or not floating_image_layout_matches(
+                image.floating,
+                native_image.floating,
+            )
             or image.crop != native_image.crop
             or round(image.width.to_points() * 12_700)
             != round(native_image.width.to_points() * 12_700)
@@ -777,6 +784,11 @@ class Document:
                                 "image.insert_after",
                                 "image.replace",
                                 "image.update",
+                                *(
+                                    ["image.anchor.update"]
+                                    if node.placement == "floating"
+                                    else []
+                                ),
                                 "paragraph.format",
                                 "node.remove",
                             ]
@@ -914,6 +926,12 @@ class Document:
                                             [
                                                 "image.replace",
                                                 "image.update",
+                                                *(
+                                                    ["image.anchor.update"]
+                                                    if block.placement
+                                                    == "floating"
+                                                    else []
+                                                ),
                                                 "paragraph.format",
                                             ]
                                             if self._native is not None
@@ -1094,6 +1112,11 @@ class Document:
             ):
                 operations.append("image.replace")
                 operations.append("image.update")
+            if any(
+                image.placement == "floating"
+                for image in _document_images(self._spec)
+            ):
+                operations.append("image.anchor.update")
         elif detached_native_projection:
             operations.remove("node.append")
             operations.remove("node.insert_after")
@@ -1175,7 +1198,24 @@ class Document:
                     "inline",
                     "floating_offset_square_wrap",
                 ],
-                "floating_layout_editable": False,
+                "floating_layout_editable": True,
+                "floating_layout_update_operation": (
+                    "image.anchor.update"
+                ),
+                "floating_layout_update_fields": [
+                    "horizontal",
+                    "vertical",
+                    "wrap",
+                    "relative_height",
+                    "behind_text",
+                    "locked",
+                    "layout_in_cell",
+                    "allow_overlap",
+                ],
+                "floating_layout_group_update": (
+                    "horizontal_vertical_and_wrap_are_complete_objects"
+                ),
+                "floating_layout_clearable_fields": [],
                 "floating_layout_authority": "native_docx_and_render",
                 "crop_unit": "percentage_points",
                 "crop_precision": 0.001,
@@ -1370,6 +1410,7 @@ class Document:
                     ],
                     "image_operations": [
                         "image.update",
+                        "image.anchor.update",
                         "image.replace",
                         "paragraph.format",
                     ],
@@ -3224,6 +3265,7 @@ class Document:
             for operation in operations
         }.intersection(
             {
+                "image.anchor.update",
                 "image.insert_after",
                 "image.update",
                 "image.replace",
@@ -4348,6 +4390,168 @@ class Document:
                     for field_name in changed_fields
                     if before.get(field_name)
                     != normalized.get(field_name)
+                ],
+            }
+
+        if operation_name == "image.anchor.update":
+            unexpected = sorted(
+                set(operation) - {"op", "target", "set"}
+            )
+            image = Document._find_image(
+                payload,
+                operation.get("target"),
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "image.anchor.update received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[image["id"]],
+                    )
+                )
+            if (
+                image.get("placement") != "floating"
+                or not isinstance(image.get("floating"), dict)
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            "image.anchor.update requires an image already "
+                            "projected as a supported floating anchor."
+                        ),
+                        node_ids=[image["id"]],
+                        suggested_actions=[
+                            {"action": "inspect_image_placement"},
+                        ],
+                    )
+                )
+            set_values = operation.get("set", {})
+            known_fields = set(FloatingImageLayoutUpdate.model_fields)
+            valid_shape = isinstance(set_values, dict)
+            unknown = (
+                sorted(set(set_values) - known_fields)
+                if valid_shape
+                else []
+            )
+            has_null = (
+                any(value is None for value in set_values.values())
+                if valid_shape
+                else False
+            )
+            if (
+                not valid_shape
+                or not set_values
+                or unknown
+                or has_null
+            ):
+                detail = (
+                    "set must be an object"
+                    if not valid_shape
+                    else "at least one change is required"
+                    if not set_values
+                    else f"unknown properties: {', '.join(unknown)}"
+                    if unknown
+                    else "set values cannot be null"
+                )
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"Invalid image.anchor.update: {detail}."
+                        ),
+                        node_ids=[image["id"]],
+                    )
+                )
+            try:
+                normalized_set = (
+                    FloatingImageLayoutUpdate.model_validate(
+                        set_values
+                    ).model_dump(mode="json", exclude_none=True)
+                )
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "image.anchor.update has invalid values."
+                        ),
+                        node_ids=[image["id"]],
+                        suggested_actions=[
+                            {
+                                "action": (
+                                    "inspect_floating_image_layout_update_schema"
+                                ),
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            before = deepcopy(image)
+            candidate = deepcopy(before)
+            candidate_layout = deepcopy(candidate["floating"])
+            candidate_layout.update(deepcopy(normalized_set))
+            candidate["floating"] = candidate_layout
+            candidate["revision_updated"] = next_revision
+            try:
+                image_model = (
+                    HeaderFooterImageBlock
+                    if candidate.get("capabilities")
+                    == ["inspect", "extract", "render"]
+                    else ImageBlock
+                )
+                normalized = image_model.model_validate(
+                    candidate
+                ).model_dump(mode="json", exclude_none=True)
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "image.anchor.update produced an invalid image block."
+                        ),
+                        node_ids=[image["id"]],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_image_block_schema",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            image.clear()
+            image.update(normalized)
+            changed_fields = sorted(set(set_values))
+            return {
+                "operation": "image.anchor.update",
+                "image_ids": [image["id"]],
+                "property_changes": [
+                    {
+                        "path": f"floating.{field_name}",
+                        "before": before["floating"].get(field_name),
+                        "after": normalized["floating"].get(field_name),
+                    }
+                    for field_name in changed_fields
+                    if before["floating"].get(field_name)
+                    != normalized["floating"].get(field_name)
                 ],
             }
 
@@ -7074,7 +7278,8 @@ class Document:
                     "section.header_footer.bind, "
                     "section.insert_before, "
                     "section.format, field.update, "
-                    "image.insert_after, image.replace, image.update, "
+                    "image.anchor.update, image.insert_after, image.replace, "
+                    "image.update, "
                     "table.format, table.column.format, and table.cell.format."
                 ),
                 suggested_actions=[{"action": "use_supported_operation"}],

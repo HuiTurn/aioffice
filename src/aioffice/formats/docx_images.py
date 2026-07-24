@@ -169,6 +169,15 @@ _WRAP_SIDES: dict[str, WrapSide] = {
     "left": "left",
     "right": "right",
 }
+_HORIZONTAL_RELATIVE_TO_NATIVE = {
+    value: key for key, value in _HORIZONTAL_RELATIVE_FROM.items()
+}
+_VERTICAL_RELATIVE_TO_NATIVE = {
+    value: key for key, value in _VERTICAL_RELATIVE_FROM.items()
+}
+_WRAP_SIDE_TO_NATIVE = {
+    value: key for key, value in _WRAP_SIDES.items()
+}
 
 
 def _strict_boolean(value: str | None) -> bool | None:
@@ -183,6 +192,41 @@ def _emu_length(value: int) -> Length:
     return Length(
         value=round(value / EMU_PER_POINT, 6),
         unit="pt",
+    )
+
+
+def floating_image_layout_matches(
+    left: FloatingImageLayout | None,
+    right: FloatingImageLayout | None,
+) -> bool:
+    """Compare floating layouts by their exact native EMU semantics."""
+
+    if left is None or right is None:
+        return left is right
+
+    def emu(length: Length) -> int:
+        return round(length.to_points() * EMU_PER_POINT)
+
+    return (
+        left.horizontal.relative_to == right.horizontal.relative_to
+        and emu(left.horizontal.offset) == emu(right.horizontal.offset)
+        and left.vertical.relative_to == right.vertical.relative_to
+        and emu(left.vertical.offset) == emu(right.vertical.offset)
+        and left.wrap.mode == right.wrap.mode
+        and left.wrap.side == right.wrap.side
+        and emu(left.wrap.distance_top)
+        == emu(right.wrap.distance_top)
+        and emu(left.wrap.distance_right)
+        == emu(right.wrap.distance_right)
+        and emu(left.wrap.distance_bottom)
+        == emu(right.wrap.distance_bottom)
+        and emu(left.wrap.distance_left)
+        == emu(right.wrap.distance_left)
+        and left.relative_height == right.relative_height
+        and left.behind_text == right.behind_text
+        and left.locked == right.locked
+        and left.layout_in_cell == right.layout_in_cell
+        and left.allow_overlap == right.allow_overlap
     )
 
 
@@ -886,10 +930,155 @@ def patch_simple_native_image(
         verified is None
         or verified.crop != result.crop
         or verified.placement != original.placement
-        or verified.floating != original.floating
+        or not floating_image_layout_matches(
+            verified.floating,
+            original.floating,
+        )
     ):
         raise NativePackageError(
             "image.update would leave the picture outside the supported subset."
+        )
+
+
+def patch_simple_native_image_anchor(
+    package: NativePackage,
+    paragraph: ET.Element,
+    *,
+    source_part: str,
+    result: ImageBlock,
+    fields: set[str],
+) -> None:
+    """Selectively update one already-proven floating image anchor."""
+
+    original = simple_native_image(
+        package,
+        paragraph,
+        source_part=source_part,
+    )
+    if (
+        original is None
+        or original.placement != "floating"
+        or original.floating is None
+        or result.placement != "floating"
+        or result.floating is None
+    ):
+        raise NativePackageError(
+            "image.anchor.update requires one supported floating picture."
+        )
+    anchor = paragraph.find(
+        f"./{_q(W, 'r')}/{_q(W, 'drawing')}/{_q(WP, 'anchor')}"
+    )
+    if anchor is None:
+        raise NativePackageError(
+            "Supported floating picture has no wp:anchor element."
+        )
+
+    def position(
+        name: str,
+        *,
+        relative_to: str,
+        offset: Length,
+        native_frames: Mapping[str, str],
+    ) -> None:
+        element = anchor.find(f"./{_q(WP, name)}")
+        offset_element = (
+            element.find(f"./{_q(WP, 'posOffset')}")
+            if element is not None
+            else None
+        )
+        if element is None or offset_element is None:
+            raise NativePackageError(
+                f"Supported floating picture has no wp:{name}/wp:posOffset."
+            )
+        native_frame = native_frames.get(relative_to)
+        offset_emu = round(offset.to_points() * EMU_PER_POINT)
+        if (
+            native_frame is None
+            or offset_emu < -(2**63)
+            or offset_emu > 2**63 - 1
+        ):
+            raise NativePackageError(
+                f"image.anchor.update {name} is outside the supported range."
+            )
+        element.set("relativeFrom", native_frame)
+        offset_element.text = str(offset_emu)
+
+    layout = result.floating
+    if "horizontal" in fields:
+        position(
+            "positionH",
+            relative_to=layout.horizontal.relative_to,
+            offset=layout.horizontal.offset,
+            native_frames=_HORIZONTAL_RELATIVE_TO_NATIVE,
+        )
+    if "vertical" in fields:
+        position(
+            "positionV",
+            relative_to=layout.vertical.relative_to,
+            offset=layout.vertical.offset,
+            native_frames=_VERTICAL_RELATIVE_TO_NATIVE,
+        )
+    if "wrap" in fields:
+        native_wrap_side = _WRAP_SIDE_TO_NATIVE.get(layout.wrap.side)
+        wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
+        if wrap is None or native_wrap_side is None:
+            raise NativePackageError(
+                "Supported floating picture has no square text wrap."
+            )
+        wrap.set("wrapText", native_wrap_side)
+        for field_name, attribute_name in (
+            ("distance_top", "distT"),
+            ("distance_right", "distR"),
+            ("distance_bottom", "distB"),
+            ("distance_left", "distL"),
+        ):
+            distance_emu = round(
+                getattr(layout.wrap, field_name).to_points()
+                * EMU_PER_POINT
+            )
+            if distance_emu < 0 or distance_emu > 2**32 - 1:
+                raise NativePackageError(
+                    "image.anchor.update wrap distance is outside the "
+                    "supported range."
+                )
+            anchor.set(attribute_name, str(distance_emu))
+    if "relative_height" in fields:
+        anchor.set("relativeHeight", str(layout.relative_height))
+    for field_name, attribute_name in (
+        ("behind_text", "behindDoc"),
+        ("locked", "locked"),
+        ("layout_in_cell", "layoutInCell"),
+        ("allow_overlap", "allowOverlap"),
+    ):
+        if field_name in fields:
+            anchor.set(
+                attribute_name,
+                "1" if getattr(layout, field_name) else "0",
+            )
+
+    verified = simple_native_image(
+        package,
+        paragraph,
+        source_part=source_part,
+    )
+    if (
+        verified is None
+        or verified.placement != "floating"
+        or not floating_image_layout_matches(
+            verified.floating,
+            result.floating,
+        )
+        or verified.asset_id != original.asset_id
+        or verified.width != original.width
+        or verified.height != original.height
+        or verified.crop != original.crop
+        or verified.name != original.name
+        or verified.alt_text != original.alt_text
+        or verified.title != original.title
+    ):
+        raise NativePackageError(
+            "image.anchor.update would leave the picture outside the "
+            "supported subset."
         )
 
 
@@ -1077,7 +1266,10 @@ def replace_simple_native_image(
         or replaced.size_bytes != asset.size_bytes
         or replaced.crop != original.crop
         or replaced.placement != original.placement
-        or replaced.floating != original.floating
+        or not floating_image_layout_matches(
+            replaced.floating,
+            original.floating,
+        )
     ):
         raise NativePackageError(
             "image.replace would leave the picture outside the supported subset."
@@ -1294,7 +1486,9 @@ __all__ = [
     "EMU_PER_POINT",
     "IMAGE_RELATIONSHIP_TYPE",
     "SimpleNativeImage",
+    "floating_image_layout_matches",
     "insert_simple_inline_image_after",
+    "patch_simple_native_image_anchor",
     "patch_simple_native_image",
     "replace_simple_native_image",
     "simple_native_image",

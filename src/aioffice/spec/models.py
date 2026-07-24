@@ -17,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.34"
+SPEC_VERSION = "0.2-draft.35"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1122,11 +1122,37 @@ class FloatingImageLayout(StrictModel):
     horizontal: FloatingImageHorizontalPosition
     vertical: FloatingImageVerticalPosition
     wrap: FloatingImageTextWrap
-    relative_height: int = Field(ge=0, le=2**32 - 1)
-    behind_text: bool
-    locked: bool
-    layout_in_cell: bool
-    allow_overlap: bool
+    relative_height: int = Field(ge=0, le=2**32 - 1, strict=True)
+    behind_text: bool = Field(strict=True)
+    locked: bool = Field(strict=True)
+    layout_in_cell: bool = Field(strict=True)
+    allow_overlap: bool = Field(strict=True)
+
+
+class FloatingImageLayoutUpdate(StrictModel):
+    """Selectable fields accepted by ``image.anchor.update``."""
+
+    horizontal: FloatingImageHorizontalPosition | None = None
+    vertical: FloatingImageVerticalPosition | None = None
+    wrap: FloatingImageTextWrap | None = None
+    relative_height: int | None = Field(
+        default=None,
+        ge=0,
+        le=2**32 - 1,
+        strict=True,
+    )
+    behind_text: bool | None = Field(default=None, strict=True)
+    locked: bool | None = Field(default=None, strict=True)
+    layout_in_cell: bool | None = Field(default=None, strict=True)
+    allow_overlap: bool | None = Field(default=None, strict=True)
+
+    @model_validator(mode="after")
+    def validate_changes(self) -> "FloatingImageLayoutUpdate":
+        if not self.model_fields_set:
+            raise ValueError(
+                "Floating image layout update requires at least one field."
+            )
+        return self
 
 
 class ImageBlock(NodeBase):
@@ -1380,6 +1406,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.32",
         "0.2-draft.33",
         "0.2-draft.34",
+        "0.2-draft.35",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

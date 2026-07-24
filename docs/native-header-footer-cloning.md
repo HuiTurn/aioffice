@@ -49,6 +49,11 @@ are collision-safely rebased along with the existing DrawingML IDs. Subsequent c
 resize, metadata, paragraph, or binary edits re-prove that layout rather than
 reconstructing it.
 
+In `0.2.0.dev35`, `image.anchor.update` may then selectively move or rewrap the
+cloned floating occurrence. The patch remains local to the cloned story and keeps
+its rebased `wp14` identities, relationship graph, media, crop, extent, and source
+story unchanged.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

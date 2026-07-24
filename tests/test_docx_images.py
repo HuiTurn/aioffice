@@ -428,6 +428,19 @@ class DocxImageTests(unittest.TestCase):
                 },
             ),
             (
+                "floating-image-layout-update",
+                {
+                    "horizontal",
+                    "vertical",
+                    "wrap",
+                    "relative_height",
+                    "behind_text",
+                    "locked",
+                    "layout_in_cell",
+                    "allow_overlap",
+                },
+            ),
+            (
                 "asset-ref",
                 {"id", "sha256", "media_type", "size_bytes"},
             ),
@@ -476,7 +489,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.34")
+        self.assertEqual(spec["spec_version"], "0.2-draft.35")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -712,6 +725,22 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(inspected["placement"], "floating")
         self.assertEqual(inspected["floating"], expected_layout)
         self.assertIn(
+            "image.anchor.update",
+            inspected["supported_operations"],
+        )
+        capabilities = document.capabilities()
+        self.assertIn(
+            "image.anchor.update",
+            capabilities["operations"],
+        )
+        self.assertTrue(
+            capabilities["assets"]["floating_layout_editable"]
+        )
+        self.assertEqual(
+            capabilities["assets"]["floating_layout_update_operation"],
+            "image.anchor.update",
+        )
+        self.assertIn(
             'data-aioffice-placement="floating"',
             document.to_bytes("html").decode(),
         )
@@ -776,6 +805,384 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(replaced_image["floating"], expected_layout)
         self.assertEqual(replaced_image["crop"], updated["crop"])
         self.assertEqual(replaced.document.image_bytes(image["id"]), JPEG)
+
+    def test_floating_anchor_update_is_selective_and_roundtrips(
+        self,
+    ) -> None:
+        source = _image_document(anchored=True, cropped=True)
+        document = Document.from_docx(source)
+        before_image = document.to_spec()["content"][0]
+        requested = {
+            "horizontal": {
+                "relative_to": "page",
+                "offset": {"value": 72, "unit": "pt"},
+            },
+            "vertical": {
+                "relative_to": "margin",
+                "offset": {"value": -18, "unit": "pt"},
+            },
+            "wrap": {
+                "mode": "square",
+                "side": "right",
+                "distance_top": {"value": 5, "unit": "pt"},
+                "distance_right": {"value": 6, "unit": "pt"},
+                "distance_bottom": {"value": 7, "unit": "pt"},
+                "distance_left": {"value": 8, "unit": "pt"},
+            },
+            "relative_height": 2048,
+            "behind_text": True,
+            "locked": False,
+            "layout_in_cell": False,
+            "allow_overlap": False,
+        }
+        result = document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": f"#{before_image['id']}",
+                    "set": requested,
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(result.changes[0]["operation"], "image.anchor.update")
+        self.assertEqual(
+            {
+                change["path"]
+                for change in result.changes[0]["property_changes"]
+            },
+            {f"floating.{field_name}" for field_name in requested},
+        )
+        assert result.document is not None
+        after_image = result.document.to_spec()["content"][0]
+        self.assertEqual(after_image["floating"], requested)
+        for field_name in (
+            "id",
+            "asset_id",
+            "placement",
+            "width",
+            "height",
+            "crop",
+            "name",
+            "alt_text",
+            "title",
+            "capabilities",
+            "editable",
+        ):
+            self.assertEqual(
+                after_image.get(field_name),
+                before_image.get(field_name),
+            )
+        self.assertEqual(
+            result.document.image_bytes(before_image["id"]),
+            PNG,
+        )
+
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            self.assertEqual(
+                before.read("word/_rels/document.xml.rels"),
+                after.read("word/_rels/document.xml.rels"),
+            )
+            self.assertEqual(
+                before.read("word/media/image1.png"),
+                after.read("word/media/image1.png"),
+            )
+            before_root = parse_xml(before.read("word/document.xml"))
+            after_root = parse_xml(after.read("word/document.xml"))
+        expected_anchor = copy.deepcopy(
+            before_root.find(f".//{_q(WP, 'anchor')}")
+        )
+        after_anchor = after_root.find(f".//{_q(WP, 'anchor')}")
+        assert expected_anchor is not None
+        assert after_anchor is not None
+        expected_horizontal = expected_anchor.find(
+            f"./{_q(WP, 'positionH')}"
+        )
+        expected_vertical = expected_anchor.find(
+            f"./{_q(WP, 'positionV')}"
+        )
+        expected_wrap = expected_anchor.find(
+            f"./{_q(WP, 'wrapSquare')}"
+        )
+        assert expected_horizontal is not None
+        assert expected_vertical is not None
+        assert expected_wrap is not None
+        expected_horizontal.set("relativeFrom", "page")
+        expected_horizontal.find(
+            f"./{_q(WP, 'posOffset')}"
+        ).text = "914400"
+        expected_vertical.set("relativeFrom", "margin")
+        expected_vertical.find(
+            f"./{_q(WP, 'posOffset')}"
+        ).text = "-228600"
+        expected_wrap.set("wrapText", "right")
+        expected_anchor.attrib.update(
+            {
+                "distT": "63500",
+                "distR": "76200",
+                "distB": "88900",
+                "distL": "101600",
+                "relativeHeight": "2048",
+                "behindDoc": "1",
+                "locked": "0",
+                "layoutInCell": "0",
+                "allowOverlap": "0",
+            }
+        )
+        self.assertEqual(
+            ET.tostring(after_anchor),
+            ET.tostring(expected_anchor),
+        )
+        self.assertEqual(
+            after_anchor.get(_q(WP14, "anchorId")),
+            "A1B2C3D4",
+        )
+        self.assertEqual(
+            after_anchor.get(_q(WP14, "editId")),
+            "E5F60718",
+        )
+
+        reopened = Document.from_docx(output)
+        reopened_image = reopened.to_spec()["content"][0]
+        self.assertEqual(reopened_image["floating"], requested)
+        self.assertEqual(reopened.image_bytes(before_image["id"]), PNG)
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_floating_anchor_update_rejects_unsafe_requests_atomically(
+        self,
+    ) -> None:
+        inline_source = _image_document()
+        inline_document = Document.from_docx(inline_source)
+        inline_image = inline_document.to_spec()["content"][0]
+        inline_result = inline_document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": inline_image["id"],
+                    "set": {"behind_text": True},
+                }
+            ]
+        )
+        self.assertFalse(inline_result.success)
+        self.assertEqual(
+            inline_result.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+        self.assertEqual(inline_document.to_bytes("docx"), inline_source)
+
+        source = _image_document(anchored=True)
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        invalid_operations = (
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {},
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {"unknown": True},
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {"behind_text": None},
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {"behind_text": "true"},
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {"relative_height": True},
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "horizontal": {
+                        "offset": {"value": 12, "unit": "pt"},
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "wrap": {
+                        "mode": "square",
+                        "side": "left",
+                        "distance_top": {
+                            "value": -1,
+                            "unit": "pt",
+                        },
+                        "distance_right": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_bottom": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_left": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {"behind_text": True},
+                "clear": [],
+            },
+        )
+        for operation in invalid_operations:
+            with self.subTest(operation=operation):
+                result = document.apply([operation])
+                self.assertFalse(result.success)
+                self.assertEqual(
+                    result.diagnostics[0].code,
+                    "INVALID_SPEC",
+                )
+                self.assertIsNone(result.document)
+                self.assertEqual(document.to_bytes("docx"), source)
+
+        detached = Document.from_spec(document.to_spec())
+        detached_result = detached.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": {"behind_text": True},
+                }
+            ]
+        )
+        self.assertFalse(detached_result.success)
+        self.assertEqual(
+            detached_result.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+
+    def test_floating_anchor_and_picture_updates_compose_in_any_order(
+        self,
+    ) -> None:
+        source = _image_document(anchored=True)
+        for anchor_first in (True, False):
+            document = Document.from_docx(source)
+            image = document.to_spec()["content"][0]
+            anchor_operation = {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "horizontal": {
+                        "relative_to": "page",
+                        "offset": {"value": 48, "unit": "pt"},
+                    },
+                    "locked": False,
+                },
+            }
+            picture_operation = {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "crop": {"left": 10, "right": 10},
+                    "alt_text": "Composed floating picture",
+                },
+            }
+            operations = (
+                [anchor_operation, picture_operation]
+                if anchor_first
+                else [picture_operation, anchor_operation]
+            )
+            with self.subTest(anchor_first=anchor_first):
+                result = document.apply(operations)
+                self.assertTrue(result.success, result.model_dump())
+                assert result.document is not None
+                updated = result.document.to_spec()["content"][0]
+                self.assertEqual(
+                    updated["floating"]["horizontal"],
+                    {
+                        "relative_to": "page",
+                        "offset": {"value": 48.0, "unit": "pt"},
+                    },
+                )
+                self.assertFalse(updated["floating"]["locked"])
+                self.assertEqual(updated["crop"]["left"], 10.0)
+                self.assertEqual(
+                    updated["alt_text"],
+                    "Composed floating picture",
+                )
+                reopened = Document.from_docx(
+                    result.document.to_bytes("docx")
+                )
+                self.assertEqual(
+                    reopened.to_spec()["content"][0]["floating"],
+                    updated["floating"],
+                )
+                self.assertEqual(
+                    reopened.to_spec()["content"][0]["crop"],
+                    updated["crop"],
+                )
+
+    def test_floating_anchor_update_compares_physical_units_by_emu(
+        self,
+    ) -> None:
+        document = Document.from_docx(_image_document(anchored=True))
+        image = document.to_spec()["content"][0]
+        result = document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": {
+                        "horizontal": {
+                            "relative_to": "page",
+                            "offset": {"value": 1, "unit": "in"},
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        self.assertEqual(
+            result.document.to_spec()["content"][0]["floating"][
+                "horizontal"
+            ],
+            {
+                "relative_to": "page",
+                "offset": {"value": 1.0, "unit": "in"},
+            },
+        )
+        self.assertEqual(
+            result.document.read_image(image["id"]).data,
+            PNG,
+        )
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        offset = root.find(
+            f".//{_q(WP, 'positionH')}/{_q(WP, 'posOffset')}"
+        )
+        assert offset is not None
+        self.assertEqual(offset.text, "914400")
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            reopened.to_spec()["content"][0]["floating"]["horizontal"],
+            {
+                "relative_to": "page",
+                "offset": {"value": 72.0, "unit": "pt"},
+            },
+        )
 
     def test_unsupported_floating_anchor_variants_remain_opaque(self) -> None:
         cases = (
@@ -1819,7 +2226,12 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(
             header_footer_contract["image_operations"],
-            ["image.update", "image.replace", "paragraph.format"],
+            [
+                "image.update",
+                "image.anchor.update",
+                "image.replace",
+                "paragraph.format",
+            ],
         )
         self.assertEqual(
             header_footer_contract["image_schema_kind"],
@@ -2087,6 +2499,84 @@ class DocxImageTests(unittest.TestCase):
                 "bottom": 7.5,
             },
         )
+
+    def test_floating_header_anchor_update_is_story_local(self) -> None:
+        source = _header_image_document(anchored=True, cropped=True)
+        document = Document.from_docx(source)
+        image = document.to_spec()["header_footers"][0]["content"][0]
+        inspected = document.inspect()["header_footers"][0]["blocks"][0]
+        self.assertIn(
+            "image.anchor.update",
+            inspected["supported_operations"],
+        )
+
+        result = document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": f"#{image['id']}",
+                    "set": {
+                        "horizontal": {
+                            "relative_to": "margin",
+                            "offset": {"value": 24, "unit": "pt"},
+                        },
+                        "behind_text": True,
+                        "allow_overlap": False,
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            self.assertEqual(
+                before.read("word/document.xml"),
+                after.read("word/document.xml"),
+            )
+            self.assertEqual(
+                before.read("word/_rels/header1.xml.rels"),
+                after.read("word/_rels/header1.xml.rels"),
+            )
+            self.assertEqual(
+                before.read("word/media/image1.png"),
+                after.read("word/media/image1.png"),
+            )
+            header_root = parse_xml(after.read("word/header1.xml"))
+        anchor = header_root.find(f".//{_q(WP, 'anchor')}")
+        assert anchor is not None
+        horizontal = anchor.find(f"./{_q(WP, 'positionH')}")
+        assert horizontal is not None
+        offset = horizontal.find(f"./{_q(WP, 'posOffset')}")
+        assert offset is not None
+        self.assertEqual(horizontal.get("relativeFrom"), "margin")
+        self.assertEqual(offset.text, "304800")
+        self.assertEqual(anchor.get("behindDoc"), "1")
+        self.assertEqual(anchor.get("allowOverlap"), "0")
+        self.assertEqual(
+            anchor.get(_q(WP14, "anchorId")),
+            "A1B2C3D4",
+        )
+
+        reopened = Document.from_docx(output)
+        reopened_image = reopened.to_spec()["header_footers"][0][
+            "content"
+        ][0]
+        self.assertEqual(
+            reopened_image["floating"]["horizontal"],
+            {
+                "relative_to": "margin",
+                "offset": {"value": 24.0, "unit": "pt"},
+            },
+        )
+        self.assertTrue(reopened_image["floating"]["behind_text"])
+        self.assertFalse(reopened_image["floating"]["allow_overlap"])
+        self.assertEqual(reopened_image["crop"], image["crop"])
+        self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+        self.assertEqual(reopened.to_bytes("docx"), output)
 
     def test_cloned_header_image_can_be_replaced_copy_on_write(
         self,

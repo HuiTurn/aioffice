@@ -145,7 +145,7 @@ package relationship; see Microsoft's
 AiOffice converts EMUs to points using 12,700 EMUs per point. It does not infer DPI,
 resample bytes, decode the bitmap, or guess missing dimensions.
 
-## Floating anchor evidence
+## Floating anchor projection and update
 
 `FloatingImageLayout` is a normalized, AI-readable view of the supported native
 anchor. Horizontal and vertical positions deliberately keep both the reference frame
@@ -163,12 +163,67 @@ group.
 
 This model follows Wordprocessing Drawing's
 [`wp:anchor`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.anchor?view=openxml-3.0.1)
-container and its distinct position and wrap children. In dev34 the `floating`
-object is read-only evidence: AiOffice does not yet offer an operation that changes
-anchor position, wrapping, layer, or compatibility flags. Existing verified image
+container and its distinct position and wrap children. Existing verified image
 operations may extract, resize, crop, change accessibility metadata, format the host
 paragraph, or replace the binary; native lowering proves that the complete anchor
 layout remains identical afterward.
+
+In dev35, `image.anchor.update` selectively changes that projected layout:
+
+```json
+{
+  "op": "image.anchor.update",
+  "target": "#image_3A17C04E",
+  "set": {
+    "horizontal": {
+      "relative_to": "page",
+      "offset": {"value": 72, "unit": "pt"}
+    },
+    "vertical": {
+      "relative_to": "margin",
+      "offset": {"value": -18, "unit": "pt"}
+    },
+    "wrap": {
+      "mode": "square",
+      "side": "right",
+      "distance_top": {"value": 5, "unit": "pt"},
+      "distance_right": {"value": 6, "unit": "pt"},
+      "distance_bottom": {"value": 7, "unit": "pt"},
+      "distance_left": {"value": 8, "unit": "pt"}
+    },
+    "relative_height": 2048,
+    "behind_text": true,
+    "locked": false,
+    "layout_in_cell": false,
+    "allow_overlap": false
+  }
+}
+```
+
+Every top-level field is optional, but `set` must contain at least one non-null
+change. `horizontal`, `vertical`, and `wrap` are complete grouped values: callers
+must keep the reference frame with its offset and the wrap side with all four
+distances. This avoids partial native geometry whose meaning depends on hidden
+state. No anchor field is clearable. Signed offsets must fit OOXML Int64 EMUs;
+distances and `relative_height` must fit UInt32; booleans are strict JSON booleans.
+`aioffice schema --kind floating-image-layout-update` exposes the same contract.
+
+Native lowering changes only the selected `wp:positionH`, `wp:positionV`,
+`wp:wrapSquare`, and `wp:anchor` attributes in the already-proven tree. It preserves
+the drawing, extents, crop, image relationship and bytes, accessibility metadata,
+host paragraph, unknown surrounding XML, and present `wp14:anchorId` /
+`wp14:editId`. The operation re-projects the result and fails the complete Patch if
+any requested semantic value does not round-trip exactly. It composes with
+`image.update` in either order inside one atomic Patch.
+
+Physical lengths are compared by their rounded native EMU value, not by unit
+spelling. For example, an accepted `1 in` offset reopens as the canonical native
+projection `72 pt` without becoming a semantic or integrity mismatch.
+
+An inline image, detached JSON projection, opaque or stale drawing, unsupported
+anchor variant, empty update, partial group, null, unknown field, invalid unit/range,
+or non-boolean flag fails closed. The operation does not convert an inline picture
+to floating and does not create or reconstruct an anchor.
 
 Alignment-based positioning, active simple positioning, `wrapNone`,
 `wrapTopAndBottom`, tight/through polygons, relative-size extensions, missing or
@@ -361,7 +416,10 @@ fail the complete Patch atomically.
 The operation uses ordinary model-authored JSON, so the existing
 `aioffice apply` and `aioffice workspace apply` commands require no special binary
 channel. Capability metadata exposes `native_layout_operation`,
-`native_layout_fields`, and `native_layout_target` for planning.
+`native_layout_fields`, and `native_layout_target` for host-paragraph planning.
+Floating planning separately exposes `floating_layout_update_operation`,
+`floating_layout_update_fields`, group-replacement semantics, and an empty
+clearable-field list.
 
 ## Out-of-band binary replacement
 
