@@ -110,8 +110,9 @@ the DrawingML tree, relationship, binary part, extent, and image identity remain
 unchanged. Image insertion and replacement keep binary payloads outside JSON through
 dedicated bounded APIs, while `image.update` selectively patches accessibility
 metadata and coordinated extents. For an already-proven conservative floating
-picture, `image.anchor.update` selectively patches offset positioning, square
-wrapping, relative height, and compatibility flags without recreating the drawing.
+picture, `image.anchor.update` selectively patches offset, alignment, or percentage
+positioning, supported wrapping, relative height, and compatibility flags without
+recreating the drawing.
 
 Supported paragraph surfaces include solid sRGB `w:shd` fills and four physical
 `w:pBdr` edges. Border edges inherit independently through defaults and named styles.

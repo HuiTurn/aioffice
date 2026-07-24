@@ -10,7 +10,8 @@ from defusedxml import ElementTree as DET
 from aioffice.core.errors import NativePackageError, SecurityError
 
 
-def register_document_namespaces(data: bytes) -> None:
+def _namespace_declaration_items(data: bytes) -> list[tuple[str, str]]:
+    declarations: list[tuple[str, str]] = []
     try:
         for _, namespace in DET.iterparse(
             BytesIO(data),
@@ -20,13 +21,27 @@ def register_document_namespaces(data: bytes) -> None:
             forbid_external=True,
         ):
             prefix, uri = namespace
-            try:
-                ET.register_namespace(prefix or "", uri)
-            except ValueError:
-                # ElementTree reserves prefixes matching ns\d+.
-                continue
+            declarations.append((prefix or "", uri))
     except (ET.ParseError, ValueError, SecurityError) as error:
-        raise NativePackageError(f"Invalid or unsafe XML namespace declarations: {error}") from error
+        raise NativePackageError(
+            f"Invalid or unsafe XML namespace declarations: {error}"
+        ) from error
+    return declarations
+
+
+def namespace_declarations(data: bytes) -> dict[str, str]:
+    """Return declared XML prefixes without resolving document content."""
+
+    return dict(_namespace_declaration_items(data))
+
+
+def register_document_namespaces(data: bytes) -> None:
+    for prefix, uri in _namespace_declaration_items(data):
+        try:
+            ET.register_namespace(prefix, uri)
+        except ValueError:
+            # ElementTree reserves prefixes matching ns\d+.
+            continue
 
 
 def parse_xml(data: bytes) -> ET.Element:

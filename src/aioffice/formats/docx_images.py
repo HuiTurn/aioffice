@@ -14,7 +14,11 @@ from aioffice.core.errors import NativePackageError
 from aioffice.formats.docx_header_footer import resolve_relationship_target
 from aioffice.formats.docx_style import apply_paragraph_style
 from aioffice.native import NativePackage
-from aioffice.native.xml import parse_xml, serialize_xml
+from aioffice.native.xml import (
+    namespace_declarations,
+    parse_xml,
+    serialize_xml,
+)
 from aioffice.spec.models import (
     AssetRef,
     FloatingImageEffectExtent,
@@ -41,6 +45,7 @@ REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
 WP14 = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
+MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 _REPLACEMENT_EXTENSIONS = {
     "image/png": "png",
     "image/jpeg": "jpg",
@@ -243,6 +248,53 @@ def _strict_boolean(value: str | None) -> bool | None:
     return None
 
 
+def _ensure_wp14_compatibility(
+    package: NativePackage,
+    part_root: ET.Element,
+    *,
+    source_part: str,
+) -> None:
+    """Keep the Office 2010 extension prefix declared and ignorable."""
+
+    declarations = namespace_declarations(package.get_part(source_part))
+    original_prefix = next(
+        (
+            prefix
+            for prefix, namespace in declarations.items()
+            if namespace == WP14
+        ),
+        None,
+    )
+    usable_original = (
+        original_prefix
+        if original_prefix
+        and not (
+            original_prefix.startswith("ns")
+            and original_prefix[2:].isdigit()
+        )
+        else None
+    )
+    active_prefix = usable_original or "wp14"
+    ET.register_namespace(active_prefix, WP14)
+    if not any(namespace == MC for namespace in declarations.values()):
+        ET.register_namespace("mc", MC)
+
+    ignorable_name = _q(MC, "Ignorable")
+    tokens = (part_root.get(ignorable_name) or "").split()
+    if (
+        original_prefix
+        and original_prefix != active_prefix
+        and original_prefix in tokens
+    ):
+        tokens = [
+            active_prefix if token == original_prefix else token
+            for token in tokens
+        ]
+    if active_prefix not in tokens:
+        tokens.append(active_prefix)
+    part_root.set(ignorable_name, " ".join(tokens))
+
+
 def _emu_length(value: int) -> Length:
     return Length(
         value=round(value / EMU_PER_POINT, 6),
@@ -354,18 +406,31 @@ def _native_position_value(
     *,
     offset: Length | None,
     alignment: str | None,
+    percentage_offset: float | None,
+    percentage_tag: str,
     allowed_alignments: frozenset[str],
 ) -> tuple[str, str] | None:
-    if (offset is None) == (alignment is None):
+    if (
+        sum(
+            value is not None
+            for value in (offset, alignment, percentage_offset)
+        )
+        != 1
+    ):
         return None
     if offset is not None:
         offset_emu = round(offset.to_points() * EMU_PER_POINT)
         if offset_emu < -(2**63) or offset_emu > 2**63 - 1:
             return None
-        return "posOffset", str(offset_emu)
+        return _q(WP, "posOffset"), str(offset_emu)
+    if percentage_offset is not None:
+        native_percentage = round(percentage_offset * 1_000)
+        if native_percentage < -(2**31) or native_percentage > 2**31 - 1:
+            return None
+        return _q(WP14, percentage_tag), str(native_percentage)
     if alignment not in allowed_alignments:
         return None
-    return "align", alignment
+    return _q(WP, "align"), alignment
 
 
 def _native_text_distance_attributes(
@@ -519,10 +584,23 @@ def floating_image_layout_matches(
     def position_matches(
         left_offset: Length | None,
         left_alignment: str | None,
+        left_percentage_offset: float | None,
         right_offset: Length | None,
         right_alignment: str | None,
+        right_percentage_offset: float | None,
     ) -> bool:
         if left_alignment != right_alignment:
+            return False
+        if (
+            left_percentage_offset is None
+            or right_percentage_offset is None
+        ):
+            if left_percentage_offset is not right_percentage_offset:
+                return False
+        elif (
+            round(left_percentage_offset * 1_000)
+            != round(right_percentage_offset * 1_000)
+        ):
             return False
         if left_offset is None or right_offset is None:
             return left_offset is right_offset
@@ -577,15 +655,19 @@ def floating_image_layout_matches(
         and position_matches(
             left.horizontal.offset,
             left.horizontal.alignment,
+            left.horizontal.percentage_offset,
             right.horizontal.offset,
             right.horizontal.alignment,
+            right.horizontal.percentage_offset,
         )
         and left.vertical.relative_to == right.vertical.relative_to
         and position_matches(
             left.vertical.offset,
             left.vertical.alignment,
+            left.vertical.percentage_offset,
             right.vertical.offset,
             right.vertical.alignment,
+            right.vertical.percentage_offset,
         )
         and distances_match(
             left.anchor_distances,
@@ -719,7 +801,13 @@ def _floating_image_layout(
         element: ET.Element,
         relative_values: Mapping[str, str],
         allowed_alignments: frozenset[str],
-    ) -> tuple[str, Length | None, str | None] | None:
+        percentage_tag: str,
+    ) -> tuple[
+        str,
+        Length | None,
+        str | None,
+        float | None,
+    ] | None:
         if set(element.attrib) != {"relativeFrom"}:
             return None
         relative_to = relative_values.get(element.attrib["relativeFrom"])
@@ -736,7 +824,15 @@ def _floating_image_layout(
             alignment = child.text or ""
             if alignment not in allowed_alignments:
                 return None
-            return relative_to, None, alignment
+            return relative_to, None, alignment, None
+        if child.tag == _q(WP14, percentage_tag):
+            try:
+                percentage = int(child.text or "")
+            except ValueError:
+                return None
+            if percentage < -(2**31) or percentage > 2**31 - 1:
+                return None
+            return relative_to, None, None, percentage / 1_000
         if child.tag != _q(WP, "posOffset"):
             return None
         try:
@@ -745,17 +841,19 @@ def _floating_image_layout(
             return None
         if offset < -(2**63) or offset > 2**63 - 1:
             return None
-        return relative_to, _emu_length(offset), None
+        return relative_to, _emu_length(offset), None, None
 
     horizontal_position = position(
         horizontal,
         _HORIZONTAL_RELATIVE_FROM,
         _HORIZONTAL_ALIGNMENTS,
+        "pctPosHOffset",
     )
     vertical_position = position(
         vertical,
         _VERTICAL_RELATIVE_FROM,
         _VERTICAL_ALIGNMENTS,
+        "pctPosVOffset",
     )
     if horizontal_position is None or vertical_position is None:
         return None
@@ -870,12 +968,18 @@ def _floating_image_layout(
                 **(
                     {"offset": horizontal_position[1]}
                     if horizontal_position[1] is not None
-                    else {
+                    else (
+                        {
                         "alignment": cast(
                             HorizontalAlignment,
                             horizontal_position[2],
                         )
-                    }
+                        }
+                        if horizontal_position[2] is not None
+                        else {
+                            "percentage_offset": horizontal_position[3]
+                        }
+                    )
                 ),
             }
         ),
@@ -888,12 +992,18 @@ def _floating_image_layout(
                 **(
                     {"offset": vertical_position[1]}
                     if vertical_position[1] is not None
-                    else {
+                    else (
+                        {
                         "alignment": cast(
                             VerticalAlignment,
                             vertical_position[2],
                         )
-                    }
+                        }
+                        if vertical_position[2] is not None
+                        else {
+                            "percentage_offset": vertical_position[3]
+                        }
+                    )
                 ),
             }
         ),
@@ -1465,6 +1575,7 @@ def patch_simple_native_image(
 
 def patch_simple_native_image_anchor(
     package: NativePackage,
+    part_root: ET.Element,
     paragraph: ET.Element,
     *,
     source_part: str,
@@ -1502,6 +1613,8 @@ def patch_simple_native_image_anchor(
         relative_to: str,
         offset: Length | None,
         alignment: str | None,
+        percentage_offset: float | None,
+        percentage_tag: str,
         native_frames: Mapping[str, str],
         allowed_alignments: frozenset[str],
     ) -> None:
@@ -1514,6 +1627,8 @@ def patch_simple_native_image_anchor(
         native_value = _native_position_value(
             offset=offset,
             alignment=alignment,
+            percentage_offset=percentage_offset,
+            percentage_tag=percentage_tag,
             allowed_alignments=allowed_alignments,
         )
         if native_frame is None or native_value is None:
@@ -1522,10 +1637,13 @@ def patch_simple_native_image_anchor(
             )
         element.set("relativeFrom", native_frame)
         element.remove(element[0])
-        ET.SubElement(
-            element,
-            _q(WP, native_value[0]),
-        ).text = native_value[1]
+        ET.SubElement(element, native_value[0]).text = native_value[1]
+        if native_value[0].startswith(f"{{{WP14}}}"):
+            _ensure_wp14_compatibility(
+                package,
+                part_root,
+                source_part=source_part,
+            )
 
     layout = result.floating
     if "horizontal" in fields:
@@ -1534,6 +1652,8 @@ def patch_simple_native_image_anchor(
             relative_to=layout.horizontal.relative_to,
             offset=layout.horizontal.offset,
             alignment=layout.horizontal.alignment,
+            percentage_offset=layout.horizontal.percentage_offset,
+            percentage_tag="pctPosHOffset",
             native_frames=_HORIZONTAL_RELATIVE_TO_NATIVE,
             allowed_alignments=_HORIZONTAL_ALIGNMENTS,
         )
@@ -1543,6 +1663,8 @@ def patch_simple_native_image_anchor(
             relative_to=layout.vertical.relative_to,
             offset=layout.vertical.offset,
             alignment=layout.vertical.alignment,
+            percentage_offset=layout.vertical.percentage_offset,
+            percentage_tag="pctPosVOffset",
             native_frames=_VERTICAL_RELATIVE_TO_NATIVE,
             allowed_alignments=_VERTICAL_ALIGNMENTS,
         )
@@ -1890,6 +2012,7 @@ def _next_drawing_id(
 
 def insert_simple_native_image_after(
     package: NativePackage,
+    part_root: ET.Element,
     container: ET.Element,
     after_elements: list[ET.Element],
     *,
@@ -1957,11 +2080,15 @@ def insert_simple_native_image_after(
         horizontal_value = _native_position_value(
             offset=layout.horizontal.offset,
             alignment=layout.horizontal.alignment,
+            percentage_offset=layout.horizontal.percentage_offset,
+            percentage_tag="pctPosHOffset",
             allowed_alignments=_HORIZONTAL_ALIGNMENTS,
         )
         vertical_value = _native_position_value(
             offset=layout.vertical.offset,
             alignment=layout.vertical.alignment,
+            percentage_offset=layout.vertical.percentage_offset,
+            percentage_tag="pctPosVOffset",
             allowed_alignments=_VERTICAL_ALIGNMENTS,
         )
         distances = _native_text_distance_attributes(
@@ -2014,7 +2141,7 @@ def insert_simple_native_image_after(
         )
         ET.SubElement(
             horizontal,
-            _q(WP, horizontal_value[0]),
+            horizontal_value[0],
         ).text = horizontal_value[1]
         vertical = ET.SubElement(
             placement,
@@ -2023,8 +2150,17 @@ def insert_simple_native_image_after(
         )
         ET.SubElement(
             vertical,
-            _q(WP, vertical_value[0]),
+            vertical_value[0],
         ).text = vertical_value[1]
+        if any(
+            native_value[0].startswith(f"{{{WP14}}}")
+            for native_value in (horizontal_value, vertical_value)
+        ):
+            _ensure_wp14_compatibility(
+                package,
+                part_root,
+                source_part=source_part,
+            )
     else:
         placement = ET.SubElement(drawing, _q(WP, "inline"))
     ET.SubElement(

@@ -108,6 +108,19 @@
 - Extended floating insertion, compact inspection, capability discovery, Workspace
   metadata, cloning, image update, and binary replacement to preserve and re-prove
   alignment-positioned anchors.
+- Extended conservative floating-picture projection to Office 2010
+  `wp14:pctPosHOffset` and `wp14:pctPosVOffset` positioning in body, header, and
+  footer stories.
+- Added strict `percentage_offset` position mode semantics in human-readable
+  percentage points with native `0.001` precision, signed Int32 range checks, and
+  machine-readable three-way JSON Schema `oneOf` constraints.
+- Added exact percentage-position no-op preservation, selective switching among
+  physical offset, alignment, and percentage modes, canonical insertion with
+  `mc:Ignorable` compatibility metadata, clone-local header updates, and complete
+  re-projection checks.
+- Documented that LibreOffice 26.8 currently normalizes Office 2010 percentage
+  positions to absolute offsets on save; AiOffice reports the producer's new native
+  state instead of claiming the original rule survived.
 - Accepted LibreOffice's visually neutral picture normalization
   (`pic:spPr/@bwMode="auto"` and at most one empty `a:noFill`) so aligned pictures
   remain projected and editable after an Office-compatible open/save cycle, while
@@ -510,6 +523,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.37`.
 - Advanced the AiOffice Document Spec to `0.2-draft.38`.
 - Advanced the AiOffice Document Spec to `0.2-draft.40`.
+- Advanced the AiOffice Document Spec to `0.2-draft.41`.
 
 ## 0.1.0
 

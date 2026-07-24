@@ -147,14 +147,14 @@ PAGE, NUMPAGES, SECTION, and SECTIONPAGES fields are projected as structured inl
 objects. Their cached display result is kept separate from the semantic instruction
 and never treated as authoritative text. Unknown field instructions are visible as
 read-only native fields. A paragraph containing exactly one conservative embedded
-inline picture or offset/alignment-positioned floating picture with square,
+inline picture or offset/alignment/percentage-positioned floating picture with square,
 no-wrap, top-and-bottom, tight, or through wrapping is projected as a stable
 `ImageBlock`: its bytes can be verified or extracted, and its accessibility
 metadata, extent, bounded
 rectangular source crop, paragraph layout, or binary can be changed through the same
 native image APIs as a body picture. Floating anchor layout is explicit
 native-authoritative evidence; for the conservative projected subset,
-`image.anchor.update` can selectively change or switch its offset/alignment
+`image.anchor.update` can selectively change or switch its offset/alignment/percentage
 positions, supported wrap group, relative height, and boolean flags.
 
 Image replacement is occurrence-scoped copy-on-write and allocates the new

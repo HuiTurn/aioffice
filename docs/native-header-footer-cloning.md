@@ -66,6 +66,11 @@ ordered raw native points and optional `edited` flag. A later
 while retaining optional parent distances, supported wrap-local geometry, rebased
 identities, media, crop, and source story.
 
+In `0.2.0.dev41`, clone-safe horizontal and vertical positions may also use Office
+2010 percentage offsets. The clone retains the exact signed Int32 native percentage
+values, and a later story-local `image.anchor.update` may switch among physical
+offset, alignment, and percentage modes without changing the source story.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

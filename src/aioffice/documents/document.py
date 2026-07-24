@@ -1208,7 +1208,10 @@ class Document:
                 ],
                 "projected_placements": [
                     "inline",
-                    "floating_offset_or_alignment_supported_wrap",
+                    (
+                        "floating_offset_alignment_or_percentage_"
+                        "supported_wrap"
+                    ),
                 ],
                 "floating_layout_editable": True,
                 "floating_layout_update_operation": (
@@ -1233,7 +1236,17 @@ class Document:
                 "floating_position_modes": [
                     "offset",
                     "alignment",
+                    "percentage_offset",
                 ],
+                "floating_percentage_offset_unit": "percentage_points",
+                "floating_percentage_offset_precision": 0.001,
+                "floating_percentage_offset_native_type": (
+                    "signed_int32_st_percentage"
+                ),
+                "floating_percentage_offset_bounds": {
+                    "minimum": -(2**31) / 1_000,
+                    "maximum": (2**31 - 1) / 1_000,
+                },
                 "floating_horizontal_alignments": [
                     "left",
                     "right",
@@ -1332,12 +1345,15 @@ class Document:
                 "native_insert_operation": "image.insert_after",
                 "insert_placement": (
                     "caller_selected_inline_or_floating_"
-                    "offset_or_alignment_supported_wrap"
+                    "offset_alignment_or_percentage_supported_wrap"
                 ),
                 "insert_default_placement": "inline",
                 "insert_placements": [
                     "inline",
-                    "floating_offset_or_alignment_supported_wrap",
+                    (
+                        "floating_offset_alignment_or_percentage_"
+                        "supported_wrap"
+                    ),
                 ],
                 "insert_floating_layout_schema": (
                     "floating-image-layout"
@@ -1366,8 +1382,8 @@ class Document:
                     "one embedded DrawingML picture",
                     (
                         "inline placement or conservative floating offset/"
-                        "alignment placement with square, none, top-and-"
-                        "bottom, tight, or through text wrap"
+                        "alignment/percentage placement with square, none, "
+                        "top-and-bottom, tight, or through text wrap"
                     ),
                     "explicit positive extent",
                     "rectangular stretch fill",
@@ -1387,9 +1403,8 @@ class Document:
                 ],
                 "opaque_native_cases": [
                     (
-                        "active simple-position, relative-size, percentage-"
-                        "position, unsupported wrap-specific effects, or "
-                        "malformed anchor"
+                        "active simple-position, relative-size, unsupported "
+                        "wrap-specific effects, or malformed anchor"
                     ),
                     "text and drawing in one paragraph",
                     "multiple pictures",

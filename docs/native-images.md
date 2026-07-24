@@ -15,7 +15,7 @@ drawing.
 
 The supported vertical slice is one embedded DrawingML picture in an otherwise
 empty body, header, or footer paragraph. Placement may be inline or one conservative
-floating offset/alignment anchor with square, no-wrap, top-and-bottom, tight, or
+floating offset/alignment/percentage anchor with square, no-wrap, top-and-bottom, tight, or
 through text wrapping. A body occurrence lives in `content`; a reusable story
 occurrence lives in its `header_footers[].content`:
 
@@ -218,8 +218,9 @@ resample bytes, decode the bitmap, or guess missing dimensions.
 
 `FloatingImageLayout` is a normalized, AI-readable view of the supported native
 anchor. Horizontal and vertical positions deliberately keep the reference frame plus
-exactly one positioning mode: a signed physical `offset` or semantic `alignment`.
-Neither mode is meaningful without its frame. `wrap.mode` is `square`, `none`,
+exactly one positioning mode: a signed physical `offset`, semantic `alignment`, or
+signed `percentage_offset` in percentage points of the selected frame.
+No mode is meaningful without its frame. `wrap.mode` is `square`, `none`,
 `top_and_bottom`, `tight`, or `through`; square, tight, and through wrapping have a
 `side`. `anchor_distances` preserves
 each optional `wp:anchor/@dist*` attribute without inventing missing values.
@@ -239,7 +240,9 @@ vertical frames are `bottom_margin`, `inside_margin`, `line`, `margin`,
 `outside_margin`, `page`, `paragraph`, and `top_margin`. Horizontal alignments are
 `left`, `right`, `center`, `inside`, and `outside`; vertical alignments are `top`,
 `bottom`, `center`, `inside`, and `outside`. Every offset and distance has an
-explicit unit. `relative_height` preserves Word's unsigned relative stacking value;
+explicit unit. Percentage offsets use percentage points directly, have `0.001`
+precision, and preserve the full signed Int32 `ST_Percentage` native range.
+`relative_height` preserves Word's unsigned relative stacking value;
 `behind_text` is kept independently because it materially changes the layer group.
 
 This model follows Wordprocessing Drawing's
@@ -270,6 +273,15 @@ image operations may extract, resize, crop, change accessibility metadata, forma
 the host paragraph, or replace the binary; native lowering proves that the complete
 anchor layout remains identical afterward.
 
+Office 2010 adds
+[`wp14:pctPosHOffset` and `wp14:pctPosVOffset`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.office2010.word.drawing?view=openxml-3.0.1)
+as alternative position children. Microsoft defines the underlying percentage unit
+as thousandths of a percent, so native `37500` projects as
+`"percentage_offset": 37.5`; see the
+[`CT_Percentage` interoperability definition](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-docx/690e8fcb-f555-4da7-8155-6848901a34df).
+AiOffice writes the Office 2010 namespace into `mc:Ignorable` when it introduces
+this mode, but does not invent optional `wp14:anchorId` or `wp14:editId` values.
+
 `image.anchor.update` selectively changes that projected layout:
 
 ```json
@@ -283,7 +295,7 @@ anchor layout remains identical afterward.
     },
     "vertical": {
       "relative_to": "margin",
-      "offset": {"value": -18, "unit": "pt"}
+      "percentage_offset": -12.5
     },
     "anchor_distances": {
       "top": {"value": 5, "unit": "pt"},
@@ -319,7 +331,8 @@ anchor layout remains identical afterward.
 Every top-level field is optional, but `set` must contain at least one non-null
 change. `horizontal`, `vertical`, `anchor_distances`, `anchor_effect_extent`, and
 `wrap` are complete grouped values. Position callers keep the reference frame with
-exactly one of `offset` or `alignment`. `side` is required and non-null exactly for
+exactly one of `offset`, `alignment`, or `percentage_offset`. `side` is required
+and non-null exactly for
 `square`, `tight`, and `through`; it must be omitted for `none` and
 `top_and_bottom`. No-wrap forbids wrap-local distances, effect extent, and polygon.
 Top-and-bottom forbids left/right local distances and polygons. Tight/through
@@ -328,8 +341,9 @@ a child effect extent. Use `clear: ["anchor_distances"]`,
 `clear: ["anchor_effect_extent"]`, or both to remove those optional parent-native
 values. A wrap update omitting its optional `distances` or `effect_extent` removes
 them as part of the complete wrap replacement. Signed offsets must fit OOXML Int64
-EMUs; text distances and `relative_height` must fit UInt32; effect extents must fit
-OOXML `ST_Coordinate`; polygon coordinates fit the same signed range but remain raw
+EMUs; percentage offsets are quantized to `0.001` percentage points and must fit
+signed Int32; text distances and `relative_height` must fit UInt32; effect extents
+must fit OOXML `ST_Coordinate`; polygon coordinates fit the same signed range but remain raw
 integers; booleans are strict JSON booleans.
 `aioffice schema --kind floating-image-layout-update` exposes the same contract,
 including machine-readable `oneOf` constraints for position and wrap modes.
@@ -355,8 +369,9 @@ position. Polygon lowering writes the requested start and line sequence exactly 
 does not invent a closing point. The operation re-projects the result and fails the
 complete Patch if any requested semantic value does not round-trip exactly. It
 composes with `image.update` in either order inside one atomic Patch. A complete
-position update may also switch the native child from `wp:posOffset` to `wp:align`
-or back without reconstructing the surrounding anchor.
+position update may also switch the native child among `wp:posOffset`, `wp:align`,
+and the axis-specific `wp14` percentage child without reconstructing the surrounding
+anchor.
 
 Physical lengths are compared by their rounded native EMU value, not by unit
 spelling. For example, an accepted `1 in` offset reopens as the canonical native
@@ -369,13 +384,13 @@ values were always lowered natively. Dev39 emits only the corrected layered form
 new callers should not author the legacy keys.
 
 An inline image, detached JSON projection, opaque or stale drawing, unsupported
-anchor variant, empty update, partial group, both/neither positioning modes, null,
+anchor variant, empty update, partial group, multiple/no positioning modes, null,
 unknown field, invalid unit/range/alignment, or non-boolean flag fails closed. The
 operation does not convert an inline picture to floating and does not create or
 reconstruct an anchor.
 
-Active simple positioning, Office 2010 percentage positioning, relative-size
-extensions, malformed or out-of-range distance/effect/polygon metadata, missing or
+Active simple positioning, relative-size extensions, malformed or out-of-range
+distance/effect/polygon metadata, missing or
 unknown compatibility values, extra position/wrap children, and mixed text plus
 drawing paragraphs stay opaque. This is a deliberate protocol boundary, not an
 indication that their native XML is discarded.
@@ -400,6 +415,13 @@ coordinates, appended an explicit closing point, and also normalized parent anch
 attributes. AiOffice preserves the authored non-closed polygon byte-for-byte on a
 no-op and exactly through its own unrelated edits. If another producer saves the
 file, the reopened projection truthfully reports that producer's new sequence.
+
+The dev41 percentage-position fixture confirms a different interoperability edge:
+AiOffice preserves the original `wp14` percentage children byte-for-byte on an
+exact no-op and preserves their signed Int32 values through unrelated edits.
+LibreOffice 26.8 currently rewrites those children to absolute `wp:posOffset`
+values on save. AiOffice therefore projects that new absolute state after an
+external save instead of claiming the percentage rule survived.
 
 ## Verified binary access
 
@@ -721,8 +743,8 @@ result.document.export("inserted.docx")
 ```
 
 Omitting `floating` creates the established inline form. Supplying one strict
-`FloatingImageLayout` creates the same conservative offset-or-alignment anchor with
-square, no-wrap, top-and-bottom, tight, or through wrapping that import and
+`FloatingImageLayout` creates the same conservative offset, alignment, or percentage
+anchor with square, no-wrap, top-and-bottom, tight, or through wrapping that import and
 `image.anchor.update` already understand:
 
 ```python
@@ -740,7 +762,7 @@ result = document.insert_image_after(
         },
         "vertical": {
             "relative_to": "paragraph",
-            "offset": {"value": 24, "unit": "pt"}
+            "percentage_offset": 12.5
         },
         "anchor_distances": {
             "top": {"value": 2, "unit": "pt"},
@@ -774,13 +796,13 @@ The contract is deliberately explicit:
   background, and supported borders around the picture's host paragraph;
 - placement defaults to `inline`; a non-null `floating` value selects floating
   placement and must validate as one complete `FloatingImageLayout`;
-- every horizontal and vertical position must select exactly one explicit `offset`
-  or allowed semantic `alignment`;
+- every horizontal and vertical position must select exactly one explicit `offset`,
+  allowed semantic `alignment`, or signed `percentage_offset`;
 - `wrap.mode` must be `square`, `none`, `top_and_bottom`, `tight`, or `through`;
   `side` is required for square/tight/through; tight/through also require a native
   ordered polygon; parent distances are optional and separate from schema-defined
   wrap-local geometry;
-- active simple-position or percentage-position anchors, malformed polygons, crop,
+- active simple-position anchors, relative-size extensions, malformed polygons, crop,
   rotation, effects, and other drawing features are not silently inferred.
 
 The native lowering adds or reuses the content-addressed image part, creates a fresh
@@ -789,10 +811,11 @@ relationship ID, creates a `w:p/w:r/w:drawing` tree with `wp:inline` or canonica
 `wp:docPr/@id` and `w14:paraId` values, applies the requested paragraph style,
 inserts at the proven body position, and then re-runs the conservative projection
 proof. The generated anchor uses inactive zero `simplePos`, horizontal and vertical
-positions expressed by the caller's selected offset or alignment mode, the caller's
-selected supported wrap child, and explicit flags. Optional Office 2010 anchor IDs
-are not invented. The operation either returns a fully readable and subsequently
-editable `ImageBlock` or leaves the original document unchanged.
+positions expressed by the caller's selected offset, alignment, or percentage mode,
+the caller's selected supported wrap child, and explicit flags. Percentage
+insertion also emits the namespace compatibility declaration. Optional Office 2010
+anchor IDs are not invented. The operation either returns a fully readable and
+subsequently editable `ImageBlock` or leaves the original document unchanged.
 
 If a third-party DOCX has no AiOffice identity manifest, the first successful
 structural insertion also attaches:
@@ -850,8 +873,8 @@ transaction while leaving the operation metadata explainable to an AI.
 These cases remain native and explicit `opaque`/read-only projections:
 
 - text plus a drawing in one paragraph;
-- active-simple-position, percentage-position, unsupported wrap-specific effects,
-  relative-size, malformed, or otherwise unsupported floating anchors;
+- active-simple-position, unsupported wrap-specific effects, relative-size,
+  malformed, or otherwise unsupported floating anchors;
 - non-default picture black-and-white modes or non-neutral shape fills;
 - multiple pictures or alternate representations;
 - linked or external images;

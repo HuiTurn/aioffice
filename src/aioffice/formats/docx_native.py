@@ -3698,6 +3698,7 @@ def apply_docx_operations(
                 )
             patch_simple_native_image_anchor(
                 updated,
+                part_roots[source_ref.part_uri],
                 mapped_elements[0],
                 source_part=source_ref.part_uri,
                 result=result_image,
@@ -3748,6 +3749,7 @@ def apply_docx_operations(
                 )
             inserted = insert_simple_native_image_after(
                 updated,
+                part_roots[source_ref.part_uri],
                 container,
                 mapped_elements,
                 source_part=source_ref.part_uri,

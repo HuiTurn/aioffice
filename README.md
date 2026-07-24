@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev40`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev41`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -25,7 +25,7 @@ rich table-cell paragraphs, explicit table/cell border control, paragraph
 background/border surfaces, conservative body and header/footer image projection,
 verified asset extraction, selective native image metadata and geometry updates,
 bounded rectangular source cropping,
-conservative offset/alignment floating-image anchor projection,
+conservative offset/alignment/percentage floating-image anchor projection,
 square/no-wrap/top-and-bottom/tight/through text wrapping, selective floating-anchor layout
 updates plus positioning and wrapping-mode switches,
 occurrence-scoped copy-on-write image replacement, addressable native inline and
@@ -117,7 +117,7 @@ insertion and deletion are not advertised: create or clone the complete reusable
 part first, then update or replace its projected image in a subsequent Patch.
 
 For a supported floating picture, `image["floating"]` preserves explicit horizontal
-and vertical reference frames with offset or alignment positioning, supported
+and vertical reference frames with offset, alignment, or percentage positioning, supported
 square/no-wrap/top-and-bottom/tight/through wrapping, optional parent-anchor
 distances, separate wrap-local distances, parent and wrap-child effect extents,
 ordered native tight/through polygons, relative height, behind-text behavior,
@@ -288,13 +288,25 @@ result = doc.insert_image_after(
 ```
 
 Each horizontal or vertical position uses exactly one mode: an explicit-unit
-`offset`, as above, or a semantic `alignment`. For example, a picture centered
-within the margins and the physical page uses:
+`offset`, a semantic `alignment`, or `percentage_offset` in percentage points of
+the selected frame. Percentage values have `0.001`-percentage-point native
+precision and may be negative. For example, a picture centered within the margins
+and the physical page uses:
 
 ```python
 floating = {
     "horizontal": {"relative_to": "margin", "alignment": "center"},
     "vertical": {"relative_to": "page", "alignment": "center"},
+    # The same complete wrap and flag fields shown above are still required.
+}
+```
+
+The Office 2010 percentage form is equally explicit:
+
+```python
+floating = {
+    "horizontal": {"relative_to": "page", "percentage_offset": 50},
+    "vertical": {"relative_to": "margin", "percentage_offset": 12.5},
     # The same complete wrap and flag fields shown above are still required.
 }
 ```
@@ -334,8 +346,8 @@ revision log.
 
 The read path re-resolves the trusted native paragraph and its story-local OPC
 relationship, then verifies the asset record, media type, size, and content hash
-before returning bytes. Mixed text/picture paragraphs, active simple-position or
-percentage-position anchors, unsupported wrap-specific effects, linked images,
+before returning bytes. Mixed text/picture paragraphs, active simple-position
+anchors, relative-size extensions, unsupported wrap-specific effects, linked images,
 multiple pictures, negative or overconstrained crop rectangles, transforms,
 effects, drawings in tables, complex header/footer drawings, VML, OLE, and embedded
 objects remain explicit opaque native content. They are preserved losslessly and

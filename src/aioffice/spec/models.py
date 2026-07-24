@@ -18,7 +18,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.40"
+SPEC_VERSION = "0.2-draft.41"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1053,14 +1053,38 @@ class FloatingImageHorizontalPosition(StrictModel):
                     "properties": {
                         "offset": {"not": {"type": "null"}},
                     },
-                    "not": {"required": ["alignment"]},
+                    "not": {
+                        "anyOf": [
+                            {"required": ["alignment"]},
+                            {"required": ["percentage_offset"]},
+                        ]
+                    },
                 },
                 {
                     "required": ["alignment"],
                     "properties": {
                         "alignment": {"not": {"type": "null"}},
                     },
-                    "not": {"required": ["offset"]},
+                    "not": {
+                        "anyOf": [
+                            {"required": ["offset"]},
+                            {"required": ["percentage_offset"]},
+                        ]
+                    },
+                },
+                {
+                    "required": ["percentage_offset"],
+                    "properties": {
+                        "percentage_offset": {
+                            "not": {"type": "null"}
+                        },
+                    },
+                    "not": {
+                        "anyOf": [
+                            {"required": ["offset"]},
+                            {"required": ["alignment"]},
+                        ]
+                    },
                 },
             ]
         },
@@ -1084,6 +1108,26 @@ class FloatingImageHorizontalPosition(StrictModel):
         "inside",
         "outside",
     ] | None = None
+    percentage_offset: float | None = Field(
+        default=None,
+        ge=-(2**31) / 1_000,
+        le=(2**31 - 1) / 1_000,
+        description=(
+            "Offset in percentage points of the selected layout frame; "
+            "quantized to the native OOXML 0.001-percentage-point unit."
+        ),
+    )
+
+    @field_validator("percentage_offset", mode="before")
+    @classmethod
+    def normalize_percentage_offset(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError(
+                "Floating image percentage offsets cannot be booleans."
+            )
+        if isinstance(value, (int, float)):
+            return round(float(value), 3)
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -1091,7 +1135,11 @@ class FloatingImageHorizontalPosition(StrictModel):
         if isinstance(value, Mapping):
             modes = {
                 field_name
-                for field_name in ("offset", "alignment")
+                for field_name in (
+                    "offset",
+                    "alignment",
+                    "percentage_offset",
+                )
                 if field_name in value
             }
             if (
@@ -1100,16 +1148,26 @@ class FloatingImageHorizontalPosition(StrictModel):
             ):
                 raise ValueError(
                     "Floating image horizontal position requires exactly "
-                    "one non-null offset or alignment."
+                    "one non-null offset, alignment, or percentage_offset."
                 )
         return value
 
     @model_validator(mode="after")
-    def validate_offset(self) -> "FloatingImageHorizontalPosition":
-        if (self.offset is None) == (self.alignment is None):
+    def validate_position(self) -> "FloatingImageHorizontalPosition":
+        if (
+            sum(
+                value is not None
+                for value in (
+                    self.offset,
+                    self.alignment,
+                    self.percentage_offset,
+                )
+            )
+            != 1
+        ):
             raise ValueError(
                 "Floating image horizontal position requires exactly one of "
-                "offset or alignment."
+                "offset, alignment, or percentage_offset."
             )
         if self.offset is not None:
             emu = round(self.offset.to_points() * 12_700)
@@ -1117,6 +1175,13 @@ class FloatingImageHorizontalPosition(StrictModel):
                 raise ValueError(
                     "Floating image horizontal offset must fit an OOXML "
                     "Int64 EMU."
+                )
+        if self.percentage_offset is not None:
+            native_percentage = round(self.percentage_offset * 1_000)
+            if native_percentage < -(2**31) or native_percentage > 2**31 - 1:
+                raise ValueError(
+                    "Floating image horizontal percentage offset must fit "
+                    "an OOXML Int32 ST_Percentage."
                 )
         return self
 
@@ -1135,14 +1200,38 @@ class FloatingImageVerticalPosition(StrictModel):
                     "properties": {
                         "offset": {"not": {"type": "null"}},
                     },
-                    "not": {"required": ["alignment"]},
+                    "not": {
+                        "anyOf": [
+                            {"required": ["alignment"]},
+                            {"required": ["percentage_offset"]},
+                        ]
+                    },
                 },
                 {
                     "required": ["alignment"],
                     "properties": {
                         "alignment": {"not": {"type": "null"}},
                     },
-                    "not": {"required": ["offset"]},
+                    "not": {
+                        "anyOf": [
+                            {"required": ["offset"]},
+                            {"required": ["percentage_offset"]},
+                        ]
+                    },
+                },
+                {
+                    "required": ["percentage_offset"],
+                    "properties": {
+                        "percentage_offset": {
+                            "not": {"type": "null"}
+                        },
+                    },
+                    "not": {
+                        "anyOf": [
+                            {"required": ["offset"]},
+                            {"required": ["alignment"]},
+                        ]
+                    },
                 },
             ]
         },
@@ -1166,6 +1255,26 @@ class FloatingImageVerticalPosition(StrictModel):
         "inside",
         "outside",
     ] | None = None
+    percentage_offset: float | None = Field(
+        default=None,
+        ge=-(2**31) / 1_000,
+        le=(2**31 - 1) / 1_000,
+        description=(
+            "Offset in percentage points of the selected layout frame; "
+            "quantized to the native OOXML 0.001-percentage-point unit."
+        ),
+    )
+
+    @field_validator("percentage_offset", mode="before")
+    @classmethod
+    def normalize_percentage_offset(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError(
+                "Floating image percentage offsets cannot be booleans."
+            )
+        if isinstance(value, (int, float)):
+            return round(float(value), 3)
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -1173,7 +1282,11 @@ class FloatingImageVerticalPosition(StrictModel):
         if isinstance(value, Mapping):
             modes = {
                 field_name
-                for field_name in ("offset", "alignment")
+                for field_name in (
+                    "offset",
+                    "alignment",
+                    "percentage_offset",
+                )
                 if field_name in value
             }
             if (
@@ -1182,16 +1295,26 @@ class FloatingImageVerticalPosition(StrictModel):
             ):
                 raise ValueError(
                     "Floating image vertical position requires exactly "
-                    "one non-null offset or alignment."
+                    "one non-null offset, alignment, or percentage_offset."
                 )
         return value
 
     @model_validator(mode="after")
-    def validate_offset(self) -> "FloatingImageVerticalPosition":
-        if (self.offset is None) == (self.alignment is None):
+    def validate_position(self) -> "FloatingImageVerticalPosition":
+        if (
+            sum(
+                value is not None
+                for value in (
+                    self.offset,
+                    self.alignment,
+                    self.percentage_offset,
+                )
+            )
+            != 1
+        ):
             raise ValueError(
                 "Floating image vertical position requires exactly one of "
-                "offset or alignment."
+                "offset, alignment, or percentage_offset."
             )
         if self.offset is not None:
             emu = round(self.offset.to_points() * 12_700)
@@ -1199,6 +1322,13 @@ class FloatingImageVerticalPosition(StrictModel):
                 raise ValueError(
                     "Floating image vertical offset must fit an OOXML "
                     "Int64 EMU."
+                )
+        if self.percentage_offset is not None:
+            native_percentage = round(self.percentage_offset * 1_000)
+            if native_percentage < -(2**31) or native_percentage > 2**31 - 1:
+                raise ValueError(
+                    "Floating image vertical percentage offset must fit "
+                    "an OOXML Int32 ST_Percentage."
                 )
         return self
 
@@ -1873,6 +2003,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.38",
         "0.2-draft.39",
         "0.2-draft.40",
+        "0.2-draft.41",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

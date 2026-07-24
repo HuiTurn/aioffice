@@ -27,6 +27,7 @@ R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 IMAGE_RELATIONSHIP_TYPE = (
@@ -90,12 +91,19 @@ def _image_document(
     mixed_text: str | None = None,
     anchored: bool = False,
     aligned: bool = False,
+    percentage_position: bool = False,
     wrap_mode: str = "square",
     cropped: bool = False,
     alt_text: str | None = "A compact expert workflow diagram",
 ) -> bytes:
-    if aligned and not anchored:
-        raise ValueError("Aligned positioning requires a floating anchor.")
+    if (aligned or percentage_position) and not anchored:
+        raise ValueError(
+            "Alternative positioning requires a floating anchor."
+        )
+    if aligned and percentage_position:
+        raise ValueError(
+            "Alignment and percentage positioning are mutually exclusive."
+        )
     if wrap_mode not in {
         "square",
         "none",
@@ -169,8 +177,18 @@ def _image_document(
         )
         ET.SubElement(
             horizontal,
-            _q(WP, "align" if aligned else "posOffset"),
-        ).text = "center" if aligned else "457200"
+            (
+                _q(WP14, "pctPosHOffset")
+                if percentage_position
+                else _q(WP, "align" if aligned else "posOffset")
+            ),
+        ).text = (
+            "37500"
+            if percentage_position
+            else "center"
+            if aligned
+            else "457200"
+        )
         vertical = ET.SubElement(
             placement,
             _q(WP, "positionV"),
@@ -178,8 +196,18 @@ def _image_document(
         )
         ET.SubElement(
             vertical,
-            _q(WP, "align" if aligned else "posOffset"),
-        ).text = "bottom" if aligned else "5080"
+            (
+                _q(WP14, "pctPosVOffset")
+                if percentage_position
+                else _q(WP, "align" if aligned else "posOffset")
+            ),
+        ).text = (
+            "-12500"
+            if percentage_position
+            else "bottom"
+            if aligned
+            else "5080"
+        )
     ET.SubElement(
         placement,
         _q(WP, "extent"),
@@ -343,6 +371,7 @@ def _header_image_document(
     cropped: bool = False,
     anchored: bool = False,
     aligned: bool = False,
+    percentage_position: bool = False,
     wrap_mode: str = "square",
 ) -> bytes:
     assert kind in {"header", "footer"}
@@ -350,6 +379,7 @@ def _header_image_document(
         cropped=cropped,
         anchored=anchored,
         aligned=aligned,
+        percentage_position=percentage_position,
         wrap_mode=wrap_mode,
     )
     with ZipFile(io.BytesIO(body_image)) as archive:
@@ -460,7 +490,12 @@ class DocxImageTests(unittest.TestCase):
             ),
             (
                 "floating-image-horizontal-position",
-                {"relative_to", "offset", "alignment"},
+                {
+                    "relative_to",
+                    "offset",
+                    "alignment",
+                    "percentage_offset",
+                },
             ),
             (
                 "floating-image-text-distances",
@@ -468,7 +503,12 @@ class DocxImageTests(unittest.TestCase):
             ),
             (
                 "floating-image-vertical-position",
-                {"relative_to", "offset", "alignment"},
+                {
+                    "relative_to",
+                    "offset",
+                    "alignment",
+                    "percentage_offset",
+                },
             ),
             (
                 "floating-image-text-wrap",
@@ -559,7 +599,11 @@ class DocxImageTests(unittest.TestCase):
                         tuple(branch["required"])
                         for branch in schema["oneOf"]
                     },
-                    {("offset",), ("alignment",)},
+                    {
+                        ("offset",),
+                        ("alignment",),
+                        ("percentage_offset",),
+                    },
                 )
                 for branch in schema["oneOf"]:
                     mode = branch["required"][0]
@@ -656,7 +700,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.40")
+        self.assertEqual(spec["spec_version"], "0.2-draft.41")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -1536,12 +1580,15 @@ class DocxImageTests(unittest.TestCase):
             capabilities["projected_placements"],
             [
                 "inline",
-                "floating_offset_or_alignment_supported_wrap",
+                (
+                    "floating_offset_alignment_or_percentage_"
+                    "supported_wrap"
+                ),
             ],
         )
         self.assertEqual(
             capabilities["floating_position_modes"],
-            ["offset", "alignment"],
+            ["offset", "alignment", "percentage_offset"],
         )
         self.assertEqual(
             capabilities["floating_horizontal_alignments"],
@@ -1693,6 +1740,142 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             roundtripped.image_bytes(image["id"]),
             PNG,
+        )
+
+    def test_floating_percentage_positions_project_switch_and_roundtrip(
+        self,
+    ) -> None:
+        source = _image_document(
+            anchored=True,
+            percentage_position=True,
+            cropped=True,
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(
+            image["floating"]["horizontal"],
+            {
+                "relative_to": "column",
+                "percentage_offset": 37.5,
+            },
+        )
+        self.assertEqual(
+            image["floating"]["vertical"],
+            {
+                "relative_to": "paragraph",
+                "percentage_offset": -12.5,
+            },
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+        capabilities = document.capabilities()["assets"]
+        self.assertEqual(
+            capabilities["floating_percentage_offset_unit"],
+            "percentage_points",
+        )
+        self.assertEqual(
+            capabilities["floating_percentage_offset_precision"],
+            0.001,
+        )
+        self.assertEqual(
+            capabilities["floating_percentage_offset_native_type"],
+            "signed_int32_st_percentage",
+        )
+        self.assertEqual(
+            capabilities["floating_percentage_offset_bounds"],
+            {
+                "minimum": -2147483.648,
+                "maximum": 2147483.647,
+            },
+        )
+
+        updated = document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": {
+                        "horizontal": {
+                            "relative_to": "page",
+                            "percentage_offset": 62.3454,
+                        },
+                        "vertical": {
+                            "relative_to": "margin",
+                            "alignment": "bottom",
+                        },
+                    },
+                }
+            ]
+        )
+        self.assertTrue(updated.success, updated.model_dump())
+        assert updated.document is not None
+        updated_bytes = updated.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(updated_bytes)) as package:
+            native_xml = package.read("word/document.xml")
+            root = parse_xml(native_xml)
+        horizontal = root.find(f".//{_q(WP, 'positionH')}")
+        vertical = root.find(f".//{_q(WP, 'positionV')}")
+        assert horizontal is not None
+        assert vertical is not None
+        self.assertEqual(horizontal.get("relativeFrom"), "page")
+        self.assertEqual(
+            [child.tag for child in horizontal],
+            [_q(WP14, "pctPosHOffset")],
+        )
+        self.assertEqual(horizontal[0].text, "62345")
+        self.assertEqual(vertical.get("relativeFrom"), "margin")
+        self.assertEqual(vertical[0].tag, _q(WP, "align"))
+        self.assertEqual(vertical[0].text, "bottom")
+        self.assertIn(
+            "wp14",
+            (root.get(_q(MC, "Ignorable")) or "").split(),
+        )
+        self.assertIn(b"xmlns:wp14=", native_xml)
+
+        reopened = Document.from_docx(updated_bytes)
+        self.assertEqual(
+            reopened.to_spec()["content"][0]["floating"]["horizontal"],
+            {
+                "relative_to": "page",
+                "percentage_offset": 62.345,
+            },
+        )
+        self.assertEqual(reopened.to_bytes("docx"), updated_bytes)
+
+        metadata_updated = reopened.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "alt_text": "Percentage-positioned expert diagram",
+                    },
+                }
+            ]
+        )
+        self.assertTrue(
+            metadata_updated.success,
+            metadata_updated.model_dump(),
+        )
+        assert metadata_updated.document is not None
+        self.assertEqual(
+            metadata_updated.document.to_spec()["content"][0][
+                "floating"
+            ],
+            reopened.to_spec()["content"][0]["floating"],
+        )
+        with ZipFile(
+            io.BytesIO(metadata_updated.document.to_bytes("docx"))
+        ) as package:
+            metadata_root = parse_xml(
+                package.read("word/document.xml")
+            )
+        metadata_horizontal = metadata_root.find(
+            f".//{_q(WP, 'positionH')}"
+        )
+        assert metadata_horizontal is not None
+        self.assertEqual(
+            ET.tostring(metadata_horizontal),
+            ET.tostring(horizontal),
         )
 
     def test_libreoffice_neutral_picture_normalization_is_editable(
@@ -2016,6 +2199,37 @@ class DocxImageTests(unittest.TestCase):
                 "op": "image.anchor.update",
                 "target": image["id"],
                 "set": {
+                    "horizontal": {
+                        "relative_to": "page",
+                        "alignment": "center",
+                        "percentage_offset": 50,
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "horizontal": {
+                        "relative_to": "page",
+                        "percentage_offset": True,
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "horizontal": {
+                        "relative_to": "page",
+                        "percentage_offset": 2147483.648,
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
                     "vertical": {
                         "relative_to": "page",
                         "alignment": "middle",
@@ -2266,6 +2480,10 @@ class DocxImageTests(unittest.TestCase):
         cases = (
             "duplicate_position_mode",
             "invalid_alignment_position",
+            "percentage_attribute",
+            "percentage_non_integer",
+            "percentage_out_of_range",
+            "percentage_wrong_axis",
             "simple_position",
             "tight_wrap",
             "tight_top_distance",
@@ -2306,6 +2524,31 @@ class DocxImageTests(unittest.TestCase):
                 position.clear()
                 position.attrib["relativeFrom"] = "margin"
                 ET.SubElement(position, _q(WP, "align")).text = "middle"
+            elif case.startswith("percentage_"):
+                position = anchor.find(f"./{_q(WP, 'positionH')}")
+                assert position is not None
+                position.clear()
+                position.attrib["relativeFrom"] = "margin"
+                percentage = ET.SubElement(
+                    position,
+                    _q(
+                        WP14,
+                        (
+                            "pctPosVOffset"
+                            if case == "percentage_wrong_axis"
+                            else "pctPosHOffset"
+                        ),
+                    ),
+                )
+                percentage.text = (
+                    "12.5"
+                    if case == "percentage_non_integer"
+                    else "2147483648"
+                    if case == "percentage_out_of_range"
+                    else "12500"
+                )
+                if case == "percentage_attribute":
+                    percentage.set("unexpected", "1")
             elif case == "simple_position":
                 anchor.attrib["simplePos"] = "1"
             elif case == "tight_wrap":
@@ -3924,6 +4167,110 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(reopened.image_bytes(image["id"]), PNG)
 
+    def test_percentage_floating_header_clone_updates_story_locally(
+        self,
+    ) -> None:
+        source = _header_image_document(
+            anchored=True,
+            percentage_position=True,
+            wrap_mode="none",
+        )
+        document = Document.from_docx(source)
+        spec = document.to_spec()
+        source_part = spec["header_footers"][0]
+        source_image = source_part["content"][0]
+        self.assertEqual(
+            source_image["floating"]["horizontal"],
+            {
+                "relative_to": "column",
+                "percentage_offset": 37.5,
+            },
+        )
+        section_id = spec["sections"][0]["id"]
+        cloned = document.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": f"#{source_part['id']}",
+                    "part": {"id": "percentage_clone_header"},
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": f"#{section_id}",
+                    "set": {
+                        "header_default": "percentage_clone_header",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(cloned.success, cloned.model_dump())
+        assert cloned.document is not None
+        clone_part = next(
+            part
+            for part in cloned.document.to_spec()["header_footers"]
+            if part["id"] == "percentage_clone_header"
+        )
+        clone_image = clone_part["content"][0]
+        self.assertEqual(
+            clone_image["floating"],
+            source_image["floating"],
+        )
+
+        updated = cloned.document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": f"#{clone_image['id']}",
+                    "set": {
+                        "horizontal": {
+                            "relative_to": "page",
+                            "percentage_offset": 75.25,
+                        },
+                    },
+                }
+            ]
+        )
+        self.assertTrue(updated.success, updated.model_dump())
+        assert updated.document is not None
+        updated_parts = {
+            part["id"]: part
+            for part in updated.document.to_spec()["header_footers"]
+        }
+        self.assertEqual(
+            updated_parts[source_part["id"]]["content"][0][
+                "floating"
+            ]["horizontal"]["percentage_offset"],
+            37.5,
+        )
+        self.assertEqual(
+            updated_parts["percentage_clone_header"]["content"][0][
+                "floating"
+            ]["horizontal"],
+            {
+                "relative_to": "page",
+                "percentage_offset": 75.25,
+            },
+        )
+
+        output = updated.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            source_root = parse_xml(package.read("word/header1.xml"))
+            clone_root = parse_xml(package.read("word/header2.xml"))
+        source_percentage = source_root.find(
+            f".//{_q(WP14, 'pctPosHOffset')}"
+        )
+        clone_percentage = clone_root.find(
+            f".//{_q(WP14, 'pctPosHOffset')}"
+        )
+        assert source_percentage is not None
+        assert clone_percentage is not None
+        self.assertEqual(source_percentage.text, "37500")
+        self.assertEqual(clone_percentage.text, "75250")
+        self.assertIn(
+            "wp14",
+            (clone_root.get(_q(MC, "Ignorable")) or "").split(),
+        )
+
     def test_cloned_header_image_can_be_replaced_copy_on_write(
         self,
     ) -> None:
@@ -4520,7 +4867,10 @@ class DocxImageTests(unittest.TestCase):
             capabilities["insert_placements"],
             [
                 "inline",
-                "floating_offset_or_alignment_supported_wrap",
+                (
+                    "floating_offset_alignment_or_percentage_"
+                    "supported_wrap"
+                ),
             ],
         )
         self.assertEqual(
@@ -4751,6 +5101,78 @@ class DocxImageTests(unittest.TestCase):
             resized.document.image_bytes("aligned_floating_diagram"),
             JPEG,
         )
+
+    def test_insert_image_after_creates_percentage_floating_picture(
+        self,
+    ) -> None:
+        document = Document.from_docx(
+            _image_document(preceding_text="Before")
+        )
+        layout = {
+            "horizontal": {
+                "relative_to": "page",
+                "percentage_offset": 50.125,
+            },
+            "vertical": {
+                "relative_to": "margin",
+                "percentage_offset": -7.5,
+            },
+            "wrap": {"mode": "none"},
+            "relative_height": 8192,
+            "behind_text": True,
+            "locked": False,
+            "layout_in_cell": True,
+            "allow_overlap": True,
+        }
+        result = document.insert_image_after(
+            "#before",
+            JPEG,
+            width={"value": 2, "unit": "in"},
+            height={"value": 1, "unit": "in"},
+            alt_text="Percentage-positioned floating diagram",
+            media_type="image/jpeg",
+            image_id="percentage_floating_diagram",
+            floating=layout,
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        inserted = result.document.to_spec()["content"][1]
+        self.assertEqual(inserted["floating"], layout)
+
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            native_xml = package.read("word/document.xml")
+            root = parse_xml(native_xml)
+        anchor = root.find(f".//{_q(WP, 'anchor')}")
+        assert anchor is not None
+        horizontal = anchor.find(f"./{_q(WP, 'positionH')}")
+        vertical = anchor.find(f"./{_q(WP, 'positionV')}")
+        assert horizontal is not None
+        assert vertical is not None
+        self.assertEqual(
+            horizontal[0].tag,
+            _q(WP14, "pctPosHOffset"),
+        )
+        self.assertEqual(horizontal[0].text, "50125")
+        self.assertEqual(
+            vertical[0].tag,
+            _q(WP14, "pctPosVOffset"),
+        )
+        self.assertEqual(vertical[0].text, "-7500")
+        self.assertIn(
+            "wp14",
+            (root.get(_q(MC, "Ignorable")) or "").split(),
+        )
+        self.assertIn(b"xmlns:wp14=", native_xml)
+
+        reopened = Document.from_docx(output)
+        reopened_image = reopened.to_spec()["content"][1]
+        self.assertEqual(reopened_image["floating"], layout)
+        self.assertEqual(
+            reopened.image_bytes("percentage_floating_diagram"),
+            JPEG,
+        )
+        self.assertEqual(reopened.to_bytes("docx"), output)
 
     def test_insert_image_after_rejects_unsafe_requests_atomically(self) -> None:
         source = _image_document(preceding_text="Before")
@@ -5395,7 +5817,10 @@ class DocxImageTests(unittest.TestCase):
                 ]["placements"],
                 [
                     "inline",
-                    "floating_offset_or_alignment_supported_wrap",
+                    (
+                        "floating_offset_alignment_or_percentage_"
+                        "supported_wrap"
+                    ),
                 ],
             )
             patch_path = (
