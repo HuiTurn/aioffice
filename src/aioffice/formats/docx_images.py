@@ -1331,7 +1331,7 @@ def _next_drawing_id(
     return candidate
 
 
-def insert_simple_inline_image_after(
+def insert_simple_native_image_after(
     package: NativePackage,
     container: ET.Element,
     after_elements: list[ET.Element],
@@ -1341,7 +1341,7 @@ def insert_simple_inline_image_after(
     asset: AssetRef,
     payload: bytes,
 ) -> ET.Element:
-    """Insert one conservative inline-picture paragraph after mapped elements."""
+    """Insert one conservative native-picture paragraph after mapped elements."""
 
     if (
         source_part != "/word/document.xml"
@@ -1384,17 +1384,120 @@ def insert_simple_inline_image_after(
     )
     run = ET.SubElement(paragraph, _q(W, "r"))
     drawing = ET.SubElement(run, _q(W, "drawing"))
-    inline = ET.SubElement(drawing, _q(WP, "inline"))
+    if image.placement == "floating":
+        layout = image.floating
+        if layout is None:
+            raise NativePackageError(
+                "Floating image insertion has no validated anchor layout."
+            )
+        horizontal_frame = _HORIZONTAL_RELATIVE_TO_NATIVE.get(
+            layout.horizontal.relative_to
+        )
+        vertical_frame = _VERTICAL_RELATIVE_TO_NATIVE.get(
+            layout.vertical.relative_to
+        )
+        wrap_side = _WRAP_SIDE_TO_NATIVE.get(layout.wrap.side)
+        horizontal_offset = round(
+            layout.horizontal.offset.to_points() * EMU_PER_POINT
+        )
+        vertical_offset = round(
+            layout.vertical.offset.to_points() * EMU_PER_POINT
+        )
+        distances = {
+            attribute_name: round(
+                getattr(layout.wrap, field_name).to_points()
+                * EMU_PER_POINT
+            )
+            for field_name, attribute_name in (
+                ("distance_top", "distT"),
+                ("distance_right", "distR"),
+                ("distance_bottom", "distB"),
+                ("distance_left", "distL"),
+            )
+        }
+        if (
+            horizontal_frame is None
+            or vertical_frame is None
+            or wrap_side is None
+            or horizontal_offset < -(2**63)
+            or horizontal_offset > 2**63 - 1
+            or vertical_offset < -(2**63)
+            or vertical_offset > 2**63 - 1
+            or any(
+                value < 0 or value > 2**32 - 1
+                for value in distances.values()
+            )
+        ):
+            raise NativePackageError(
+                "Floating image insertion layout is outside the supported "
+                "native range."
+            )
+        placement = ET.SubElement(
+            drawing,
+            _q(WP, "anchor"),
+            {
+                **{
+                    attribute_name: str(value)
+                    for attribute_name, value in distances.items()
+                },
+                "simplePos": "0",
+                "relativeHeight": str(layout.relative_height),
+                "behindDoc": "1" if layout.behind_text else "0",
+                "locked": "1" if layout.locked else "0",
+                "layoutInCell": (
+                    "1" if layout.layout_in_cell else "0"
+                ),
+                "allowOverlap": (
+                    "1" if layout.allow_overlap else "0"
+                ),
+            },
+        )
+        ET.SubElement(
+            placement,
+            _q(WP, "simplePos"),
+            {"x": "0", "y": "0"},
+        )
+        horizontal = ET.SubElement(
+            placement,
+            _q(WP, "positionH"),
+            {"relativeFrom": horizontal_frame},
+        )
+        ET.SubElement(
+            horizontal,
+            _q(WP, "posOffset"),
+        ).text = str(horizontal_offset)
+        vertical = ET.SubElement(
+            placement,
+            _q(WP, "positionV"),
+            {"relativeFrom": vertical_frame},
+        )
+        ET.SubElement(
+            vertical,
+            _q(WP, "posOffset"),
+        ).text = str(vertical_offset)
+    else:
+        placement = ET.SubElement(drawing, _q(WP, "inline"))
     ET.SubElement(
-        inline,
+        placement,
         _q(WP, "extent"),
         {"cx": str(width_emu), "cy": str(height_emu)},
     )
     ET.SubElement(
-        inline,
+        placement,
         _q(WP, "effectExtent"),
         {"l": "0", "t": "0", "r": "0", "b": "0"},
     )
+    if image.placement == "floating":
+        assert image.floating is not None
+        ET.SubElement(
+            placement,
+            _q(WP, "wrapSquare"),
+            {
+                "wrapText": _WRAP_SIDE_TO_NATIVE[
+                    image.floating.wrap.side
+                ]
+            },
+        )
     document_properties = {
         "id": str(_next_drawing_id(package, container)),
         "name": image.name or asset.filename or "AiOffice image",
@@ -1403,12 +1506,12 @@ def insert_simple_inline_image_after(
     if image.title is not None:
         document_properties["title"] = image.title
     ET.SubElement(
-        inline,
+        placement,
         _q(WP, "docPr"),
         document_properties,
     )
     frame_properties = ET.SubElement(
-        inline,
+        placement,
         _q(WP, "cNvGraphicFramePr"),
     )
     ET.SubElement(
@@ -1416,7 +1519,7 @@ def insert_simple_inline_image_after(
         _q(A, "graphicFrameLocks"),
         {"noChangeAspect": "1"},
     )
-    graphic = ET.SubElement(inline, _q(A, "graphic"))
+    graphic = ET.SubElement(placement, _q(A, "graphic"))
     graphic_data = ET.SubElement(
         graphic,
         _q(A, "graphicData"),
@@ -1475,6 +1578,11 @@ def insert_simple_inline_image_after(
         != height_emu
         or projected.alt_text != image.alt_text
         or projected.title != image.title
+        or projected.placement != image.placement
+        or not floating_image_layout_matches(
+            projected.floating,
+            image.floating,
+        )
     ):
         raise NativePackageError(
             "image.insert_after would create an unsupported native picture."
@@ -1487,7 +1595,7 @@ __all__ = [
     "IMAGE_RELATIONSHIP_TYPE",
     "SimpleNativeImage",
     "floating_image_layout_matches",
-    "insert_simple_inline_image_after",
+    "insert_simple_native_image_after",
     "patch_simple_native_image_anchor",
     "patch_simple_native_image",
     "replace_simple_native_image",

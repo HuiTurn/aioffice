@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev35`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev36`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -27,11 +27,10 @@ verified asset extraction, selective native image metadata and geometry updates,
 bounded rectangular source cropping,
 conservative floating-image anchor projection,
 selective floating-anchor layout updates,
-occurrence-scoped copy-on-write image replacement, addressable native inline image
-insertion, direct image-paragraph layout formatting, semantic diffs, isolated
-LibreOffice/Poppler native rendering, safe reusable native header/footer creation,
-cloning, and binding, root
-append plus bidirectional stable-ID native
+occurrence-scoped copy-on-write image replacement, addressable native inline and
+floating image insertion, direct image-paragraph layout formatting, semantic diffs,
+isolated LibreOffice/Poppler native rendering, safe reusable native header/footer
+creation, cloning, and binding, root append plus bidirectional stable-ID native
 paragraph/heading/page-break/list/table insertion and block reordering, consistent
 multi-page evidence, page occupancy diagnostics, visual-regression contracts, and
 fidelity reports.
@@ -228,7 +227,8 @@ stable image ID, displayed extent, source crop, alternative text, and title. Oth
 occurrences that shared the old image remain unchanged. Raw JSON Patch cannot carry
 the binary.
 
-New inline pictures use the same bounded asset channel and require explicit layout:
+New inline or conservative floating pictures use the same bounded asset channel and
+require explicit layout:
 
 ```python
 result = doc.insert_image_after(
@@ -244,6 +244,43 @@ assert result.success
 result.document.export("inserted.docx")
 ```
 
+Inline remains the default. Pass the same strict layout object used by projected
+floating pictures to create a canonical editable anchor:
+
+```python
+result = doc.insert_image_after(
+    "#status",
+    "assets/expert-workflow.png",
+    width={"value": 3, "unit": "in"},
+    height={"value": 1.5, "unit": "in"},
+    alt_text="Expert workflow with three approval stages",
+    image_id="floating_workflow",
+    floating={
+        "horizontal": {
+            "relative_to": "column",
+            "offset": {"value": 1, "unit": "in"},
+        },
+        "vertical": {
+            "relative_to": "paragraph",
+            "offset": {"value": 12, "unit": "pt"},
+        },
+        "wrap": {
+            "mode": "square",
+            "side": "both_sides",
+            "distance_top": {"value": 4, "unit": "pt"},
+            "distance_right": {"value": 8, "unit": "pt"},
+            "distance_bottom": {"value": 4, "unit": "pt"},
+            "distance_left": {"value": 8, "unit": "pt"},
+        },
+        "relative_height": 1024,
+        "behind_text": False,
+        "locked": False,
+        "layout_in_cell": True,
+        "allow_overlap": True,
+    },
+)
+```
+
 The target must be a mapped top-level body node. AiOffice inserts after its last
 native element, which keeps multi-paragraph lists addressable as one semantic node.
 The new paragraph, DrawingML geometry, relationship, asset and identity manifest are
@@ -257,7 +294,8 @@ aioffice extract-image existing.docx IMAGE_ID -o extracted.png
 aioffice replace-image existing.docx IMAGE_ID replacement.png -o replaced.docx
 aioffice insert-image-after existing.docx TARGET replacement.png \
   --width 3 --width-unit in --height 1.5 --height-unit in \
-  --alt-text "Expert workflow" --align center -o inserted.docx
+  --alt-text "Expert workflow" --floating-layout floating-layout.json \
+  -o inserted.docx
 ```
 
 Persistent workspaces expose the same operations through

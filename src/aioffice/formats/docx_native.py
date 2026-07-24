@@ -55,7 +55,7 @@ from aioffice.formats.docx_fields import (
     patch_field_instruction,
 )
 from aioffice.formats.docx_images import (
-    insert_simple_inline_image_after,
+    insert_simple_native_image_after,
     patch_simple_native_image_anchor,
     patch_simple_native_image,
     replace_simple_native_image,
@@ -3745,7 +3745,7 @@ def apply_docx_operations(
                 raise NativePackageError(
                     "image.insert_after result does not contain its new image."
                 )
-            inserted = insert_simple_inline_image_after(
+            inserted = insert_simple_native_image_after(
                 updated,
                 container,
                 mapped_elements,

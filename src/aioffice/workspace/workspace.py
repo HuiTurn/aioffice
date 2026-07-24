@@ -26,7 +26,11 @@ from aioffice.native import (
     build_identity_manifest,
 )
 from aioffice.security import SecurityPolicy
-from aioffice.spec.models import Length, ParagraphStyle
+from aioffice.spec.models import (
+    FloatingImageLayout,
+    Length,
+    ParagraphStyle,
+)
 
 from .models import ArtifactEntry, PatchRecord, WorkspaceIndex
 
@@ -160,6 +164,7 @@ class Workspace:
                 "section.insert_before",
                 "section.format",
                 "field.update",
+                "image.anchor.update",
                 "image.update",
                 "table.format",
                 "table.column.format",
@@ -175,6 +180,11 @@ class Workspace:
                     "api": "Workspace.insert_image_after",
                     "transport": "out_of_band",
                     "recorded_binary": False,
+                    "placements": [
+                        "inline",
+                        "floating_offset_square_wrap",
+                    ],
+                    "default_placement": "inline",
                 }
             },
             "revision_store": True,
@@ -395,6 +405,7 @@ class Workspace:
         image_id: str | None = None,
         name: str | None = None,
         title: str | None = None,
+        floating: FloatingImageLayout | Mapping[str, Any] | None = None,
         paragraph_style: ParagraphStyle | Mapping[str, Any] | None = None,
         dry_run: bool = False,
         base_revision: int | None = None,
@@ -418,6 +429,7 @@ class Workspace:
             image_id=image_id,
             name=name,
             title=title,
+            floating=floating,
             paragraph_style=paragraph_style,
             dry_run=dry_run,
             base_revision=expected_revision,
@@ -465,6 +477,8 @@ class Workspace:
             field_name: deepcopy(inserted[field_name])
             for field_name in (
                 "id",
+                "placement",
+                "floating",
                 "width",
                 "height",
                 "name",

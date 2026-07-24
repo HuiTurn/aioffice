@@ -17,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.35"
+SPEC_VERSION = "0.2-draft.36"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1288,9 +1288,11 @@ class ImageUpdate(StrictModel):
 
 
 class ImageInsert(StrictModel):
-    """Fields accepted by the out-of-band inline image insertion API."""
+    """Fields accepted by the out-of-band native image insertion API."""
 
     id: NodeId = Field(default_factory=lambda: new_id("image"))
+    placement: Literal["inline", "floating"] = "inline"
+    floating: FloatingImageLayout | None = None
     width: Length
     height: Length
     name: str | None = Field(default=None, min_length=1, max_length=1024)
@@ -1300,6 +1302,11 @@ class ImageInsert(StrictModel):
 
     @model_validator(mode="after")
     def validate_values(self) -> "ImageInsert":
+        if (self.placement == "floating") != (self.floating is not None):
+            raise ValueError(
+                "Floating image insertion requires floating layout, and "
+                "inline insertion forbids it."
+            )
         for field_name in ("width", "height"):
             value = getattr(self, field_name)
             emu = round(value.to_points() * 12_700)
@@ -1407,6 +1414,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.33",
         "0.2-draft.34",
         "0.2-draft.35",
+        "0.2-draft.36",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

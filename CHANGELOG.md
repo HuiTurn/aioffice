@@ -89,6 +89,15 @@
 - Made `image.anchor.update` compose with `image.update` in either order within one
   atomic Patch and exposed occurrence-specific operations, strict schema, and
   machine-readable capability fields for AI planning.
+- Extended `ImageInsert`, `Document.insert_image_after()`, CLI, and Workspace
+  insertion with an optional strict `FloatingImageLayout`, while retaining inline
+  placement as the compatibility default.
+- Added canonical `wp:anchor` lowering for new offset-positioned, square-wrapped
+  pictures with explicit text distances, stacking, flags, coordinated extents,
+  collision-free paragraph/drawing IDs, and immediate conservative re-projection.
+- Kept floating insertion on the existing bounded out-of-band binary channel,
+  persisted only placement/layout and verified asset metadata, and made every
+  inserted floating occurrence immediately readable and anchor-editable.
 - Preserved story-local relationship semantics while replacing a cloned header or
   footer logo copy-on-write, leaving the source story, relationship, media, body, and
   unrelated pages untouched.
@@ -443,6 +452,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.33`.
 - Advanced the AiOffice Document Spec to `0.2-draft.34`.
 - Advanced the AiOffice Document Spec to `0.2-draft.35`.
+- Advanced the AiOffice Document Spec to `0.2-draft.36`.
 
 ## 0.1.0
 

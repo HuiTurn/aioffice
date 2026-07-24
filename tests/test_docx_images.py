@@ -448,6 +448,8 @@ class DocxImageTests(unittest.TestCase):
                 "image-insert",
                 {
                     "id",
+                    "placement",
+                    "floating",
                     "width",
                     "height",
                     "alt_text",
@@ -489,7 +491,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.35")
+        self.assertEqual(spec["spec_version"], "0.2-draft.36")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -3092,6 +3094,204 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(reopened.image_bytes("inserted_chart"), JPEG)
 
+    def test_insert_image_after_creates_editable_native_floating_picture(
+        self,
+    ) -> None:
+        source = _image_document(preceding_text="Before")
+        document = Document.from_docx(source)
+        layout = {
+            "horizontal": {
+                "relative_to": "column",
+                "offset": {"value": 1, "unit": "in"},
+            },
+            "vertical": {
+                "relative_to": "paragraph",
+                "offset": {"value": 0.5, "unit": "in"},
+            },
+            "wrap": {
+                "mode": "square",
+                "side": "both_sides",
+                "distance_top": {"value": 2, "unit": "pt"},
+                "distance_right": {"value": 6, "unit": "pt"},
+                "distance_bottom": {"value": 2, "unit": "pt"},
+                "distance_left": {"value": 6, "unit": "pt"},
+            },
+            "relative_height": 1536,
+            "behind_text": False,
+            "locked": True,
+            "layout_in_cell": True,
+            "allow_overlap": True,
+        }
+        result = document.insert_image_after(
+            "#before",
+            JPEG,
+            width={"value": 2, "unit": "in"},
+            height={"value": 1, "unit": "in"},
+            alt_text="Inserted floating expert diagram",
+            media_type="image/jpeg",
+            image_id="floating_diagram",
+            name="Floating expert diagram",
+            title="Expert diagram",
+            floating=layout,
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(
+            result.changes[0]["placement"],
+            "floating",
+        )
+        assert result.document is not None
+        inserted = next(
+            node
+            for node in result.document.to_spec()["content"]
+            if node["id"] == "floating_diagram"
+        )
+        self.assertEqual(inserted["placement"], "floating")
+        self.assertEqual(inserted["floating"], layout)
+        self.assertEqual(
+            result.document.read_image("floating_diagram").data,
+            JPEG,
+        )
+        self.assertIn(
+            "image.anchor.update",
+            next(
+                node
+                for node in result.document.inspect()["nodes"]
+                if node["id"] == "floating_diagram"
+            )["supported_operations"],
+        )
+        capabilities = result.document.capabilities()["assets"]
+        self.assertEqual(
+            capabilities["insert_placements"],
+            ["inline", "floating_offset_square_wrap"],
+        )
+        self.assertEqual(
+            capabilities["insert_default_placement"],
+            "inline",
+        )
+        self.assertEqual(
+            capabilities["insert_floating_layout_schema"],
+            "floating-image-layout",
+        )
+
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as archive:
+            root = parse_xml(archive.read("word/document.xml"))
+            relationships = parse_xml(
+                archive.read("word/_rels/document.xml.rels")
+            )
+        body = root.find(_q(W, "body"))
+        assert body is not None
+        inserted_paragraph = body.findall(_q(W, "p"))[1]
+        anchor = inserted_paragraph.find(f".//{_q(WP, 'anchor')}")
+        assert anchor is not None
+        self.assertEqual(
+            [child.tag for child in anchor],
+            [
+                _q(WP, "simplePos"),
+                _q(WP, "positionH"),
+                _q(WP, "positionV"),
+                _q(WP, "extent"),
+                _q(WP, "effectExtent"),
+                _q(WP, "wrapSquare"),
+                _q(WP, "docPr"),
+                _q(WP, "cNvGraphicFramePr"),
+                _q(A, "graphic"),
+            ],
+        )
+        self.assertEqual(
+            anchor.attrib,
+            {
+                "distT": "25400",
+                "distR": "76200",
+                "distB": "25400",
+                "distL": "76200",
+                "simplePos": "0",
+                "relativeHeight": "1536",
+                "behindDoc": "0",
+                "locked": "1",
+                "layoutInCell": "1",
+                "allowOverlap": "1",
+            },
+        )
+        horizontal = anchor.find(f"./{_q(WP, 'positionH')}")
+        vertical = anchor.find(f"./{_q(WP, 'positionV')}")
+        assert horizontal is not None
+        assert vertical is not None
+        self.assertEqual(horizontal.get("relativeFrom"), "column")
+        self.assertEqual(vertical.get("relativeFrom"), "paragraph")
+        self.assertEqual(
+            horizontal.find(f"./{_q(WP, 'posOffset')}").text,
+            "914400",
+        )
+        self.assertEqual(
+            vertical.find(f"./{_q(WP, 'posOffset')}").text,
+            "457200",
+        )
+        self.assertEqual(
+            anchor.find(f"./{_q(WP, 'wrapSquare')}").attrib,
+            {"wrapText": "bothSides"},
+        )
+        document_properties = anchor.find(f"./{_q(WP, 'docPr')}")
+        assert document_properties is not None
+        self.assertGreater(int(document_properties.get("id", "0")), 0)
+        blip = anchor.find(f".//{_q(A, 'blip')}")
+        assert blip is not None
+        relationship_id = blip.get(_q(R, "embed"))
+        self.assertEqual(
+            len(
+                [
+                    relationship
+                    for relationship in relationships.findall(
+                        _q(REL, "Relationship")
+                    )
+                    if relationship.get("Id") == relationship_id
+                    and relationship.get("Type")
+                    == IMAGE_RELATIONSHIP_TYPE
+                ]
+            ),
+            1,
+        )
+
+        reopened = Document.from_docx(output)
+        reopened_inserted = next(
+            node
+            for node in reopened.to_spec()["content"]
+            if node["id"] == "floating_diagram"
+        )
+        self.assertEqual(
+            reopened_inserted["floating"]["horizontal"]["offset"],
+            {"value": 72.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            reopened_inserted["floating"]["vertical"]["offset"],
+            {"value": 36.0, "unit": "pt"},
+        )
+        moved = reopened.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": "#floating_diagram",
+                    "set": {
+                        "horizontal": {
+                            "relative_to": "page",
+                            "offset": {"value": 96, "unit": "pt"},
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(moved.success, moved.model_dump())
+        assert moved.document is not None
+        self.assertEqual(
+            moved.document.to_spec()["content"][1]["floating"][
+                "horizontal"
+            ],
+            {
+                "relative_to": "page",
+                "offset": {"value": 96.0, "unit": "pt"},
+            },
+        )
+
     def test_insert_image_after_rejects_unsafe_requests_atomically(self) -> None:
         source = _image_document(preceding_text="Before")
         document = Document.from_docx(source)
@@ -3124,6 +3324,19 @@ class DocxImageTests(unittest.TestCase):
                 height={"value": 1, "unit": "in"},
                 alt_text="Duplicate ID",
                 image_id="before",
+            ),
+            document.insert_image_after(
+                "#before",
+                JPEG,
+                width={"value": 1, "unit": "in"},
+                height={"value": 1, "unit": "in"},
+                alt_text="Incomplete floating layout",
+                floating={
+                    "horizontal": {
+                        "relative_to": "page",
+                        "offset": {"value": 1, "unit": "in"},
+                    }
+                },
             ),
         ]
         for result in invalid_results:
@@ -3423,10 +3636,38 @@ class DocxImageTests(unittest.TestCase):
             input_path = root / "source.docx"
             replacement_path = root / "replacement.jpg"
             output_path = root / "inserted.docx"
+            floating_layout_path = root / "floating-layout.json"
+            floating_layout = {
+                "horizontal": {
+                    "relative_to": "column",
+                    "offset": {"value": 72, "unit": "pt"},
+                },
+                "vertical": {
+                    "relative_to": "paragraph",
+                    "offset": {"value": 24, "unit": "pt"},
+                },
+                "wrap": {
+                    "mode": "square",
+                    "side": "both_sides",
+                    "distance_top": {"value": 2, "unit": "pt"},
+                    "distance_right": {"value": 4, "unit": "pt"},
+                    "distance_bottom": {"value": 2, "unit": "pt"},
+                    "distance_left": {"value": 4, "unit": "pt"},
+                },
+                "relative_height": 1024,
+                "behind_text": False,
+                "locked": False,
+                "layout_in_cell": True,
+                "allow_overlap": True,
+            }
             input_path.write_bytes(
                 _image_document(preceding_text="Before")
             )
             replacement_path.write_bytes(JPEG)
+            floating_layout_path.write_text(
+                json.dumps(floating_layout),
+                encoding="utf-8",
+            )
             stdout = io.StringIO()
             with redirect_stdout(stdout):
                 exit_code = main(
@@ -3447,6 +3688,8 @@ class DocxImageTests(unittest.TestCase):
                         "CLI inserted chart",
                         "--image-id",
                         "cli_chart",
+                        "--floating-layout",
+                        str(floating_layout_path),
                         "--align",
                         "center",
                         "-o",
@@ -3458,6 +3701,16 @@ class DocxImageTests(unittest.TestCase):
             self.assertTrue(report["success"])
             cli_document = Document.from_docx(output_path)
             self.assertEqual(cli_document.image_bytes("cli_chart"), JPEG)
+            cli_image = next(
+                node
+                for node in cli_document.to_spec()["content"]
+                if node["id"] == "cli_chart"
+            )
+            self.assertEqual(cli_image["placement"], "floating")
+            self.assertEqual(
+                cli_image["floating"]["horizontal"],
+                floating_layout["horizontal"],
+            )
 
             workspace = Workspace.init(root / "project")
             tracked = workspace.import_document(input_path)
@@ -3469,6 +3722,7 @@ class DocxImageTests(unittest.TestCase):
                 height={"value": 1, "unit": "in"},
                 alt_text="Workspace inserted chart",
                 image_id="workspace_chart",
+                floating=floating_layout,
                 paragraph_style={"alignment": "right"},
                 base_revision=tracked.revision,
             )
@@ -3481,9 +3735,29 @@ class DocxImageTests(unittest.TestCase):
                 committed.image_bytes("workspace_chart"),
                 JPEG,
             )
+            workspace_image = next(
+                node
+                for node in committed.to_spec()["content"]
+                if node["id"] == "workspace_chart"
+            )
+            self.assertEqual(
+                workspace_image["placement"],
+                "floating",
+            )
             self.assertIn(
                 "insert_image_after",
                 workspace.capabilities(tracked.id)["operations"],
+            )
+            workspace_capabilities = workspace.capabilities(tracked.id)
+            self.assertIn(
+                "image.anchor.update",
+                workspace_capabilities["patch_operations"],
+            )
+            self.assertEqual(
+                workspace_capabilities["binary_operations"][
+                    "image.insert_after"
+                ]["placements"],
+                ["inline", "floating_offset_square_wrap"],
             )
             patch_path = (
                 root
@@ -3498,6 +3772,14 @@ class DocxImageTests(unittest.TestCase):
             self.assertEqual(
                 patch["operations"][0]["op"],
                 "image.insert_after",
+            )
+            self.assertEqual(
+                patch["operations"][0]["image"]["placement"],
+                "floating",
+            )
+            self.assertEqual(
+                patch["operations"][0]["image"]["floating"],
+                floating_layout,
             )
             self.assertEqual(
                 patch["changes"][0]["binary_transport"],

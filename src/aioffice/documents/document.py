@@ -64,6 +64,7 @@ from aioffice.spec.models import (
     BulletList,
     DocumentField,
     DocumentSection,
+    FloatingImageLayout,
     FloatingImageLayoutUpdate,
     HeaderFooterBindings,
     HeaderFooterImageBlock,
@@ -522,12 +523,13 @@ class Document:
         image_id: str | None = None,
         name: str | None = None,
         title: str | None = None,
+        floating: FloatingImageLayout | Mapping[str, Any] | None = None,
         paragraph_style: ParagraphStyle | Mapping[str, Any] | None = None,
         dry_run: bool = False,
         base_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> PatchResult:
-        """Insert one native inline image after a mapped top-level node."""
+        """Insert one native inline or conservative floating image."""
 
         if self._native is None:
             return PatchResult(
@@ -583,6 +585,12 @@ class Document:
                 idempotency_key=idempotency_key,
             )
         image_payload: dict[str, Any] = {
+            "placement": (
+                "floating"
+                if floating is not None
+                else "inline"
+            ),
+            "floating": floating,
             "width": width,
             "height": height,
             "name": name or prepared.asset.filename,
@@ -1246,10 +1254,20 @@ class Document:
                 ],
                 "native_insert_api": (
                     "Document.insert_image_after(target, source, width=..., "
-                    "height=..., alt_text=...)"
+                    "height=..., alt_text=..., floating=None)"
                 ),
                 "native_insert_operation": "image.insert_after",
-                "insert_placement": "inline",
+                "insert_placement": (
+                    "caller_selected_inline_or_floating_offset_square_wrap"
+                ),
+                "insert_default_placement": "inline",
+                "insert_placements": [
+                    "inline",
+                    "floating_offset_square_wrap",
+                ],
+                "insert_floating_layout_schema": (
+                    "floating-image-layout"
+                ),
                 "insert_dimensions": "explicit_width_and_height",
                 "insert_alt_text": "required",
                 "insert_target": "mapped_top_level_body_node",
@@ -3978,6 +3996,8 @@ class Document:
             image = ImageBlock(
                 id=image_insert.id,
                 asset_id=asset.id,
+                placement=image_insert.placement,
+                floating=image_insert.floating,
                 width=image_insert.width,
                 height=image_insert.height,
                 name=image_insert.name,
@@ -4025,7 +4045,7 @@ class Document:
                 "created_nodes": [image_insert.id],
                 "asset_ids": [asset.id],
                 "binary_transport": "out_of_band",
-                "placement": "inline",
+                "placement": image_insert.placement,
             }
 
         if operation_name == "image.replace":

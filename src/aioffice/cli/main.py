@@ -61,6 +61,13 @@ def _load_patch(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} JSON must be an object.")
+    return payload
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aioffice",
@@ -133,7 +140,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     insert_image = subparsers.add_parser(
         "insert-image-after",
-        help="Insert one native inline image after a mapped top-level node.",
+        help="Insert one native inline or conservative floating image.",
     )
     insert_image.add_argument("input", type=Path)
     insert_image.add_argument("target")
@@ -155,6 +162,14 @@ def _build_parser() -> argparse.ArgumentParser:
     insert_image.add_argument("--name")
     insert_image.add_argument("--image-id")
     insert_image.add_argument("--media-type")
+    insert_image.add_argument(
+        "--floating-layout",
+        type=Path,
+        help=(
+            "JSON file containing one strict FloatingImageLayout; "
+            "omit for inline placement."
+        ),
+    )
     insert_image.add_argument(
         "--align",
         choices=("left", "center", "right", "justify"),
@@ -400,6 +415,14 @@ def _build_parser() -> argparse.ArgumentParser:
     workspace_insert_image.add_argument("--image-id")
     workspace_insert_image.add_argument("--media-type")
     workspace_insert_image.add_argument(
+        "--floating-layout",
+        type=Path,
+        help=(
+            "JSON file containing one strict FloatingImageLayout; "
+            "omit for inline placement."
+        ),
+    )
+    workspace_insert_image.add_argument(
         "--align",
         choices=("left", "center", "right", "justify"),
     )
@@ -567,6 +590,14 @@ def _run(args: argparse.Namespace) -> int:
                 image_id=args.image_id,
                 name=args.name,
                 title=args.title,
+                floating=(
+                    _load_json_object(
+                        args.floating_layout,
+                        label="Floating layout",
+                    )
+                    if args.floating_layout is not None
+                    else None
+                ),
                 paragraph_style=(
                     {"alignment": args.align}
                     if args.align is not None
@@ -700,6 +731,14 @@ def _run(args: argparse.Namespace) -> int:
             image_id=args.image_id,
             name=args.name,
             title=args.title,
+            floating=(
+                _load_json_object(
+                    args.floating_layout,
+                    label="Floating layout",
+                )
+                if args.floating_layout is not None
+                else None
+            ),
             paragraph_style=(
                 {"alignment": args.align}
                 if args.align is not None

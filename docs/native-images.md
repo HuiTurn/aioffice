@@ -525,7 +525,7 @@ URL, or base64 field inside model-authored JSON would cross the trust boundary a
 make patch replay ambiguous. `Document.replace_image()` and the CLI bind the verified
 bytes to the metadata operation inside one atomic in-memory transaction.
 
-## Addressable inline image insertion
+## Addressable inline and floating image insertion
 
 Insertion uses a dedicated binary API because neither a local path nor binary payload
 belongs in model-authored JSON:
@@ -550,6 +550,44 @@ assert result.success
 result.document.export("inserted.docx")
 ```
 
+Omitting `floating` creates the established inline form. Supplying one strict
+`FloatingImageLayout` creates the same conservative offset-and-square-wrap anchor
+that import and `image.anchor.update` already understand:
+
+```python
+result = document.insert_image_after(
+    "#analysis",
+    "generated/expert-workflow.png",
+    width={"value": 3, "unit": "in"},
+    height={"value": 1.5, "unit": "in"},
+    alt_text="Floating expert workflow",
+    image_id="floating_workflow",
+    floating={
+        "horizontal": {
+            "relative_to": "column",
+            "offset": {"value": 72, "unit": "pt"}
+        },
+        "vertical": {
+            "relative_to": "paragraph",
+            "offset": {"value": 24, "unit": "pt"}
+        },
+        "wrap": {
+            "mode": "square",
+            "side": "both_sides",
+            "distance_top": {"value": 2, "unit": "pt"},
+            "distance_right": {"value": 6, "unit": "pt"},
+            "distance_bottom": {"value": 2, "unit": "pt"},
+            "distance_left": {"value": 6, "unit": "pt"}
+        },
+        "relative_height": 1024,
+        "behind_text": False,
+        "locked": False,
+        "layout_in_cell": True,
+        "allow_overlap": True
+    },
+)
+```
+
 The contract is deliberately explicit:
 
 - `target` must resolve to one top-level semantic node mapped into
@@ -560,16 +598,22 @@ The contract is deliberately explicit:
 - `alt_text` is required and cannot be blank;
 - `image_id` is optional but, when supplied, must be globally unique;
 - `paragraph_style` may set direct paragraph alignment, spacing, indentation,
-  background, and supported borders around the inline picture paragraph;
-- placement is `inline`; floating anchors, wrap modes, crop, rotation and effects are
-  not silently inferred.
+  background, and supported borders around the picture's host paragraph;
+- placement defaults to `inline`; a non-null `floating` value selects floating
+  placement and must validate as one complete `FloatingImageLayout`;
+- alignment-based or simple-position anchors, alternate wrap modes, crop, rotation,
+  effects, and other drawing features are not silently inferred.
 
 The native lowering adds or reuses the content-addressed image part, creates a fresh
-relationship ID, creates a `w:p/w:r/w:drawing/wp:inline` tree, writes identical outer
-and inner extents, generates collision-free `wp:docPr/@id` and `w14:paraId` values,
-applies the requested paragraph style, inserts at the proven body position, and then
-re-runs the conservative projection proof. The operation either returns a fully
-readable `ImageBlock` or leaves the original document unchanged.
+relationship ID, creates a `w:p/w:r/w:drawing` tree with `wp:inline` or canonical
+`wp:anchor`, writes identical outer and inner extents, generates collision-free
+`wp:docPr/@id` and `w14:paraId` values, applies the requested paragraph style,
+inserts at the proven body position, and then re-runs the conservative projection
+proof. The generated anchor uses inactive zero `simplePos`, offset-based horizontal
+and vertical positions, square wrapping, and the caller's explicit flags. Optional
+Office 2010 anchor IDs are not invented. The operation either returns a fully
+readable and subsequently editable `ImageBlock` or leaves the original document
+unchanged.
 
 If a third-party DOCX has no AiOffice identity manifest, the first successful
 structural insertion also attaches:
@@ -591,9 +635,14 @@ aioffice insert-image-after \
   --height 1.5 --height-unit in \
   --alt-text "Expert workflow with three approval stages" \
   --image-id expert_workflow \
-  --align center \
+  --floating-layout floating-layout.json \
   -o inserted.docx
 ```
+
+`floating-layout.json` is exactly the object accepted by
+`aioffice schema --kind floating-image-layout`. Omitting the flag keeps inline
+placement. The Workspace CLI accepts the same flag and records `placement` plus the
+normalized layout in its binary-free patch log.
 
 Tracked insertion creates one new workspace revision without storing binary data in
 the patch log:
