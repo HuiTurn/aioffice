@@ -1208,7 +1208,7 @@ class Document:
                 ],
                 "projected_placements": [
                     "inline",
-                    "floating_offset_or_alignment_square_wrap",
+                    "floating_offset_or_alignment_supported_wrap",
                 ],
                 "floating_layout_editable": True,
                 "floating_layout_update_operation": (
@@ -1245,6 +1245,20 @@ class Document:
                     "inside",
                     "outside",
                 ],
+                "floating_wrap_modes": [
+                    "square",
+                    "none",
+                    "top_and_bottom",
+                ],
+                "floating_square_wrap_sides": [
+                    "both_sides",
+                    "largest",
+                    "left",
+                    "right",
+                ],
+                "floating_wrap_distance_authority": (
+                    "four_native_anchor_distances"
+                ),
                 "floating_layout_clearable_fields": [],
                 "floating_layout_authority": "native_docx_and_render",
                 "crop_unit": "percentage_points",
@@ -1281,12 +1295,12 @@ class Document:
                 "native_insert_operation": "image.insert_after",
                 "insert_placement": (
                     "caller_selected_inline_or_floating_"
-                    "offset_or_alignment_square_wrap"
+                    "offset_or_alignment_supported_wrap"
                 ),
                 "insert_default_placement": "inline",
                 "insert_placements": [
                     "inline",
-                    "floating_offset_or_alignment_square_wrap",
+                    "floating_offset_or_alignment_supported_wrap",
                 ],
                 "insert_floating_layout_schema": (
                     "floating-image-layout"
@@ -1315,7 +1329,8 @@ class Document:
                     "one embedded DrawingML picture",
                     (
                         "inline placement or conservative floating offset/"
-                        "alignment placement with square text wrap"
+                        "alignment placement with square, none, or top-and-"
+                        "bottom text wrap"
                     ),
                     "explicit positive extent",
                     "rectangular stretch fill",
@@ -1335,8 +1350,9 @@ class Document:
                 ],
                 "opaque_native_cases": [
                     (
-                        "active simple-position, non-square wrap, relative-"
-                        "size, percentage-position, or malformed anchor"
+                        "active simple-position, tight/through polygon wrap, "
+                        "wrap-specific effects, relative-size, percentage-"
+                        "position, or malformed anchor"
                     ),
                     "text and drawing in one paragraph",
                     "multiple pictures",

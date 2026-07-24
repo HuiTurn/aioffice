@@ -112,6 +112,16 @@
   (`pic:spPr/@bwMode="auto"` and at most one empty `a:noFill`) so aligned pictures
   remain projected and editable after an Office-compatible open/save cycle, while
   refusing non-default black-and-white modes and ambiguous fill structures.
+- Extended the conservative floating picture subset with native `wp:wrapNone` and
+  `wp:wrapTopAndBottom` in body, header, and footer stories, while retaining exact
+  four-direction anchor distances and strict child-order proof.
+- Made `FloatingImageTextWrap` accept `square`, `none`, or `top_and_bottom`, require
+  `side` exactly for square mode, and publish the rule as machine-readable JSON
+  Schema `oneOf`.
+- Taught `image.anchor.update` to switch the complete native wrap child safely and
+  extended floating insertion, cloning, inspection, capabilities, and Workspace
+  metadata to all three supported modes; tight/through polygons and wrap-specific
+  effects remain opaque.
 - Preserved story-local relationship semantics while replacing a cloned header or
   footer logo copy-on-write, leaving the source story, relationship, media, body, and
   unrelated pages untouched.
@@ -468,6 +478,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.35`.
 - Advanced the AiOffice Document Spec to `0.2-draft.36`.
 - Advanced the AiOffice Document Spec to `0.2-draft.37`.
+- Advanced the AiOffice Document Spec to `0.2-draft.38`.
 
 ## 0.1.0
 

@@ -90,11 +90,16 @@ def _image_document(
     mixed_text: str | None = None,
     anchored: bool = False,
     aligned: bool = False,
+    wrap_mode: str = "square",
     cropped: bool = False,
     alt_text: str | None = "A compact expert workflow diagram",
 ) -> bytes:
     if aligned and not anchored:
         raise ValueError("Aligned positioning requires a floating anchor.")
+    if wrap_mode not in {"square", "none", "top_and_bottom"}:
+        raise ValueError("Unsupported test wrap mode.")
+    if wrap_mode != "square" and not anchored:
+        raise ValueError("Explicit floating wrap requires an anchor.")
     builder = DocumentBuilder()
     if preceding_text is not None:
         builder.paragraph(preceding_text, id="before")
@@ -180,10 +185,15 @@ def _image_document(
         {"l": "0", "t": "0", "r": "0", "b": "0"},
     )
     if anchored:
+        wrap_tag = {
+            "square": "wrapSquare",
+            "none": "wrapNone",
+            "top_and_bottom": "wrapTopAndBottom",
+        }[wrap_mode]
         ET.SubElement(
             placement,
-            _q(WP, "wrapSquare"),
-            {"wrapText": "bothSides"},
+            _q(WP, wrap_tag),
+            {"wrapText": "bothSides"} if wrap_mode == "square" else {},
         )
     document_properties = {
         "id": "7",
@@ -300,12 +310,14 @@ def _header_image_document(
     cropped: bool = False,
     anchored: bool = False,
     aligned: bool = False,
+    wrap_mode: str = "square",
 ) -> bytes:
     assert kind in {"header", "footer"}
     body_image = _image_document(
         cropped=cropped,
         anchored=anchored,
         aligned=aligned,
+        wrap_mode=wrap_mode,
     )
     with ZipFile(io.BytesIO(body_image)) as archive:
         image_document = parse_xml(
@@ -503,6 +515,26 @@ class DocxImageTests(unittest.TestCase):
                         branch["properties"][mode],
                         {"not": {"type": "null"}},
                     )
+            if kind == "floating-image-text-wrap":
+                branches = {
+                    branch["properties"]["mode"]["const"]: branch
+                    for branch in schema["oneOf"]
+                }
+                self.assertEqual(
+                    set(branches),
+                    {"square", "none", "top_and_bottom"},
+                )
+                self.assertIn("side", branches["square"]["required"])
+                self.assertEqual(
+                    branches["square"]["properties"]["side"],
+                    {"not": {"type": "null"}},
+                )
+                for mode in ("none", "top_and_bottom"):
+                    self.assertIn("mode", branches[mode]["required"])
+                    self.assertEqual(
+                        branches[mode]["not"],
+                        {"required": ["side"]},
+                    )
             if kind == "header-footer-image-block":
                 capabilities = schema["properties"]["capabilities"]
                 self.assertEqual(
@@ -522,7 +554,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.37")
+        self.assertEqual(spec["spec_version"], "0.2-draft.38")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -839,6 +871,186 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(replaced_image["crop"], updated["crop"])
         self.assertEqual(replaced.document.image_bytes(image["id"]), JPEG)
 
+    def test_none_and_top_bottom_wrap_project_preserve_and_roundtrip(
+        self,
+    ) -> None:
+        native_tags = {
+            "none": "wrapNone",
+            "top_and_bottom": "wrapTopAndBottom",
+        }
+        for mode, native_tag in native_tags.items():
+            with self.subTest(mode=mode):
+                source = _image_document(
+                    anchored=True,
+                    wrap_mode=mode,
+                    cropped=True,
+                )
+                document = Document.from_docx(source)
+                image = document.to_spec()["content"][0]
+                self.assertEqual(image["type"], "image")
+                self.assertEqual(image["placement"], "floating")
+                self.assertEqual(
+                    image["floating"]["wrap"],
+                    {
+                        "mode": mode,
+                        "distance_top": {
+                            "value": 1.0,
+                            "unit": "pt",
+                        },
+                        "distance_right": {
+                            "value": 4.0,
+                            "unit": "pt",
+                        },
+                        "distance_bottom": {
+                            "value": 2.0,
+                            "unit": "pt",
+                        },
+                        "distance_left": {
+                            "value": 3.0,
+                            "unit": "pt",
+                        },
+                    },
+                )
+                self.assertNotIn("side", image["floating"]["wrap"])
+                self.assertEqual(document.to_bytes("docx"), source)
+                self.assertEqual(document.image_bytes(image["id"]), PNG)
+
+                updated = document.apply(
+                    [
+                        {
+                            "op": "image.update",
+                            "target": image["id"],
+                            "set": {
+                                "alt_text": (
+                                    f"Preserved {mode} floating image"
+                                )
+                            },
+                        }
+                    ]
+                )
+                self.assertTrue(updated.success, updated.model_dump())
+                assert updated.document is not None
+                output = updated.document.to_bytes("docx")
+                with ZipFile(io.BytesIO(output)) as package:
+                    root = parse_xml(package.read("word/document.xml"))
+                wrap = root.find(f".//{_q(WP, native_tag)}")
+                assert wrap is not None
+                self.assertFalse(wrap.attrib)
+                self.assertFalse(len(wrap))
+                reopened = Document.from_docx(output)
+                reopened_image = reopened.to_spec()["content"][0]
+                self.assertEqual(
+                    reopened_image["floating"],
+                    updated.document.to_spec()["content"][0]["floating"],
+                )
+                self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+
+    def test_floating_wrap_mode_switch_replaces_exact_native_child(
+        self,
+    ) -> None:
+        source = _image_document(
+            anchored=True,
+            wrap_mode="none",
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        distances = {
+            "distance_top": {"value": 5, "unit": "pt"},
+            "distance_right": {"value": 6, "unit": "pt"},
+            "distance_bottom": {"value": 7, "unit": "pt"},
+            "distance_left": {"value": 8, "unit": "pt"},
+        }
+
+        top_bottom = document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": {
+                        "wrap": {
+                            "mode": "top_and_bottom",
+                            **distances,
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(top_bottom.success, top_bottom.model_dump())
+        assert top_bottom.document is not None
+        top_bottom_bytes = top_bottom.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(top_bottom_bytes)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        anchor = root.find(f".//{_q(WP, 'anchor')}")
+        assert anchor is not None
+        self.assertIsNone(anchor.find(f"./{_q(WP, 'wrapNone')}"))
+        native_top_bottom = anchor.find(
+            f"./{_q(WP, 'wrapTopAndBottom')}"
+        )
+        assert native_top_bottom is not None
+        self.assertFalse(native_top_bottom.attrib)
+        self.assertEqual(
+            {
+                name: anchor.get(attribute)
+                for name, attribute in (
+                    ("top", "distT"),
+                    ("right", "distR"),
+                    ("bottom", "distB"),
+                    ("left", "distL"),
+                )
+            },
+            {
+                "top": "63500",
+                "right": "76200",
+                "bottom": "88900",
+                "left": "101600",
+            },
+        )
+
+        square = Document.from_docx(top_bottom_bytes).apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": {
+                        "wrap": {
+                            "mode": "square",
+                            "side": "largest",
+                            **distances,
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(square.success, square.model_dump())
+        assert square.document is not None
+        square_bytes = square.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(square_bytes)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        anchor = root.find(f".//{_q(WP, 'anchor')}")
+        assert anchor is not None
+        self.assertIsNone(
+            anchor.find(f"./{_q(WP, 'wrapTopAndBottom')}")
+        )
+        native_square = anchor.find(f"./{_q(WP, 'wrapSquare')}")
+        assert native_square is not None
+        self.assertEqual(native_square.attrib, {"wrapText": "largest"})
+        reopened = Document.from_docx(square_bytes)
+        self.assertEqual(
+            reopened.to_spec()["content"][0]["floating"]["wrap"],
+            {
+                "mode": "square",
+                "side": "largest",
+                **{
+                    name: {
+                        "value": float(value["value"]),
+                        "unit": "pt",
+                    }
+                    for name, value in distances.items()
+                },
+            },
+        )
+        self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+
     def test_floating_alignment_positions_project_switch_and_roundtrip(
         self,
     ) -> None:
@@ -873,7 +1085,7 @@ class DocxImageTests(unittest.TestCase):
             capabilities["projected_placements"],
             [
                 "inline",
-                "floating_offset_or_alignment_square_wrap",
+                "floating_offset_or_alignment_supported_wrap",
             ],
         )
         self.assertEqual(
@@ -887,6 +1099,18 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             capabilities["floating_vertical_alignments"],
             ["top", "bottom", "center", "inside", "outside"],
+        )
+        self.assertEqual(
+            capabilities["floating_wrap_modes"],
+            ["square", "none", "top_and_bottom"],
+        )
+        self.assertEqual(
+            capabilities["floating_square_wrap_sides"],
+            ["both_sides", "largest", "left", "right"],
+        )
+        self.assertEqual(
+            capabilities["floating_wrap_distance_authority"],
+            "four_native_anchor_distances",
         )
 
         switched = document.apply(
@@ -1322,6 +1546,83 @@ class DocxImageTests(unittest.TestCase):
             {
                 "op": "image.anchor.update",
                 "target": image["id"],
+                "set": {
+                    "wrap": {
+                        "mode": "square",
+                        "distance_top": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_right": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_bottom": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_left": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "wrap": {
+                        "mode": "none",
+                        "side": "both_sides",
+                        "distance_top": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_right": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_bottom": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_left": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "wrap": {
+                        "mode": "top_and_bottom",
+                        "side": None,
+                        "distance_top": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_right": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_bottom": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                        "distance_left": {
+                            "value": 0,
+                            "unit": "pt",
+                        },
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
                 "set": {"behind_text": True},
                 "clear": [],
             },
@@ -1470,7 +1771,11 @@ class DocxImageTests(unittest.TestCase):
             "duplicate_position_mode",
             "invalid_alignment_position",
             "simple_position",
-            "non_square_wrap",
+            "tight_wrap",
+            "wrap_none_attribute",
+            "wrap_text_content",
+            "wrap_top_bottom_child",
+            "duplicate_wrap",
             "nondefault_bw_mode",
             "duplicate_no_fill",
             "negative_distance",
@@ -1495,11 +1800,32 @@ class DocxImageTests(unittest.TestCase):
                 ET.SubElement(position, _q(WP, "align")).text = "middle"
             elif case == "simple_position":
                 anchor.attrib["simplePos"] = "1"
-            elif case == "non_square_wrap":
+            elif case == "tight_wrap":
+                wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
+                assert wrap is not None
+                wrap.tag = _q(WP, "wrapTight")
+            elif case == "wrap_none_attribute":
+                wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
+                assert wrap is not None
+                wrap.tag = _q(WP, "wrapNone")
+            elif case == "wrap_text_content":
                 wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
                 assert wrap is not None
                 wrap.tag = _q(WP, "wrapNone")
                 wrap.attrib.clear()
+                wrap.text = "unexpected"
+            elif case == "wrap_top_bottom_child":
+                wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
+                assert wrap is not None
+                wrap.tag = _q(WP, "wrapTopAndBottom")
+                wrap.attrib.clear()
+                ET.SubElement(
+                    wrap,
+                    _q(WP, "effectExtent"),
+                    {"l": "0", "t": "0", "r": "0", "b": "0"},
+                )
+            elif case == "duplicate_wrap":
+                ET.SubElement(anchor, _q(WP, "wrapNone"))
             elif case == "nondefault_bw_mode":
                 shape = anchor.find(f".//{_q(PIC, 'spPr')}")
                 assert shape is not None
@@ -2798,7 +3124,11 @@ class DocxImageTests(unittest.TestCase):
         )
 
     def test_floating_header_anchor_update_is_story_local(self) -> None:
-        source = _header_image_document(anchored=True, cropped=True)
+        source = _header_image_document(
+            anchored=True,
+            wrap_mode="none",
+            cropped=True,
+        )
         document = Document.from_docx(source)
         image = document.to_spec()["header_footers"][0]["content"][0]
         inspected = document.inspect()["header_footers"][0]["blocks"][0]
@@ -2816,6 +3146,25 @@ class DocxImageTests(unittest.TestCase):
                         "horizontal": {
                             "relative_to": "margin",
                             "offset": {"value": 24, "unit": "pt"},
+                        },
+                        "wrap": {
+                            "mode": "top_and_bottom",
+                            "distance_top": {
+                                "value": 2,
+                                "unit": "pt",
+                            },
+                            "distance_right": {
+                                "value": 4,
+                                "unit": "pt",
+                            },
+                            "distance_bottom": {
+                                "value": 2,
+                                "unit": "pt",
+                            },
+                            "distance_left": {
+                                "value": 4,
+                                "unit": "pt",
+                            },
                         },
                         "behind_text": True,
                         "allow_overlap": False,
@@ -2853,6 +3202,11 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(offset.text, "304800")
         self.assertEqual(anchor.get("behindDoc"), "1")
         self.assertEqual(anchor.get("allowOverlap"), "0")
+        self.assertIsNone(anchor.find(f"./{_q(WP, 'wrapNone')}"))
+        wrap = anchor.find(f"./{_q(WP, 'wrapTopAndBottom')}")
+        assert wrap is not None
+        self.assertFalse(wrap.attrib)
+        self.assertFalse(len(wrap))
         self.assertEqual(
             anchor.get(_q(WP14, "anchorId")),
             "A1B2C3D4",
@@ -2871,6 +3225,14 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertTrue(reopened_image["floating"]["behind_text"])
         self.assertFalse(reopened_image["floating"]["allow_overlap"])
+        self.assertEqual(
+            reopened_image["floating"]["wrap"]["mode"],
+            "top_and_bottom",
+        )
+        self.assertNotIn(
+            "side",
+            reopened_image["floating"]["wrap"],
+        )
         self.assertEqual(reopened_image["crop"], image["crop"])
         self.assertEqual(reopened.image_bytes(image["id"]), PNG)
         self.assertEqual(reopened.to_bytes("docx"), output)
@@ -3552,7 +3914,7 @@ class DocxImageTests(unittest.TestCase):
             capabilities["insert_placements"],
             [
                 "inline",
-                "floating_offset_or_alignment_square_wrap",
+                "floating_offset_or_alignment_supported_wrap",
             ],
         )
         self.assertEqual(
@@ -4109,6 +4471,92 @@ class DocxImageTests(unittest.TestCase):
             original_image,
         )
 
+    def test_insert_image_after_supports_none_and_top_bottom_wrap(
+        self,
+    ) -> None:
+        native_tags = {
+            "none": "wrapNone",
+            "top_and_bottom": "wrapTopAndBottom",
+        }
+        for mode, native_tag in native_tags.items():
+            with self.subTest(mode=mode):
+                source = _image_document(preceding_text="Before")
+                document = Document.from_docx(source)
+                layout = {
+                    "horizontal": {
+                        "relative_to": "margin",
+                        "alignment": "center",
+                    },
+                    "vertical": {
+                        "relative_to": "page",
+                        "alignment": "center",
+                    },
+                    "wrap": {
+                        "mode": mode,
+                        "distance_top": {
+                            "value": 3,
+                            "unit": "pt",
+                        },
+                        "distance_right": {
+                            "value": 5,
+                            "unit": "pt",
+                        },
+                        "distance_bottom": {
+                            "value": 3,
+                            "unit": "pt",
+                        },
+                        "distance_left": {
+                            "value": 5,
+                            "unit": "pt",
+                        },
+                    },
+                    "relative_height": 2048,
+                    "behind_text": mode == "none",
+                    "locked": False,
+                    "layout_in_cell": True,
+                    "allow_overlap": True,
+                }
+                image_id = f"inserted_{mode}"
+                result = document.insert_image_after(
+                    "#before",
+                    JPEG,
+                    width={"value": 2, "unit": "in"},
+                    height={"value": 1, "unit": "in"},
+                    alt_text=f"Inserted {mode} image",
+                    media_type="image/jpeg",
+                    image_id=image_id,
+                    floating=layout,
+                )
+                self.assertTrue(result.success, result.model_dump())
+                assert result.document is not None
+                inserted = next(
+                    node
+                    for node in result.document.to_spec()["content"]
+                    if node["id"] == image_id
+                )
+                self.assertEqual(inserted["floating"], layout)
+                self.assertNotIn(
+                    "side",
+                    inserted["floating"]["wrap"],
+                )
+                output = result.document.to_bytes("docx")
+                with ZipFile(io.BytesIO(output)) as package:
+                    root = parse_xml(package.read("word/document.xml"))
+                anchors = root.findall(f".//{_q(WP, 'anchor')}")
+                self.assertEqual(len(anchors), 1)
+                wrap = anchors[0].find(f"./{_q(WP, native_tag)}")
+                assert wrap is not None
+                self.assertFalse(wrap.attrib)
+                self.assertFalse(len(wrap))
+                reopened = Document.from_docx(output)
+                reopened_image = next(
+                    node
+                    for node in reopened.to_spec()["content"]
+                    if node["id"] == image_id
+                )
+                self.assertEqual(reopened_image["floating"], layout)
+                self.assertEqual(reopened.image_bytes(image_id), JPEG)
+
     def test_insert_image_after_cli_and_workspace_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -4238,7 +4686,7 @@ class DocxImageTests(unittest.TestCase):
                 ]["placements"],
                 [
                     "inline",
-                    "floating_offset_or_alignment_square_wrap",
+                    "floating_offset_or_alignment_supported_wrap",
                 ],
             )
             patch_path = (

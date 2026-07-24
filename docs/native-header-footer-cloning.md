@@ -59,6 +59,11 @@ In `0.2.0.dev37`, the projected and clone-safe floating subset also accepts
 position group between alignment and physical offset while preserving the cloned
 story's rebased native identities and local relationship graph.
 
+In `0.2.0.dev38`, clone-safe floating pictures may use square, no-wrap, or
+top-and-bottom wrapping. A later `image.anchor.update` can replace the complete
+supported wrap group story-locally while retaining all four native anchor distances,
+rebased identities, media, crop, and source story.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

@@ -18,7 +18,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.37"
+SPEC_VERSION = "0.2-draft.38"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1204,17 +1204,71 @@ class FloatingImageVerticalPosition(StrictModel):
 
 
 class FloatingImageTextWrap(StrictModel):
-    """Conservative rectangular text wrapping around a floating image."""
+    """Conservative native text wrapping around a floating image."""
 
-    mode: Literal["square"] = "square"
-    side: Literal["both_sides", "largest", "left", "right"]
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+        allow_inf_nan=False,
+        json_schema_extra={
+            "oneOf": [
+                {
+                    "properties": {
+                        "mode": {"const": "square"},
+                        "side": {"not": {"type": "null"}},
+                    },
+                    "required": ["side"],
+                },
+                {
+                    "properties": {
+                        "mode": {"const": "none"},
+                    },
+                    "required": ["mode"],
+                    "not": {"required": ["side"]},
+                },
+                {
+                    "properties": {
+                        "mode": {"const": "top_and_bottom"},
+                    },
+                    "required": ["mode"],
+                    "not": {"required": ["side"]},
+                },
+            ]
+        },
+    )
+
+    mode: Literal["square", "none", "top_and_bottom"] = "square"
+    side: Literal["both_sides", "largest", "left", "right"] | None = None
     distance_top: Length
     distance_right: Length
     distance_bottom: Length
     distance_left: Length
 
+    @model_validator(mode="before")
+    @classmethod
+    def validate_wrap_mode(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            mode = value.get("mode", "square")
+            if mode not in {"square", "none", "top_and_bottom"}:
+                return value
+            if mode == "square":
+                if "side" not in value or value["side"] is None:
+                    raise ValueError(
+                        "Square floating image wrap requires a non-null side."
+                    )
+            elif "side" in value:
+                raise ValueError(
+                    "Floating image wrap side is only valid for square mode."
+                )
+        return value
+
     @model_validator(mode="after")
     def validate_distances(self) -> "FloatingImageTextWrap":
+        if (self.mode == "square") != (self.side is not None):
+            raise ValueError(
+                "Floating image wrap requires side exactly when mode is "
+                "square."
+            )
         for field_name in (
             "distance_top",
             "distance_right",
@@ -1531,6 +1585,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.35",
         "0.2-draft.36",
         "0.2-draft.37",
+        "0.2-draft.38",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

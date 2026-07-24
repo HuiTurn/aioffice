@@ -142,6 +142,7 @@ VerticalRelativeTo: TypeAlias = Literal[
     "top_margin",
 ]
 WrapSide: TypeAlias = Literal["both_sides", "largest", "left", "right"]
+WrapMode: TypeAlias = Literal["square", "none", "top_and_bottom"]
 HorizontalAlignment: TypeAlias = Literal[
     "left",
     "right",
@@ -182,6 +183,14 @@ _WRAP_SIDES: dict[str, WrapSide] = {
     "largest": "largest",
     "left": "left",
     "right": "right",
+}
+_WRAP_TAG_TO_MODE: dict[str, WrapMode] = {
+    _q(WP, "wrapSquare"): "square",
+    _q(WP, "wrapNone"): "none",
+    _q(WP, "wrapTopAndBottom"): "top_and_bottom",
+}
+_WRAP_MODE_TO_TAG = {
+    value: key for key, value in _WRAP_TAG_TO_MODE.items()
 }
 _HORIZONTAL_ALIGNMENTS: frozenset[str] = frozenset(
     {"left", "right", "center", "inside", "outside"}
@@ -231,6 +240,24 @@ def _native_position_value(
     if alignment not in allowed_alignments:
         return None
     return "align", alignment
+
+
+def _native_wrap_value(
+    wrap: FloatingImageTextWrap,
+) -> tuple[str, dict[str, str]] | None:
+    tag = _WRAP_MODE_TO_TAG.get(wrap.mode)
+    if tag is None:
+        return None
+    if wrap.mode == "square":
+        if wrap.side is None:
+            return None
+        native_side = _WRAP_SIDE_TO_NATIVE.get(wrap.side)
+        if native_side is None:
+            return None
+        return tag, {"wrapText": native_side}
+    if wrap.side is not None:
+        return None
+    return tag, {}
 
 
 def floating_image_layout_matches(
@@ -341,14 +368,20 @@ def _floating_image_layout(
     simple_position = anchor.find(f"./{_q(WP, 'simplePos')}")
     horizontal = anchor.find(f"./{_q(WP, 'positionH')}")
     vertical = anchor.find(f"./{_q(WP, 'positionV')}")
-    wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
+    wraps = [
+        child
+        for child in anchor
+        if child.tag in _WRAP_TAG_TO_MODE
+    ]
     if (
         simple_position is None
         or horizontal is None
         or vertical is None
-        or wrap is None
+        or len(wraps) != 1
     ):
         return None
+    wrap = wraps[0]
+    wrap_mode = _WRAP_TAG_TO_MODE[wrap.tag]
     optional_effect_extent = anchor.find(f"./{_q(WP, 'effectExtent')}")
     optional_frame_properties = anchor.find(
         f"./{_q(WP, 'cNvGraphicFramePr')}"
@@ -363,7 +396,7 @@ def _floating_image_layout(
             if optional_effect_extent is not None
             else []
         ),
-        _q(WP, "wrapSquare"),
+        wrap.tag,
         _q(WP, "docPr"),
         *(
             [_q(WP, "cNvGraphicFramePr")]
@@ -434,10 +467,16 @@ def _floating_image_layout(
     if horizontal_position is None or vertical_position is None:
         return None
 
-    if set(wrap.attrib) != {"wrapText"} or len(wrap):
+    wrap_side: WrapSide | None = None
+    if (wrap.text or "").strip():
         return None
-    wrap_side = _WRAP_SIDES.get(wrap.attrib["wrapText"])
-    if wrap_side is None:
+    if wrap_mode == "square":
+        if set(wrap.attrib) != {"wrapText"} or len(wrap):
+            return None
+        wrap_side = _WRAP_SIDES.get(wrap.attrib["wrapText"])
+        if wrap_side is None:
+            return None
+    elif wrap.attrib or len(wrap):
         return None
 
     try:
@@ -509,12 +548,19 @@ def _floating_image_layout(
                 ),
             }
         ),
-        wrap=FloatingImageTextWrap(
-            side=cast(WrapSide, wrap_side),
-            distance_top=_emu_length(distances["top"]),
-            distance_right=_emu_length(distances["right"]),
-            distance_bottom=_emu_length(distances["bottom"]),
-            distance_left=_emu_length(distances["left"]),
+        wrap=FloatingImageTextWrap.model_validate(
+            {
+                "mode": wrap_mode,
+                **(
+                    {"side": cast(WrapSide, wrap_side)}
+                    if wrap_side is not None
+                    else {}
+                ),
+                "distance_top": _emu_length(distances["top"]),
+                "distance_right": _emu_length(distances["right"]),
+                "distance_bottom": _emu_length(distances["bottom"]),
+                "distance_left": _emu_length(distances["left"]),
+            }
         ),
         relative_height=relative_height,
         behind_text=bool(booleans["behind_text"]),
@@ -1132,13 +1178,23 @@ def patch_simple_native_image_anchor(
             allowed_alignments=_VERTICAL_ALIGNMENTS,
         )
     if "wrap" in fields:
-        native_wrap_side = _WRAP_SIDE_TO_NATIVE.get(layout.wrap.side)
-        wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
-        if wrap is None or native_wrap_side is None:
+        wraps = [
+            child
+            for child in anchor
+            if child.tag in _WRAP_TAG_TO_MODE
+        ]
+        native_wrap = _native_wrap_value(layout.wrap)
+        if len(wraps) != 1 or native_wrap is None:
             raise NativePackageError(
-                "Supported floating picture has no square text wrap."
+                "Supported floating picture has invalid text wrapping."
             )
-        wrap.set("wrapText", native_wrap_side)
+        wrap = wraps[0]
+        wrap_index = list(anchor).index(wrap)
+        anchor.remove(wrap)
+        anchor.insert(
+            wrap_index,
+            ET.Element(native_wrap[0], native_wrap[1]),
+        )
         for field_name, attribute_name in (
             ("distance_top", "distT"),
             ("distance_right", "distR"),
@@ -1509,7 +1565,7 @@ def insert_simple_native_image_after(
         vertical_frame = _VERTICAL_RELATIVE_TO_NATIVE.get(
             layout.vertical.relative_to
         )
-        wrap_side = _WRAP_SIDE_TO_NATIVE.get(layout.wrap.side)
+        native_wrap = _native_wrap_value(layout.wrap)
         horizontal_value = _native_position_value(
             offset=layout.horizontal.offset,
             alignment=layout.horizontal.alignment,
@@ -1535,7 +1591,7 @@ def insert_simple_native_image_after(
         if (
             horizontal_frame is None
             or vertical_frame is None
-            or wrap_side is None
+            or native_wrap is None
             or horizontal_value is None
             or vertical_value is None
             or any(
@@ -1604,14 +1660,15 @@ def insert_simple_native_image_after(
     )
     if image.placement == "floating":
         assert image.floating is not None
+        native_wrap = _native_wrap_value(image.floating.wrap)
+        if native_wrap is None:
+            raise NativePackageError(
+                "Floating image insertion has invalid text wrapping."
+            )
         ET.SubElement(
             placement,
-            _q(WP, "wrapSquare"),
-            {
-                "wrapText": _WRAP_SIDE_TO_NATIVE[
-                    image.floating.wrap.side
-                ]
-            },
+            native_wrap[0],
+            native_wrap[1],
         )
     document_properties = {
         "id": str(_next_drawing_id(package, container)),

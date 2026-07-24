@@ -15,8 +15,9 @@ drawing.
 
 The supported vertical slice is one embedded DrawingML picture in an otherwise
 empty body, header, or footer paragraph. Placement may be inline or one conservative
-floating offset/alignment anchor with square text wrapping. A body occurrence lives in
-`content`; a reusable story occurrence lives in its `header_footers[].content`:
+floating offset/alignment anchor with square, no-wrap, or top-and-bottom text
+wrapping. A body occurrence lives in `content`; a reusable story occurrence lives
+in its `header_footers[].content`:
 
 ```json
 {
@@ -84,6 +85,21 @@ A floating occurrence changes `placement` and adds explicit native layout eviden
 }
 ```
 
+For no-wrap or top-and-bottom placement, keep the same four explicit distances but
+omit `side`:
+
+```json
+{
+  "wrap": {
+    "mode": "top_and_bottom",
+    "distance_top": {"value": 6, "unit": "pt"},
+    "distance_right": {"value": 0, "unit": "pt"},
+    "distance_bottom": {"value": 6, "unit": "pt"},
+    "distance_left": {"value": 0, "unit": "pt"}
+  }
+}
+```
+
 `asset_id` is derived from the full lowercase SHA-256 digest. Repeated occurrences
 of identical bytes can therefore share one asset record while retaining separate,
 stable image node IDs and native paragraph references.
@@ -131,7 +147,8 @@ An image becomes an `image` block only when all of these conditions hold:
 For `wp:anchor`, the proof additionally requires `simplePos="0"` with zero simple
 coordinates; one horizontal and vertical position, each containing exactly one
 recognized `wp:posOffset` or `wp:align`; recognized `relativeFrom` values; four
-non-negative text distances; one `wp:wrapSquare` and recognized wrap side; bounded
+non-negative native anchor distances; exactly one empty `wp:wrapNone`, empty
+`wp:wrapTopAndBottom`, or `wp:wrapSquare` with a recognized wrap side; bounded
 `relativeHeight`; and strict boolean values for `behindDoc`, `locked`,
 `layoutInCell`, and `allowOverlap`. Child order must match the native anchor schema.
 
@@ -153,9 +170,12 @@ resample bytes, decode the bitmap, or guess missing dimensions.
 `FloatingImageLayout` is a normalized, AI-readable view of the supported native
 anchor. Horizontal and vertical positions deliberately keep the reference frame plus
 exactly one positioning mode: a signed physical `offset` or semantic `alignment`.
-Neither mode is meaningful without its frame. Square wrapping keeps its side and all
-four distances from text. Native flags remain separate rather than being collapsed
-into a vague “floating” boolean.
+Neither mode is meaningful without its frame. `wrap.mode` is `square`, `none`, or
+`top_and_bottom`; only square wrapping has a `side`. All three modes keep the four
+native `wp:anchor` distances so importing and reopening never hides source geometry,
+even when a particular Word layout mode does not use every distance visually.
+Native flags remain separate rather than being collapsed into a vague “floating”
+boolean.
 
 The accepted horizontal frames are `character`, `column`, `inside_margin`,
 `left_margin`, `margin`, `outside_margin`, `page`, and `right_margin`. The accepted
@@ -168,7 +188,12 @@ explicit unit. `relative_height` preserves Word's unsigned relative stacking val
 
 This model follows Wordprocessing Drawing's
 [`wp:anchor`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.anchor?view=openxml-3.0.1)
-container and its distinct position and wrap children. The
+container and its distinct position and wrap children.
+[`wp:wrapNone`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.wrapnone?view=openxml-3.0.1)
+causes no text reflow; `behind_text` then determines whether the picture is behind
+or in front of document text.
+[`wp:wrapTopAndBottom`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.wraptopbottom?view=openxml-3.0.1)
+prevents text beside the picture. The
 [`wp:align`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.horizontalalignment?view=openxml-3.0.1)
 element expresses alignment relative to its parent position frame. Existing verified
 image operations may extract, resize, crop, change accessibility metadata, format
@@ -210,21 +235,24 @@ anchor layout remains identical afterward.
 Every top-level field is optional, but `set` must contain at least one non-null
 change. `horizontal`, `vertical`, and `wrap` are complete grouped values: callers
 must keep the reference frame with exactly one of `offset` or `alignment`, and the
-wrap side with all four distances. This avoids partial native geometry whose meaning
-depends on hidden state. No anchor field is clearable. Signed offsets must fit OOXML
-Int64 EMUs; distances and `relative_height` must fit UInt32; booleans are strict JSON
-booleans. `aioffice schema --kind floating-image-layout-update` exposes the same
-contract, including machine-readable `oneOf` constraints for the two position modes.
+wrap mode with all four distances. `side` is required and non-null exactly for
+`square`; it must be omitted for `none` and `top_and_bottom`. This avoids partial
+native geometry whose meaning depends on hidden state. No anchor field is clearable.
+Signed offsets must fit OOXML Int64 EMUs; distances and `relative_height` must fit
+UInt32; booleans are strict JSON booleans.
+`aioffice schema --kind floating-image-layout-update` exposes the same contract,
+including machine-readable `oneOf` constraints for position and wrap modes.
 
 Native lowering changes only the selected `wp:positionH`, `wp:positionV`,
-`wp:wrapSquare`, and `wp:anchor` attributes in the already-proven tree. It preserves
-the drawing, extents, crop, image relationship and bytes, accessibility metadata,
-host paragraph, unknown surrounding XML, and present `wp14:anchorId` /
-`wp14:editId`. The operation re-projects the result and fails the complete Patch if
-any requested semantic value does not round-trip exactly. It composes with
-`image.update` in either order inside one atomic Patch. A complete position update
-may also switch the native child from `wp:posOffset` to `wp:align` or back without
-reconstructing the surrounding anchor.
+the one selected wrap child, and `wp:anchor` attributes in the already-proven tree.
+It preserves the drawing, extents, crop, image relationship and bytes, accessibility
+metadata, host paragraph, unknown surrounding XML, and present `wp14:anchorId` /
+`wp14:editId`. A wrap update may replace `wp:wrapSquare`, `wp:wrapNone`, or
+`wp:wrapTopAndBottom` at the same schema position. The operation re-projects the
+result and fails the complete Patch if any requested semantic value does not
+round-trip exactly. It composes with `image.update` in either order inside one atomic
+Patch. A complete position update may also switch the native child from
+`wp:posOffset` to `wp:align` or back without reconstructing the surrounding anchor.
 
 Physical lengths are compared by their rounded native EMU value, not by unit
 spelling. For example, an accepted `1 in` offset reopens as the canonical native
@@ -236,9 +264,10 @@ unknown field, invalid unit/range/alignment, or non-boolean flag fails closed. T
 operation does not convert an inline picture to floating and does not create or
 reconstruct an anchor.
 
-Active simple positioning, Office 2010 percentage positioning, `wrapNone`,
-`wrapTopAndBottom`, tight/through polygons, relative-size extensions, missing or
-unknown compatibility values, extra position children, and mixed text plus drawing
+Active simple positioning, Office 2010 percentage positioning, tight/through
+polygons, wrap-level distances or effect extents outside the conservative empty
+no-wrap/top-and-bottom subset, relative-size extensions, missing or unknown
+compatibility values, extra position/wrap children, and mixed text plus drawing
 paragraphs stay opaque. This is a deliberate protocol boundary, not an indication
 that their native XML is discarded.
 
@@ -568,8 +597,9 @@ result.document.export("inserted.docx")
 ```
 
 Omitting `floating` creates the established inline form. Supplying one strict
-`FloatingImageLayout` creates the same conservative offset-or-alignment square-wrap
-anchor that import and `image.anchor.update` already understand:
+`FloatingImageLayout` creates the same conservative offset-or-alignment anchor with
+square, no-wrap, or top-and-bottom wrapping that import and
+`image.anchor.update` already understand:
 
 ```python
 result = document.insert_image_after(
@@ -620,8 +650,11 @@ The contract is deliberately explicit:
   placement and must validate as one complete `FloatingImageLayout`;
 - every horizontal and vertical position must select exactly one explicit `offset`
   or allowed semantic `alignment`;
-- active simple-position or percentage-position anchors, alternate wrap modes, crop,
-  rotation, effects, and other drawing features are not silently inferred.
+- `wrap.mode` must be `square`, `none`, or `top_and_bottom`; `side` is required only
+  for `square`, while all four explicit native anchor distances remain required;
+- active simple-position or percentage-position anchors, tight/through polygon
+  wrapping, crop, rotation, effects, and other drawing features are not silently
+  inferred.
 
 The native lowering adds or reuses the content-addressed image part, creates a fresh
 relationship ID, creates a `w:p/w:r/w:drawing` tree with `wp:inline` or canonical
@@ -629,10 +662,10 @@ relationship ID, creates a `w:p/w:r/w:drawing` tree with `wp:inline` or canonica
 `wp:docPr/@id` and `w14:paraId` values, applies the requested paragraph style,
 inserts at the proven body position, and then re-runs the conservative projection
 proof. The generated anchor uses inactive zero `simplePos`, horizontal and vertical
-positions expressed by the caller's selected offset or alignment mode, square
-wrapping, and the caller's explicit flags. Optional Office 2010 anchor IDs are not
-invented. The operation either returns a fully readable and subsequently editable
-`ImageBlock` or leaves the original document unchanged.
+positions expressed by the caller's selected offset or alignment mode, the caller's
+selected supported wrap child, and explicit flags. Optional Office 2010 anchor IDs
+are not invented. The operation either returns a fully readable and subsequently
+editable `ImageBlock` or leaves the original document unchanged.
 
 If a third-party DOCX has no AiOffice identity manifest, the first successful
 structural insertion also attaches:
@@ -690,8 +723,9 @@ transaction while leaving the operation metadata explainable to an AI.
 These cases remain native and explicit `opaque`/read-only projections:
 
 - text plus a drawing in one paragraph;
-- active-simple-position, percentage-position, non-square-wrap, relative-size,
-  malformed, or otherwise unsupported floating anchors;
+- active-simple-position, percentage-position, tight/through polygon wrap,
+  wrap-specific effects, relative-size, malformed, or otherwise unsupported
+  floating anchors;
 - non-default picture black-and-white modes or non-neutral shape fills;
 - multiple pictures or alternate representations;
 - linked or external images;

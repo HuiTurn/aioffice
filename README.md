@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev37`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev38`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -26,7 +26,8 @@ background/border surfaces, conservative body and header/footer image projection
 verified asset extraction, selective native image metadata and geometry updates,
 bounded rectangular source cropping,
 conservative offset/alignment floating-image anchor projection,
-selective floating-anchor layout updates and positioning-mode switches,
+square/no-wrap/top-and-bottom text wrapping, selective floating-anchor layout
+updates plus positioning and wrapping-mode switches,
 occurrence-scoped copy-on-write image replacement, addressable native inline and
 floating image insertion, direct image-paragraph layout formatting, semantic diffs,
 isolated LibreOffice/Poppler native rendering, safe reusable native header/footer
@@ -116,12 +117,13 @@ insertion and deletion are not advertised: create or clone the complete reusable
 part first, then update or replace its projected image in a subsequent Patch.
 
 For a supported floating picture, `image["floating"]` preserves explicit horizontal
-and vertical reference frames and offsets, square-wrap side and text distances,
-relative height, behind-text behavior, anchor locking, cell layout, and overlap
-policy. In dev35, `image.anchor.update` can selectively change those proven fields
-without rebuilding the drawing or touching its image bytes, relationship, crop,
-extent, accessibility metadata, or Office 2010 anchor identities. Native DOCX
-rendering remains the visual authority.
+and vertical reference frames with offset or alignment positioning, supported
+square/no-wrap/top-and-bottom wrapping, four native anchor distances, relative
+height, behind-text behavior, anchor locking, cell layout, and overlap policy.
+`image.anchor.update` can selectively change or switch those proven groups without
+rebuilding the drawing or touching its image bytes, relationship, crop, extent,
+accessibility metadata, or Office 2010 anchor identities. Native DOCX rendering
+remains the visual authority.
 
 ```python
 result = doc.apply([
@@ -145,7 +147,7 @@ result = doc.apply([
 assert result.success
 ```
 
-Horizontal, vertical, and square-wrap changes replace their complete grouped value;
+Horizontal, vertical, and wrap changes replace their complete grouped value;
 scalar flags and relative height remain independently selectable. The operation
 requires an attached native DOCX and an image already projected as a supported
 floating anchor—it never converts an inline or opaque drawing.
@@ -293,6 +295,11 @@ floating = {
 }
 ```
 
+`wrap.mode` accepts `square`, `none`, or `top_and_bottom`. Only `square` accepts
+`side`; the other modes must omit it. All modes retain four explicit native anchor
+distances so an agent can round-trip the source geometry without hiding OOXML state.
+For `none`, `behind_text` chooses whether the picture is behind or in front of text.
+
 The target must be a mapped top-level body node. AiOffice inserts after its last
 native element, which keeps multi-paragraph lists addressable as one semantic node.
 The new paragraph, DrawingML geometry, relationship, asset and identity manifest are
@@ -318,7 +325,8 @@ revision log.
 The read path re-resolves the trusted native paragraph and its story-local OPC
 relationship, then verifies the asset record, media type, size, and content hash
 before returning bytes. Mixed text/picture paragraphs, active simple-position or
-percentage-position anchors, non-square or polygon wrapping, linked images,
+percentage-position anchors, tight/through polygon wrapping, wrap-specific effects,
+linked images,
 multiple pictures, negative or overconstrained crop rectangles, transforms,
 effects, drawings in tables, complex header/footer drawings, VML, OLE, and embedded
 objects remain explicit opaque native content. They are preserved losslessly and
