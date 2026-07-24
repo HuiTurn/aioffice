@@ -98,6 +98,66 @@ class FormatTests(unittest.TestCase):
                 content_types,
             )
             self.assertNotIn("ns0:Types", content_types)
+            word_namespace = (
+                "http://schemas.openxmlformats.org/"
+                "wordprocessingml/2006/main"
+            )
+            numbering = ET.fromstring(
+                archive.read("word/numbering.xml")
+            )
+            numbering_tags = [
+                child.tag for child in list(numbering)
+            ]
+            first_number_index = numbering_tags.index(
+                f"{{{word_namespace}}}num"
+            )
+            self.assertTrue(
+                all(
+                    tag != f"{{{word_namespace}}}abstractNum"
+                    for tag in numbering_tags[first_number_index:]
+                )
+            )
+            bullet_level = None
+            for abstract in numbering.findall(
+                f"{{{word_namespace}}}abstractNum"
+            ):
+                level = abstract.find(
+                    f"{{{word_namespace}}}lvl"
+                )
+                if level is None:
+                    continue
+                number_format = level.find(
+                    f"{{{word_namespace}}}numFmt"
+                )
+                if (
+                    number_format is not None
+                    and number_format.get(
+                        f"{{{word_namespace}}}val"
+                    )
+                    == "bullet"
+                ):
+                    bullet_level = level
+                    break
+            assert bullet_level is not None
+            self.assertEqual(
+                bullet_level.find(
+                    f"{{{word_namespace}}}lvlText"
+                ).get(
+                    f"{{{word_namespace}}}val"
+                ),
+                "\uf0b7",
+            )
+            bullet_fonts = bullet_level.find(
+                f"./{{{word_namespace}}}rPr/"
+                f"{{{word_namespace}}}rFonts"
+            )
+            assert bullet_fonts is not None
+            self.assertEqual(
+                bullet_fonts.get(
+                    f"{{{word_namespace}}}ascii"
+                ),
+                "Symbol",
+            )
 
     def test_generated_docx_restores_embedded_semantic_identity(self) -> None:
         document = (

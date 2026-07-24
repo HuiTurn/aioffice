@@ -507,6 +507,18 @@ class WorkspaceTests(unittest.TestCase):
                             ],
                         },
                     },
+                    {
+                        "op": "node.append",
+                        "target": "$",
+                        "content": {
+                            "id": "next_steps",
+                            "type": "ordered_list",
+                            "items": [
+                                "Review",
+                                "Publish",
+                            ],
+                        },
+                    },
                 ],
                 base_revision=inserted.result_revision,
             )
@@ -524,14 +536,24 @@ class WorkspaceTests(unittest.TestCase):
                     ("appended", "heading"),
                     ("final_break", "page_break"),
                     ("summary_table", "table"),
+                    ("next_steps", "ordered_list"),
                 ],
             )
-            summary_table = after_append.to_spec()["content"][-1]
+            summary_table = after_append.to_spec()["content"][-2]
             self.assertEqual(
                 summary_table["rows"][0]["cells"][0]["source_ref"][
                     "native_kind"
                 ],
                 "w:tc",
+            )
+            next_steps = after_append.to_spec()["content"][-1]
+            self.assertEqual(
+                next_steps["items"],
+                ["Review", "Publish"],
+            )
+            self.assertEqual(
+                next_steps["source_ref"]["native_kind"],
+                "w:p-group",
             )
 
 

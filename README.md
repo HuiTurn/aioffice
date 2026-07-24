@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev26`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev27`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -27,7 +27,7 @@ extraction, selective native image metadata and geometry updates, occurrence-sco
 copy-on-write image replacement, addressable native inline image insertion, direct
 image-paragraph layout formatting, semantic diffs, isolated LibreOffice/Poppler
 native rendering, root append plus bidirectional stable-ID native
-paragraph/heading/page-break/table insertion and block reordering, consistent
+paragraph/heading/page-break/list/table insertion and block reordering, consistent
 multi-page evidence, page occupancy diagnostics, visual-regression contracts, and
 fidelity reports.
 Workbook, presentation, PDF editing, and MCP remain planned.
@@ -734,7 +734,8 @@ preview = result.document
 ```
 
 Imported DOCX documents can receive a new paragraph, heading, explicit page break,
-or complete semantic table without rebuilding their existing content:
+bullet or numbered list, or complete semantic table without rebuilding their
+existing content:
 
 ```python
 result = doc.apply([
@@ -774,6 +775,34 @@ Use the same operations with `{"type": "page_break"}` to insert one native
 `w:p/w:r/w:br` pagination control. The break has its own stable ID, can be targeted
 later in the Patch, and is verified by native rendering rather than approximated by
 the JSON projection.
+
+Bullet and numbered lists are also ordinary stable-ID blocks:
+
+```python
+result = doc.apply([
+    {
+        "op": "node.insert_after",
+        "target": "#recommendation",
+        "content": {
+            "id": "release_steps",
+            "type": "ordered_list",
+            "items": [
+                "Validate the evidence",
+                "Approve the release",
+                "Notify stakeholders",
+            ],
+        },
+    }
+])
+assert result.success
+```
+
+AiOffice creates a fresh single-level `abstractNum` and `num` for each inserted
+list, so numbering restarts deterministically and cannot accidentally continue an
+adjacent native list. The list's contiguous `w:p` range has one stable root ID and
+can immediately anchor another insertion, move as a group, or be removed. Existing
+numbering definitions remain unchanged. See
+[native list insertion](docs/native-list-insertion.md).
 
 Tables use the same stable-ID placement contract:
 
@@ -847,7 +876,7 @@ For imported DOCX, AiOffice moves the target's complete mapped XML range. A
 multi-paragraph list remains one contiguous unit, DrawingML and unknown XML stay in
 their original elements, and every native reference is reindexed. `node.move_after`
 and `node.move_before` cover every relative position without array indexes. The
-conservative dev26 boundary permits moves only within one semantic section, refuses
+conservative dev27 boundary permits moves only within one semantic section, refuses
 moving a section start anchor, and rebinds `section.start_at` when prepending within
 a later section. Native elements carrying `w:sectPr` remain immovable. See
 [the structural editing contract](docs/structural-editing.md).
@@ -862,9 +891,9 @@ Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `node.move_before`, `node.remove`, `node.update`, `style.define`, `style.apply`, `style.format`,
 `section.format`, `field.update`,
 `table.format`, `table.column.format`, and `table.cell.format`. Imported DOCX
-documents support incremental before/after insertion for paragraphs and headings
-plus page breaks and tables, root append, and safe native image operations reported
-by `capabilities()`.
+documents support incremental before/after insertion for paragraphs, headings, page
+breaks, bullet/ordered lists, and tables, plus root append and safe native image
+operations reported by `capabilities()`.
 Selectors use stable content, section, header/footer block, field, image, table,
 column, row, cell, or rich cell-paragraph identities in this release.
 

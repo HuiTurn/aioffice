@@ -1,6 +1,6 @@
 # Stable-ID structural editing
 
-AiOffice structural edits address semantic nodes, not array positions. The dev26
+AiOffice structural edits address semantic nodes, not array positions. The dev27
 contract exposes insertion, a deliberately narrow pair of relative moves, and
 removal:
 
@@ -44,16 +44,21 @@ because another unknown native consumer may still depend on them.
 ## Native insertion versus movement
 
 `node.append`, `node.insert_after`, and `node.insert_before` create a new semantic
-node. For an imported DOCX, dev26 accepts new `paragraph`, `heading`, `page_break`,
-and `table` blocks. Text and break blocks compile to one new `w:p`; a table compiles
+node. For an imported DOCX, dev27 accepts new `paragraph`, `heading`, `page_break`,
+`bullet_list`, `ordered_list`, and `table` blocks. Text and break blocks compile to
+one new `w:p`; a list compiles to one contiguous `w:p` range; and a table compiles
 to one new `w:tbl`. Root append targets `$` and works even when the document has no
 semantic content; it places the new block before the optional final body-level
 `w:sectPr`. The relative operations preserve the complete anchor. Rich text, direct
 paragraph/text formatting, internal and external hyperlinks, and normalized
 document fields are supported for text blocks; a page break is compiled as an
-isolated `w:r/w:br` control. Tables support stable column/row/cell/rich-paragraph
-identities, regular and merged cells, explicit geometry, formatting, borders, and
-rich cell hyperlinks. See [native text insertion](native-text-insertion.md) and
+isolated `w:r/w:br` control. Lists support plain-text items and receive independent
+single-level numbering definitions so they restart deterministically without
+continuing an adjacent native list. Tables support stable
+column/row/cell/rich-paragraph identities, regular and merged cells, explicit
+geometry, formatting, borders, and rich cell hyperlinks. See
+[native text insertion](native-text-insertion.md),
+[native list insertion](native-list-insertion.md), and
 [native table insertion](native-table-insertion.md).
 
 Reconstructing an *existing* imported DOCX block from its JSON projection would
@@ -96,7 +101,7 @@ carrier remains in place and the semantic section's `start_at` is rebound to the
 moved node. The change evidence records the section ID and old/new anchors. A
 text-bearing paragraph that itself carries `w:sectPr` is refused. Cross-section
 movement will require an explicit future operation that updates section ownership
-and proves header/footer semantics together; dev26 does not approximate it.
+and proves header/footer semantics together; dev27 does not approximate it.
 
 Insertion is placed before or after the anchor's complete contiguous range. An
 after-insertion anchor that carries `w:sectPr` is refused because placement after
@@ -136,6 +141,8 @@ The operations fail atomically with actionable diagnostics for:
 - insertion of unsupported block types, native-only fields, recursively forged
   source references, missing paragraph/table styles, invalid table grids, or unsafe
   XML text;
+- malformed, duplicated, or conflicting numbering IDs, relationships, content
+  types, or numbering roots required by a new native list;
 - any result that fails semantic validation or native identity refresh.
 
 The machine-readable `structural_editing` capability reports root append, relative

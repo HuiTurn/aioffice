@@ -1,10 +1,11 @@
 # Incremental native body-block insertion
 
-AiOffice `0.2.0.dev26` can insert a new paragraph, heading, explicit page break, or
-table into an imported DOCX without rebuilding the document from its JSON
-projection. JSON remains the AI-facing intent and evidence layer; the attached OPC
-package remains the native authority. This page covers text and breaks; see
-[native table insertion](native-table-insertion.md) for the table contract.
+AiOffice `0.2.0.dev27` can insert a new paragraph, heading, explicit page break,
+bullet or numbered list, or table into an imported DOCX without rebuilding the
+document from its JSON projection. JSON remains the AI-facing intent and evidence
+layer; the attached OPC package remains the native authority. This page covers text
+and breaks; see [native list insertion](native-list-insertion.md) and
+[native table insertion](native-table-insertion.md) for their dedicated contracts.
 
 ## Operations
 
@@ -82,9 +83,9 @@ For text-oriented blocks, the native subset accepts:
   `style_ref` uses the document's `Heading1` through `Heading6` style.
 
 Native-only field instructions are read-only and cannot be inserted from their
-display projection. Tables use the same generic body insertion operations with a
-separate fail-closed compilation contract. Lists, images, and opaque blocks still
-require dedicated native support.
+display projection. Lists and tables use the same generic body insertion operations
+with separate fail-closed compilation contracts. Images and opaque blocks still
+require dedicated native support through their own explicit operations.
 
 A page break uses only its ID and type:
 
@@ -180,6 +181,11 @@ Before relative insertion AiOffice proves that:
 5. the required named style exists in the native style catalog;
 6. generated text, page-break controls, and attributes form safe, valid XML;
 7. the generated field count matches its semantic field identities.
+
+For lists, the corresponding proof covers plain-text items, one paragraph per item,
+fresh collision-safe numbering IDs, a canonical document relationship and content
+type, recursive absence of forged `source_ref` values, and one complete contiguous
+native range. See [native list insertion](native-list-insertion.md).
 
 For tables, the corresponding proof covers the table style, every rich cell
 paragraph style, complete logical grid, recursive absence of forged `source_ref`

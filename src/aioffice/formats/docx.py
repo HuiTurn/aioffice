@@ -305,6 +305,38 @@ def _register_field_refs(
         )
 
 
+def compile_list_elements(
+    body: ET.Element,
+    block: BulletList | OrderedList,
+    context: DocxCompileContext,
+    *,
+    numbering_id: int,
+    native_anchors: Sequence[str] | None = None,
+) -> list[ET.Element]:
+    anchors = (
+        list(native_anchors)
+        if native_anchors is not None
+        else [
+            _native_anchor(block.id, item_index)
+            for item_index in range(len(block.items))
+        ]
+    )
+    if len(anchors) != len(block.items):
+        raise ValueError(
+            "List item count does not match native paragraph anchors."
+        )
+    return [
+        _add_paragraph(
+            body,
+            [TextSpan(text=item)],
+            context,
+            numbering_id=numbering_id,
+            native_anchor=anchors[item_index],
+        )
+        for item_index, item in enumerate(block.items)
+    ]
+
+
 def compile_table_element(
     body: ET.Element,
     table: Table,
@@ -633,35 +665,15 @@ def _document_xml(
                 part_uri="/word/document.xml",
                 root_path="/w:document/w:body",
             )
-        elif isinstance(block, BulletList):
-            elements = [
-                _add_paragraph(
-                    body,
-                    [TextSpan(text=item)],
-                    context,
-                    numbering_id=1,
-                    native_anchor=_native_anchor(block.id, item_index),
-                )
-                for item_index, item in enumerate(block.items)
-            ]
-            indices = list(range(len(body) - len(elements), len(body)))
-            refs[block.id] = native_ref_for_elements(
-                elements,
-                indices,
-                native_kind="w:p-group",
-                native_id=elements[0].attrib.get(_q(W14, "paraId")),
+        elif isinstance(block, (BulletList, OrderedList)):
+            elements = compile_list_elements(
+                body,
+                block,
+                context,
+                numbering_id=(
+                    1 if isinstance(block, BulletList) else 2
+                ),
             )
-        elif isinstance(block, OrderedList):
-            elements = [
-                _add_paragraph(
-                    body,
-                    [TextSpan(text=item)],
-                    context,
-                    numbering_id=2,
-                    native_anchor=_native_anchor(block.id, item_index),
-                )
-                for item_index, item in enumerate(block.items)
-            ]
             indices = list(range(len(body) - len(elements), len(body)))
             refs[block.id] = native_ref_for_elements(
                 elements,
@@ -854,24 +866,88 @@ def _styles_xml(spec: AiOfficeDocumentSpec) -> bytes:
     return _xml(root)
 
 
+def append_single_level_numbering_definition(
+    root: ET.Element,
+    *,
+    abstract_id: int,
+    num_id: int,
+    ordered: bool,
+) -> None:
+    format_name = "decimal" if ordered else "bullet"
+    text_value = "%1." if ordered else "\uf0b7"
+    abstract = ET.Element(
+        _q(W, "abstractNum"),
+        {_q(W, "abstractNumId"): str(abstract_id)},
+    )
+    _child(abstract, "multiLevelType", val="singleLevel")
+    level = _child(abstract, "lvl", ilvl="0")
+    _child(level, "start", val="1")
+    _child(level, "numFmt", val=format_name)
+    _child(level, "lvlText", val=text_value)
+    _child(level, "lvlJc", val="left")
+    paragraph_properties = _child(level, "pPr")
+    _child(paragraph_properties, "tabs").append(
+        ET.Element(
+            _q(W, "tab"),
+            {
+                _q(W, "val"): "num",
+                _q(W, "pos"): "720",
+            },
+        )
+    )
+    _child(paragraph_properties, "ind", left="720", hanging="360")
+    if not ordered:
+        run_properties = _child(level, "rPr")
+        _child(
+            run_properties,
+            "rFonts",
+            ascii="Symbol",
+            hAnsi="Symbol",
+            hint="default",
+        )
+    abstract_insert_index = next(
+        (
+            index
+            for index, child in enumerate(root)
+            if child.tag
+            in {
+                _q(W, "num"),
+                _q(W, "numIdMacAtCleanup"),
+            }
+        ),
+        len(root),
+    )
+    root.insert(abstract_insert_index, abstract)
+    number = ET.Element(
+        _q(W, "num"),
+        {_q(W, "numId"): str(num_id)},
+    )
+    _child(number, "abstractNumId", val=str(abstract_id))
+    cleanup_index = next(
+        (
+            index
+            for index, child in enumerate(root)
+            if child.tag == _q(W, "numIdMacAtCleanup")
+        ),
+        len(root),
+    )
+    root.insert(cleanup_index, number)
+
+
 def _numbering_xml() -> bytes:
     root = ET.Element(_q(W, "numbering"))
-    for abstract_id, format_name, text_value in ((0, "bullet", "•"), (1, "decimal", "%1.")):
-        abstract = _child(root, "abstractNum", abstractNumId=str(abstract_id))
-        _child(abstract, "multiLevelType", val="singleLevel")
-        level = _child(abstract, "lvl", ilvl="0")
-        _child(level, "start", val="1")
-        _child(level, "numFmt", val=format_name)
-        _child(level, "lvlText", val=text_value)
-        _child(level, "lvlJc", val="left")
-        paragraph_properties = _child(level, "pPr")
-        _child(paragraph_properties, "tabs").append(
-            ET.Element(_q(W, "tab"), {_q(W, "val"): "num", _q(W, "pos"): "720"})
-        )
-        _child(paragraph_properties, "ind", left="720", hanging="360")
-    for num_id, abstract_id in ((1, 0), (2, 1)):
-        number = _child(root, "num", numId=str(num_id))
-        _child(number, "abstractNumId", val=str(abstract_id))
+    append_single_level_numbering_definition(
+        root,
+        abstract_id=0,
+        num_id=1,
+        ordered=False,
+    )
+    append_single_level_numbering_definition(
+        root,
+        abstract_id=1,
+        num_id=2,
+        ordered=True,
+    )
     return _xml(root)
 
 

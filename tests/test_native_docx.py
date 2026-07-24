@@ -24,6 +24,10 @@ CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 HYPERLINK_RELATIONSHIP_TYPE = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
 )
+NUMBERING_RELATIONSHIP_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/"
+    "relationships/numbering"
+)
 
 
 def _q(namespace: str, local: str) -> str:
@@ -667,6 +671,641 @@ class NativeDocxTests(unittest.TestCase):
             "body_break",
         )
 
+    def test_native_lists_support_all_positions_numbering_and_batch_ops(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder(
+                sections=[
+                    {"id": "front", "start_at": None},
+                    {
+                        "id": "body_section",
+                        "start_at": "body",
+                        "layout": {"start_type": "continuous"},
+                    },
+                ]
+            )
+            .paragraph("Cover", id="cover")
+            .bullet_list(["Existing item"], id="existing_list")
+            .paragraph("Body", id="body")
+            .paragraph("Conclusion", id="conclusion")
+            .build()
+            .to_bytes("docx")
+        )
+        with ZipFile(io.BytesIO(source)) as before:
+            before_root = parse_xml(before.read("word/document.xml"))
+            before_numbering = parse_xml(
+                before.read("word/numbering.xml")
+            )
+            before_relationships = before.read(
+                "word/_rels/document.xml.rels"
+            )
+            before_content_types = before.read(
+                "[Content_Types].xml"
+            )
+            before_styles = before.read("word/styles.xml")
+        before_body = before_root.find(_q(W, "body"))
+        assert before_body is not None
+        before_spec = Document.from_docx(source).to_spec()
+        original_payloads = {
+            node["id"]: [
+                ET.tostring(list(before_body)[index])
+                for index in node["source_ref"]["element_indices"]
+            ]
+            for node in before_spec["content"]
+        }
+        original_numbering_children = [
+            ET.tostring(child)
+            for child in list(before_numbering)
+        ]
+        original_number_ids = {
+            int(number.get(_q(W, "numId")))
+            for number in before_numbering.findall(_q(W, "num"))
+        }
+
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "node.insert_after",
+                    "target": "#cover",
+                    "content": {
+                        "id": "after_cover_list",
+                        "type": "bullet_list",
+                        "items": [
+                            "Review scope",
+                            "Confirm owner",
+                        ],
+                    },
+                },
+                {
+                    "op": "node.move_after",
+                    "target": "#after_cover_list",
+                    "after": "#existing_list",
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#body",
+                    "content": {
+                        "id": "body_steps",
+                        "type": "ordered_list",
+                        "items": [
+                            "Inspect evidence",
+                            "Approve decision",
+                            "Record outcome",
+                        ],
+                    },
+                },
+                {
+                    "op": "node.insert_after",
+                    "target": "#body_steps",
+                    "content": {
+                        "id": "steps_note",
+                        "type": "paragraph",
+                        "text": "Steps complete",
+                    },
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#conclusion",
+                    "content": {
+                        "id": "temporary_list",
+                        "type": "ordered_list",
+                        "items": ["Temporary"],
+                    },
+                },
+                {
+                    "op": "node.remove",
+                    "target": "#temporary_list",
+                },
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "final_list",
+                        "type": "bullet_list",
+                        "items": [
+                            "Archive evidence",
+                            "Notify stakeholders",
+                        ],
+                    },
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.document is not None
+        result_spec = result.document.to_spec()
+        self.assertEqual(
+            [
+                (node["id"], node["type"])
+                for node in result_spec["content"]
+            ],
+            [
+                ("cover", "paragraph"),
+                ("existing_list", "bullet_list"),
+                ("after_cover_list", "bullet_list"),
+                ("body_steps", "ordered_list"),
+                ("steps_note", "paragraph"),
+                ("body", "paragraph"),
+                ("conclusion", "paragraph"),
+                ("final_list", "bullet_list"),
+            ],
+        )
+        self.assertEqual(
+            result_spec["sections"][1]["start_at"],
+            "body_steps",
+        )
+        self.assertEqual(
+            result.changes[2]["section_start_updated"],
+            {
+                "section_id": "body_section",
+                "from": "body",
+                "to": "body_steps",
+            },
+        )
+        self.assertEqual(
+            result.changes[5]["removed_nodes"],
+            ["temporary_list"],
+        )
+        for list_id, item_count in {
+            "after_cover_list": 2,
+            "body_steps": 3,
+            "final_list": 2,
+        }.items():
+            inserted_list = next(
+                node
+                for node in result_spec["content"]
+                if node["id"] == list_id
+            )
+            self.assertEqual(
+                inserted_list["source_ref"]["native_kind"],
+                "w:p-group",
+            )
+            self.assertEqual(
+                len(
+                    inserted_list["source_ref"]["element_indices"]
+                ),
+                item_count,
+            )
+
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            self.assertEqual(
+                after.read("word/_rels/document.xml.rels"),
+                before_relationships,
+            )
+            self.assertEqual(
+                after.read("[Content_Types].xml"),
+                before_content_types,
+            )
+            self.assertEqual(
+                after.read("word/styles.xml"),
+                before_styles,
+            )
+            for name in before.namelist():
+                if name not in {
+                    "word/document.xml",
+                    "word/numbering.xml",
+                    "customXml/aioffice-manifest.xml",
+                }:
+                    self.assertEqual(before.read(name), after.read(name), name)
+            after_root = parse_xml(after.read("word/document.xml"))
+            after_numbering = parse_xml(
+                after.read("word/numbering.xml")
+            )
+        after_body = after_root.find(_q(W, "body"))
+        assert after_body is not None
+        for node in result_spec["content"]:
+            if node["id"] not in original_payloads:
+                continue
+            self.assertEqual(
+                [
+                    ET.tostring(list(after_body)[index])
+                    for index in node["source_ref"][
+                        "element_indices"
+                    ]
+                ],
+                original_payloads[node["id"]],
+                node["id"],
+            )
+        after_numbering_payloads = [
+            ET.tostring(child)
+            for child in list(after_numbering)
+        ]
+        original_cursor = iter(after_numbering_payloads)
+        for original_child in original_numbering_children:
+            self.assertIn(original_child, original_cursor)
+        numbering_child_tags = [
+            child.tag for child in list(after_numbering)
+        ]
+        first_number_index = numbering_child_tags.index(_q(W, "num"))
+        self.assertTrue(
+            all(
+                tag != _q(W, "abstractNum")
+                for tag in numbering_child_tags[first_number_index:]
+            )
+        )
+        self.assertEqual(
+            len(after_numbering.findall(_q(W, "abstractNum"))),
+            len(before_numbering.findall(_q(W, "abstractNum"))) + 4,
+        )
+        self.assertEqual(
+            len(after_numbering.findall(_q(W, "num"))),
+            len(before_numbering.findall(_q(W, "num"))) + 4,
+        )
+        number_to_abstract = {
+            int(number.get(_q(W, "numId"))): int(
+                number.find(_q(W, "abstractNumId")).get(
+                    _q(W, "val")
+                )
+            )
+            for number in after_numbering.findall(_q(W, "num"))
+        }
+        abstract_formats = {
+            int(abstract.get(_q(W, "abstractNumId"))): abstract.find(
+                f"./{_q(W, 'lvl')}/{_q(W, 'numFmt')}"
+            ).get(_q(W, "val"))
+            for abstract in after_numbering.findall(
+                _q(W, "abstractNum")
+            )
+        }
+        active_number_ids: dict[str, int] = {}
+        for list_id in {
+            "after_cover_list",
+            "body_steps",
+            "final_list",
+        }:
+            list_node = next(
+                node
+                for node in result_spec["content"]
+                if node["id"] == list_id
+            )
+            paragraphs = [
+                list(after_body)[index]
+                for index in list_node["source_ref"][
+                    "element_indices"
+                ]
+            ]
+            item_number_ids = {
+                int(
+                    paragraph.find(
+                        f"./{_q(W, 'pPr')}/{_q(W, 'numPr')}/"
+                        f"{_q(W, 'numId')}"
+                    ).get(_q(W, "val"))
+                )
+                for paragraph in paragraphs
+            }
+            self.assertEqual(len(item_number_ids), 1)
+            active_number_ids[list_id] = item_number_ids.pop()
+        self.assertEqual(
+            len(set(active_number_ids.values())),
+            len(active_number_ids),
+        )
+        self.assertTrue(
+            set(active_number_ids.values()).isdisjoint(
+                original_number_ids
+            )
+        )
+        self.assertEqual(
+            abstract_formats[
+                number_to_abstract[
+                    active_number_ids["after_cover_list"]
+                ]
+            ],
+            "bullet",
+        )
+        self.assertEqual(
+            abstract_formats[
+                number_to_abstract[
+                    active_number_ids["body_steps"]
+                ]
+            ],
+            "decimal",
+        )
+        para_ids = [
+            paragraph.get(
+                "{http://schemas.microsoft.com/office/"
+                "word/2010/wordml}paraId"
+            )
+            for paragraph in after_root.iter(_q(W, "p"))
+            if paragraph.get(
+                "{http://schemas.microsoft.com/office/"
+                "word/2010/wordml}paraId"
+            )
+            is not None
+        ]
+        self.assertEqual(len(para_ids), len(set(para_ids)))
+
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            [
+                (
+                    node["id"],
+                    node["type"],
+                    node.get("items"),
+                )
+                for node in reopened.to_spec()["content"]
+            ],
+            [
+                ("cover", "paragraph", None),
+                (
+                    "existing_list",
+                    "bullet_list",
+                    ["Existing item"],
+                ),
+                (
+                    "after_cover_list",
+                    "bullet_list",
+                    ["Review scope", "Confirm owner"],
+                ),
+                (
+                    "body_steps",
+                    "ordered_list",
+                    [
+                        "Inspect evidence",
+                        "Approve decision",
+                        "Record outcome",
+                    ],
+                ),
+                ("steps_note", "paragraph", None),
+                ("body", "paragraph", None),
+                ("conclusion", "paragraph", None),
+                (
+                    "final_list",
+                    "bullet_list",
+                    [
+                        "Archive evidence",
+                        "Notify stakeholders",
+                    ],
+                ),
+            ],
+        )
+        self.assertEqual(
+            reopened.to_spec()["sections"][1]["start_at"],
+            "body_steps",
+        )
+
+    def test_native_list_insert_creates_missing_numbering_parts(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Anchor", id="anchor")
+            .build()
+            .to_bytes("docx")
+        )
+        with ZipFile(io.BytesIO(source)) as package:
+            relationships = parse_xml(
+                package.read("word/_rels/document.xml.rels")
+            )
+            content_types = parse_xml(
+                package.read("[Content_Types].xml")
+            )
+        for relationship in list(relationships):
+            if (
+                relationship.get("Type")
+                == NUMBERING_RELATIONSHIP_TYPE
+            ):
+                relationships.remove(relationship)
+        for override in list(content_types):
+            if (
+                override.tag == _q(CT, "Override")
+                and override.get("PartName")
+                == "/word/numbering.xml"
+            ):
+                content_types.remove(override)
+        source = _rewrite_package(
+            source,
+            {
+                "word/_rels/document.xml.rels": serialize_xml(
+                    relationships
+                ),
+                "[Content_Types].xml": serialize_xml(content_types),
+            },
+            deletions={"word/numbering.xml"},
+        )
+        document = Document.from_docx(source)
+        result = document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "created_steps",
+                        "type": "ordered_list",
+                        "items": ["First", "Second"],
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            self.assertIn("word/numbering.xml", after.namelist())
+            numbering = parse_xml(after.read("word/numbering.xml"))
+            self.assertEqual(
+                numbering.find(
+                    f"./{_q(W, 'abstractNum')}/"
+                    f"{_q(W, 'lvl')}/{_q(W, 'numFmt')}"
+                ).get(_q(W, "val")),
+                "decimal",
+            )
+            output_relationships = parse_xml(
+                after.read("word/_rels/document.xml.rels")
+            )
+            numbering_relationships = [
+                relationship
+                for relationship in output_relationships.findall(
+                    _q(REL, "Relationship")
+                )
+                if relationship.get("Type")
+                == NUMBERING_RELATIONSHIP_TYPE
+            ]
+            self.assertEqual(len(numbering_relationships), 1)
+            self.assertEqual(
+                numbering_relationships[0].get("Target"),
+                "numbering.xml",
+            )
+            output_content_types = parse_xml(
+                after.read("[Content_Types].xml")
+            )
+            numbering_overrides = [
+                override
+                for override in output_content_types.findall(
+                    _q(CT, "Override")
+                )
+                if override.get("PartName")
+                == "/word/numbering.xml"
+            ]
+            self.assertEqual(len(numbering_overrides), 1)
+            self.assertEqual(
+                numbering_overrides[0].get("ContentType"),
+                (
+                    "application/vnd.openxmlformats-officedocument."
+                    "wordprocessingml.numbering+xml"
+                ),
+            )
+            for name in before.namelist():
+                if name not in {
+                    "[Content_Types].xml",
+                    "word/_rels/document.xml.rels",
+                    "word/document.xml",
+                    "customXml/aioffice-manifest.xml",
+                }:
+                    self.assertEqual(before.read(name), after.read(name), name)
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            reopened.to_spec()["content"][-1]["items"],
+            ["First", "Second"],
+        )
+        self.assertEqual(
+            reopened.to_spec()["content"][-1]["source_ref"][
+                "native_kind"
+            ],
+            "w:p-group",
+        )
+
+    def test_native_list_insert_failures_are_atomic(self) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Anchor", id="anchor")
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        anchor_ref = document.to_spec()["content"][0]["source_ref"]
+        forged = document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "forged_list",
+                        "type": "bullet_list",
+                        "items": ["Unsafe"],
+                        "source_ref": anchor_ref,
+                    },
+                }
+            ]
+        )
+        self.assertFalse(forged.success)
+        self.assertIn(
+            "cannot claim an existing native source reference",
+            forged.diagnostics[0].message,
+        )
+        unsafe_xml = document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "unsafe_list",
+                        "type": "ordered_list",
+                        "items": ["Unsafe\u0001item"],
+                    },
+                }
+            ]
+        )
+        self.assertFalse(unsafe_xml.success)
+        self.assertIn(
+            "valid, safe XML",
+            unsafe_xml.diagnostics[0].message,
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+
+        with ZipFile(io.BytesIO(source)) as package:
+            numbering = parse_xml(
+                package.read("word/numbering.xml")
+            )
+        duplicate = copy.deepcopy(
+            numbering.find(_q(W, "abstractNum"))
+        )
+        assert duplicate is not None
+        first_number = numbering.find(_q(W, "num"))
+        assert first_number is not None
+        numbering.insert(
+            list(numbering).index(first_number),
+            duplicate,
+        )
+        malformed_source = _rewrite_package(
+            source,
+            {"word/numbering.xml": serialize_xml(numbering)},
+        )
+        malformed_document = Document.from_docx(
+            malformed_source
+        )
+        malformed = malformed_document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "blocked_list",
+                        "type": "bullet_list",
+                        "items": ["Blocked"],
+                    },
+                }
+            ]
+        )
+        self.assertFalse(malformed.success)
+        self.assertIn(
+            "duplicate abstractNumId",
+            malformed.diagnostics[0].message,
+        )
+        self.assertEqual(
+            malformed_document.to_bytes("docx"),
+            malformed_source,
+        )
+
+        with ZipFile(io.BytesIO(source)) as package:
+            numbering = parse_xml(
+                package.read("word/numbering.xml")
+            )
+        displaced_abstract = numbering.find(
+            _q(W, "abstractNum")
+        )
+        assert displaced_abstract is not None
+        numbering.remove(displaced_abstract)
+        numbering.append(displaced_abstract)
+        malformed_order_source = _rewrite_package(
+            source,
+            {"word/numbering.xml": serialize_xml(numbering)},
+        )
+        malformed_order_document = Document.from_docx(
+            malformed_order_source
+        )
+        malformed_order = malformed_order_document.apply(
+            [
+                {
+                    "op": "node.append",
+                    "target": "$",
+                    "content": {
+                        "id": "blocked_order_list",
+                        "type": "ordered_list",
+                        "items": ["Blocked"],
+                    },
+                }
+            ]
+        )
+        self.assertFalse(malformed_order.success)
+        self.assertIn(
+            "not in OOXML schema order",
+            malformed_order.diagnostics[0].message,
+        )
+        self.assertEqual(
+            malformed_order_document.to_bytes("docx"),
+            malformed_order_source,
+        )
+
     def test_unsupported_native_operation_is_atomic(self) -> None:
         source = self._source_document()
         document = Document.from_docx(source)
@@ -676,9 +1315,9 @@ class NativeDocxTests(unittest.TestCase):
                     "op": "node.append",
                     "target": "$",
                     "content": {
-                        "id": "unsupported_list",
-                        "type": "bullet_list",
-                        "items": ["New"],
+                        "id": "unsupported_opaque",
+                        "type": "opaque",
+                        "summary": "Unsupported native block",
                     },
                 }
             ]
@@ -686,7 +1325,8 @@ class NativeDocxTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.diagnostics[0].code, "NATIVE_PATCH_FAILED")
         self.assertIn(
-            "only paragraph, heading, page_break, and table",
+            "only paragraph, heading, page_break, bullet_list, "
+            "ordered_list, and table",
             result.diagnostics[0].message,
         )
         self.assertEqual(document.revision, 1)
@@ -699,9 +1339,9 @@ class NativeDocxTests(unittest.TestCase):
                     "op": "node.insert_after",
                     "target": "#body",
                     "content": {
-                        "id": "unsupported_list",
-                        "type": "ordered_list",
-                        "items": ["New"],
+                        "id": "unsupported_opaque",
+                        "type": "opaque",
+                        "summary": "Unsupported native block",
                     },
                 }
             ]
@@ -712,7 +1352,8 @@ class NativeDocxTests(unittest.TestCase):
             "NATIVE_PATCH_FAILED",
         )
         self.assertIn(
-            "only paragraph, heading, page_break, and table",
+            "only paragraph, heading, page_break, bullet_list, "
+            "ordered_list, and table",
             unsupported_insert.diagnostics[0].message,
         )
         invalid_xml_insert = document.apply(

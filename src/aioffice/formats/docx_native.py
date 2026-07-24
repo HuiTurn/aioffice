@@ -14,6 +14,8 @@ from pydantic import ValidationError
 from aioffice.core.errors import NativePackageError
 from aioffice.formats.docx import (
     DocxCompileContext,
+    append_single_level_numbering_definition,
+    compile_list_elements,
     compile_table_element,
     register_table_refs,
 )
@@ -79,6 +81,7 @@ from aioffice.operations.text import resolve_text_selection
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
     AssetRef,
+    BulletList,
     DocumentField,
     Heading,
     ImageBlock,
@@ -86,6 +89,7 @@ from aioffice.spec.models import (
     InlineContent,
     NamedStyle,
     NativeRef,
+    OrderedList,
     PageBreak,
     Paragraph,
     ParagraphStyle,
@@ -106,6 +110,14 @@ REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 HYPERLINK_RELATIONSHIP_TYPE = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+)
+NUMBERING_RELATIONSHIP_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/"
+    "relationships/numbering"
+)
+NUMBERING_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument."
+    "wordprocessingml.numbering+xml"
 )
 RELATIONSHIPS_CONTENT_TYPE = (
     "application/vnd.openxmlformats-package.relationships+xml"
@@ -208,6 +220,314 @@ def _fresh_native_paragraph_anchor(
         if candidate not in existing:
             return candidate
         ordinal += 1
+
+
+def _numbering_decimal_ids(
+    elements: Sequence[ET.Element],
+    *,
+    attribute_name: str,
+    label: str,
+) -> set[int]:
+    values: list[int] = []
+    for element in elements:
+        raw_value = element.get(_q(W, attribute_name))
+        if (
+            raw_value is None
+            or not raw_value.isascii()
+            or not raw_value.isdecimal()
+        ):
+            raise NativePackageError(
+                f"Native DOCX numbering contains an invalid {label}."
+            )
+        values.append(int(raw_value))
+    if len(values) != len(set(values)):
+        raise NativePackageError(
+            f"Native DOCX numbering contains duplicate {label} values."
+        )
+    return set(values)
+
+
+def _fresh_decimal_id(existing: set[int], *, start: int) -> int:
+    candidate = start
+    while candidate in existing:
+        candidate += 1
+    return candidate
+
+
+def _validate_numbering_child_order(
+    numbering: ET.Element,
+) -> None:
+    phases = {
+        _q(W, "numPicBullet"): 0,
+        _q(W, "abstractNum"): 1,
+        _q(W, "num"): 2,
+        _q(W, "numIdMacAtCleanup"): 3,
+    }
+    last_phase = -1
+    cleanup_count = 0
+    for child in list(numbering):
+        phase = phases.get(child.tag)
+        if phase is None:
+            continue
+        if phase < last_phase:
+            raise NativePackageError(
+                "Native DOCX numbering children are not in OOXML "
+                "schema order."
+            )
+        last_phase = phase
+        if child.tag == _q(W, "numIdMacAtCleanup"):
+            cleanup_count += 1
+    if cleanup_count > 1:
+        raise NativePackageError(
+            "Native DOCX numbering contains duplicate "
+            "numIdMacAtCleanup elements."
+        )
+
+
+def _ensure_numbering_relationship(
+    package: NativePackage,
+) -> None:
+    source_part = "/word/document.xml"
+    relationship_part_uri = _relationship_part_uri(source_part)
+    relationship_part_exists = package.has_part(
+        relationship_part_uri
+    )
+    relationships = (
+        parse_xml(package.get_part(relationship_part_uri))
+        if relationship_part_exists
+        else ET.Element(_q(REL, "Relationships"))
+    )
+    if relationships.tag != _q(REL, "Relationships"):
+        raise NativePackageError(
+            f"DOCX relationship part {relationship_part_uri!r} has "
+            "an invalid root."
+        )
+    relationship_elements = relationships.findall(
+        _q(REL, "Relationship")
+    )
+    numbering_relationships = [
+        relationship
+        for relationship in relationship_elements
+        if relationship.get("Type") == NUMBERING_RELATIONSHIP_TYPE
+    ]
+    if len(numbering_relationships) > 1:
+        raise NativePackageError(
+            "Native DOCX has multiple document numbering "
+            "relationships."
+        )
+    if numbering_relationships:
+        relationship = numbering_relationships[0]
+        if relationship.get("TargetMode") is not None:
+            raise NativePackageError(
+                "Native DOCX numbering relationship must be internal."
+            )
+        if (
+            resolve_relationship_target(
+                source_part,
+                relationship.get("Target", ""),
+            )
+            != "/word/numbering.xml"
+        ):
+            raise NativePackageError(
+                "Native DOCX numbering relationship targets an "
+                "unsupported part."
+            )
+        return
+    relationship_ids = [
+        relationship.get("Id", "")
+        for relationship in relationship_elements
+    ]
+    if (
+        any(not relationship_id for relationship_id in relationship_ids)
+        or len(relationship_ids) != len(set(relationship_ids))
+    ):
+        raise NativePackageError(
+            "Native DOCX relationship IDs are incomplete or ambiguous."
+        )
+    relationship_number = 1
+    while (
+        f"rIdAiOfficeNumbering{relationship_number}"
+        in relationship_ids
+    ):
+        relationship_number += 1
+    ET.SubElement(
+        relationships,
+        _q(REL, "Relationship"),
+        {
+            "Id": f"rIdAiOfficeNumbering{relationship_number}",
+            "Type": NUMBERING_RELATIONSHIP_TYPE,
+            "Target": "numbering.xml",
+        },
+    )
+    package.set_part(
+        relationship_part_uri,
+        serialize_xml(relationships),
+        content_type=(
+            None
+            if relationship_part_exists
+            else RELATIONSHIPS_CONTENT_TYPE
+        ),
+    )
+
+
+def _ensure_numbering_content_type(
+    package: NativePackage,
+) -> None:
+    content_types = parse_xml(
+        package.get_part("/[Content_Types].xml")
+    )
+    if content_types.tag != _q(CT, "Types"):
+        raise NativePackageError(
+            "DOCX content types part has an invalid root."
+        )
+    overrides = [
+        override
+        for override in content_types.findall(_q(CT, "Override"))
+        if override.get("PartName") == "/word/numbering.xml"
+    ]
+    if len(overrides) > 1:
+        raise NativePackageError(
+            "DOCX content types contain duplicate numbering overrides."
+        )
+    if overrides:
+        if (
+            overrides[0].get("ContentType")
+            != NUMBERING_CONTENT_TYPE
+        ):
+            raise NativePackageError(
+                "DOCX numbering content type is invalid."
+            )
+        return
+    ET.SubElement(
+        content_types,
+        _q(CT, "Override"),
+        {
+            "PartName": "/word/numbering.xml",
+            "ContentType": NUMBERING_CONTENT_TYPE,
+        },
+    )
+    package.set_part(
+        "/[Content_Types].xml",
+        serialize_xml(content_types),
+    )
+
+
+def _append_numbering_definition(
+    package: NativePackage,
+    *,
+    ordered: bool,
+) -> int:
+    numbering_part_exists = package.has_part(
+        "/word/numbering.xml"
+    )
+    numbering = (
+        parse_xml(package.get_part("/word/numbering.xml"))
+        if numbering_part_exists
+        else ET.Element(_q(W, "numbering"))
+    )
+    if numbering.tag != _q(W, "numbering"):
+        raise NativePackageError(
+            "Native DOCX numbering.xml has an invalid root."
+        )
+    _validate_numbering_child_order(numbering)
+    abstract_ids = _numbering_decimal_ids(
+        numbering.findall(_q(W, "abstractNum")),
+        attribute_name="abstractNumId",
+        label="abstractNumId",
+    )
+    num_ids = _numbering_decimal_ids(
+        numbering.findall(_q(W, "num")),
+        attribute_name="numId",
+        label="numId",
+    )
+    abstract_id = _fresh_decimal_id(abstract_ids, start=0)
+    num_id = _fresh_decimal_id(num_ids, start=1)
+    append_single_level_numbering_definition(
+        numbering,
+        abstract_id=abstract_id,
+        num_id=num_id,
+        ordered=ordered,
+    )
+    _validate_numbering_child_order(numbering)
+    try:
+        numbering_payload = serialize_xml(numbering)
+        parse_xml(numbering_payload)
+    except (
+        NativePackageError,
+        UnicodeError,
+        ValueError,
+    ) as error:
+        raise NativePackageError(
+            "Native list insertion generated invalid numbering XML."
+        ) from error
+    _ensure_numbering_relationship(package)
+    _ensure_numbering_content_type(package)
+    package.set_part(
+        "/word/numbering.xml",
+        numbering_payload,
+        content_type=NUMBERING_CONTENT_TYPE,
+    )
+    return num_id
+
+
+def _compile_inserted_list(
+    package: NativePackage,
+    container: ET.Element,
+    block: BulletList | OrderedList,
+) -> list[ET.Element]:
+    if block.source_ref is not None:
+        raise NativePackageError(
+            f"Inserted list {block.id!r} cannot claim an existing "
+            "native source reference."
+        )
+    numbering_id = _append_numbering_definition(
+        package,
+        ordered=isinstance(block, OrderedList),
+    )
+    reserved_paragraph_ids = {
+        para_id
+        for paragraph in container.iter(_q(W, "p"))
+        if (
+            para_id := paragraph.get(_q(W14, "paraId"))
+        )
+        is not None
+    }
+    anchors: list[str] = []
+    for item_index in range(len(block.items)):
+        anchor = _fresh_native_paragraph_anchor(
+            reserved_paragraph_ids,
+            f"{block.id}:{item_index}",
+        )
+        anchors.append(anchor)
+        reserved_paragraph_ids.add(anchor)
+    temporary_container = ET.Element(_q(W, "body"))
+    try:
+        elements = compile_list_elements(
+            temporary_container,
+            block,
+            DocxCompileContext(),
+            numbering_id=numbering_id,
+            native_anchors=anchors,
+        )
+        parse_xml(serialize_xml(temporary_container))
+    except (
+        NativePackageError,
+        UnicodeError,
+        ValueError,
+    ) as error:
+        raise NativePackageError(
+            f"Could not compile inserted list {block.id!r} as "
+            "valid, safe XML."
+        ) from error
+    if (
+        len(elements) != len(block.items)
+        or any(element.tag != _q(W, "p") for element in elements)
+    ):
+        raise NativePackageError(
+            f"Inserted list {block.id!r} did not compile to one "
+            "paragraph per item."
+        )
+    return elements
 
 
 def _merge_text_style(
@@ -1939,13 +2259,26 @@ def apply_docx_operations(
             candidate_payload["id"] = created_id
             try:
                 if candidate_payload.get("type") == "paragraph":
-                    candidate: Heading | PageBreak | Paragraph | Table = (
-                        Paragraph.model_validate(candidate_payload)
-                    )
+                    candidate: (
+                        BulletList
+                        | Heading
+                        | OrderedList
+                        | PageBreak
+                        | Paragraph
+                        | Table
+                    ) = Paragraph.model_validate(candidate_payload)
                 elif candidate_payload.get("type") == "heading":
                     candidate = Heading.model_validate(candidate_payload)
                 elif candidate_payload.get("type") == "page_break":
                     candidate = PageBreak.model_validate(
+                        candidate_payload
+                    )
+                elif candidate_payload.get("type") == "bullet_list":
+                    candidate = BulletList.model_validate(
+                        candidate_payload
+                    )
+                elif candidate_payload.get("type") == "ordered_list":
+                    candidate = OrderedList.model_validate(
                         candidate_payload
                     )
                 elif candidate_payload.get("type") == "table":
@@ -1956,12 +2289,13 @@ def apply_docx_operations(
                     raise NativePackageError(
                         f"Imported DOCX {operation_name} currently "
                         "supports only paragraph, heading, page_break, "
-                        "and table content."
+                        "bullet_list, ordered_list, and table content."
                     )
             except ValidationError as error:
                 raise NativePackageError(
                     f"Could not lower {operation_name} content: {error}"
                 ) from error
+            new_fields: list[DocumentField] = []
             if isinstance(candidate, Table):
                 matching_result_tables = [
                     result_node
@@ -1986,7 +2320,16 @@ def apply_docx_operations(
                     source_part="/word/document.xml",
                     styles_root=styles_root,
                 )
-                new_fields: list[DocumentField] = []
+                inserted_elements = [inserted_element]
+            elif isinstance(
+                candidate,
+                (BulletList, OrderedList),
+            ):
+                inserted_elements = _compile_inserted_list(
+                    updated,
+                    body,
+                    candidate,
+                )
             else:
                 (
                     inserted_element,
@@ -1998,37 +2341,54 @@ def apply_docx_operations(
                     source_part="/word/document.xml",
                     styles_root=styles_root,
                 )
-            body.insert(insert_index, inserted_element)
+                inserted_elements = [inserted_element]
+            for offset, inserted_element in enumerate(
+                inserted_elements
+            ):
+                body.insert(insert_index + offset, inserted_element)
             if target_id is not None:
                 synchronize_section_start(
                     change,
                     operation_name=str(operation_name),
                     anchor_id=target_id,
                     new_start_id=created_id,
-                    new_start_elements=[inserted_element],
+                    new_start_elements=inserted_elements,
                     can_rebind=(
                         operation_name == "node.insert_before"
                     ),
                 )
             temporary_ref = native_ref_for_part_elements(
-                [inserted_element],
-                [insert_index],
+                inserted_elements,
+                list(
+                    range(
+                        insert_index,
+                        insert_index + len(inserted_elements),
+                    )
+                ),
                 part_uri="/word/document.xml",
                 native_kind=(
                     "w:tbl"
                     if isinstance(candidate, Table)
                     else (
-                        "w:page-break"
-                        if isinstance(candidate, PageBreak)
-                        else "w:p"
+                        "w:p-group"
+                        if isinstance(
+                            candidate,
+                            (BulletList, OrderedList),
+                        )
+                        else (
+                            "w:page-break"
+                            if isinstance(candidate, PageBreak)
+                            else "w:p"
+                        )
                     )
                 ),
                 root_path="/w:document/w:body",
-                native_id=inserted_element.get(
+                native_id=inserted_elements[0].get(
                     _q(W14, "paraId")
                 ),
             )
             if isinstance(candidate, Table):
+                inserted_element = inserted_elements[0]
                 candidate.source_ref = temporary_ref
                 component_refs: dict[str, NativeRef] = {}
                 try:
@@ -2077,14 +2437,14 @@ def apply_docx_operations(
                                 paragraph_ref,
                             )
             source_elements[created_id] = (
-                [inserted_element],
+                inserted_elements,
                 temporary_ref,
             )
             for field_ordinal, document_field in enumerate(
                 new_fields
             ):
                 inserted_fields[document_field.id] = (
-                    inserted_element,
+                    inserted_elements[0],
                     field_ordinal,
                 )
             inserted_nodes.add(created_id)

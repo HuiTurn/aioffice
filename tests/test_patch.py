@@ -257,7 +257,14 @@ class PatchTests(unittest.TestCase):
         )
         self.assertEqual(
             structural_capabilities["insertable_native_blocks"],
-            ["paragraph", "heading", "page_break", "table"],
+            [
+                "paragraph",
+                "heading",
+                "page_break",
+                "bullet_list",
+                "ordered_list",
+                "table",
+            ],
         )
         self.assertEqual(
             structural_capabilities["insert_operations"],
@@ -269,6 +276,16 @@ class PatchTests(unittest.TestCase):
         self.assertEqual(
             structural_capabilities["native_block_lowering"]["table"],
             "w:tbl",
+        )
+        list_insertion = structural_capabilities["list_insertion"]
+        self.assertEqual(
+            list_insertion["numbering_strategy"],
+            "fresh_single_level_abstractNum_and_num_per_list",
+        )
+        self.assertTrue(list_insertion["restart_each_list"])
+        self.assertEqual(
+            list_insertion["same_patch_operations"][-1],
+            "node.remove",
         )
         table_insertion = structural_capabilities["table_insertion"]
         self.assertEqual(

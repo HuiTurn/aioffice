@@ -285,6 +285,33 @@
 - Added atomic refusal for recursively forged native references, missing table or
   cell-paragraph styles, invalid table grids, unsafe XML, and column-width edits on
   merged grids.
+- Added native `bullet_list` and `ordered_list` lowering through `node.append`,
+  `node.insert_after`, and `node.insert_before`, compiling one contiguous `w:p`
+  range with one stable root identity and one paragraph per plain-text item.
+- Reused one list compiler for generated and imported DOCX paths while assigning
+  collision-safe `w14:paraId` anchors to every newly inserted item.
+- Added one independent single-level `abstractNum` and `num` definition per inserted
+  list, giving ordered lists deterministic restart-at-one behavior and preventing
+  accidental continuation of adjacent native lists.
+- Kept every numbering part in strict OOXML child order with all abstract
+  definitions before concrete numbering instances, and used Word-compatible
+  Symbol-font bullet glyphs for consistent visual weight.
+- Added safe creation of a missing numbering part, canonical document relationship,
+  and OPC content-type override while preserving every existing numbering child and
+  unrelated package part.
+- Made inserted lists immediately usable as before/after anchors, contiguous move
+  targets, and removal targets in the same Patch, including later-section
+  `start_at` rebinding and terminal-section root append.
+- Exposed machine-readable list-insertion capabilities and added CLI, Workspace,
+  standalone-reopen, all-position, numbering-isolation, exact-preservation, and
+  transaction-atomicity coverage.
+- Added atomic refusal for forged native references, unsafe item text, malformed or
+  duplicate numbering IDs, and conflicting numbering relationships or content
+  types.
+- Rendered and visually inspected a real two-section third-party DOCX with two
+  independent numbered lists and one bullet list: numbering restarted correctly,
+  hanging-indent wrapping and bullet weight were clean, page count and Letter
+  geometry remained stable, and the untouched first-page PNG stayed byte-identical.
 - Added symmetric native `node.insert_before` so AI callers can prepend content to
   the document or place a new paragraph/heading before any complete mapped range,
   including multi-paragraph list anchors.
@@ -309,7 +336,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.26`.
+- Advanced the AiOffice Document Spec to `0.2-draft.27`.
 
 ## 0.1.0
 

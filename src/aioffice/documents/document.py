@@ -1349,6 +1349,8 @@ class Document:
                     "paragraph",
                     "heading",
                     "page_break",
+                    "bullet_list",
+                    "ordered_list",
                     "table",
                 ],
                 "inserted_inline_content": [
@@ -1384,7 +1386,37 @@ class Document:
                     "paragraph": "w:p",
                     "heading": "w:p",
                     "page_break": "w:p/w:r/w:br",
+                    "bullet_list": "w:p-group",
+                    "ordered_list": "w:p-group",
                     "table": "w:tbl",
+                },
+                "list_insertion": {
+                    "types": [
+                        "bullet_list",
+                        "ordered_list",
+                    ],
+                    "item_content": "plain_text",
+                    "root_native_kind": "w:p-group",
+                    "item_native_kind": "w:p",
+                    "numbering_strategy": (
+                        "fresh_single_level_abstractNum_and_num_per_list"
+                    ),
+                    "restart_each_list": True,
+                    "numbering_part": (
+                        "append_or_create_word_numbering.xml"
+                    ),
+                    "same_patch_operations": [
+                        "node.insert_after",
+                        "node.insert_before",
+                        "node.move_after",
+                        "node.move_before",
+                        "node.remove",
+                    ],
+                    "unsupported_item_content": [
+                        "rich_text",
+                        "nested_lists",
+                        "dynamic_fields",
+                    ],
                 },
                 "table_insertion": {
                     "default_style_ref": "TableGrid",
