@@ -422,8 +422,16 @@ class DocxImageTests(unittest.TestCase):
                 {"left", "top", "right", "bottom"},
             ),
             (
+                "floating-image-effect-extent",
+                {"left", "top", "right", "bottom"},
+            ),
+            (
                 "floating-image-horizontal-position",
                 {"relative_to", "offset", "alignment"},
+            ),
+            (
+                "floating-image-text-distances",
+                {"top", "right", "bottom", "left"},
             ),
             (
                 "floating-image-vertical-position",
@@ -434,10 +442,8 @@ class DocxImageTests(unittest.TestCase):
                 {
                     "mode",
                     "side",
-                    "distance_top",
-                    "distance_right",
-                    "distance_bottom",
-                    "distance_left",
+                    "distances",
+                    "effect_extent",
                 },
             ),
             (
@@ -445,6 +451,8 @@ class DocxImageTests(unittest.TestCase):
                 {
                     "horizontal",
                     "vertical",
+                    "anchor_distances",
+                    "anchor_effect_extent",
                     "wrap",
                     "relative_height",
                     "behind_text",
@@ -458,6 +466,8 @@ class DocxImageTests(unittest.TestCase):
                 {
                     "horizontal",
                     "vertical",
+                    "anchor_distances",
+                    "anchor_effect_extent",
                     "wrap",
                     "relative_height",
                     "behind_text",
@@ -529,12 +539,34 @@ class DocxImageTests(unittest.TestCase):
                     branches["square"]["properties"]["side"],
                     {"not": {"type": "null"}},
                 )
-                for mode in ("none", "top_and_bottom"):
-                    self.assertIn("mode", branches[mode]["required"])
-                    self.assertEqual(
-                        branches[mode]["not"],
-                        {"required": ["side"]},
-                    )
+                self.assertIn("mode", branches["none"]["required"])
+                self.assertEqual(
+                    branches["none"]["allOf"],
+                    [
+                        {"not": {"required": ["side"]}},
+                        {"not": {"required": ["distances"]}},
+                        {"not": {"required": ["effect_extent"]}},
+                    ],
+                )
+                self.assertIn(
+                    "mode",
+                    branches["top_and_bottom"]["required"],
+                )
+                self.assertEqual(
+                    branches["top_and_bottom"]["not"],
+                    {"required": ["side"]},
+                )
+                self.assertEqual(
+                    branches["top_and_bottom"]["properties"][
+                        "distances"
+                    ],
+                    {
+                        "allOf": [
+                            {"not": {"required": ["left"]}},
+                            {"not": {"required": ["right"]}},
+                        ]
+                    },
+                )
             if kind == "header-footer-image-block":
                 capabilities = schema["properties"]["capabilities"]
                 self.assertEqual(
@@ -554,7 +586,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.38")
+        self.assertEqual(spec["spec_version"], "0.2-draft.39")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -769,13 +801,21 @@ class DocxImageTests(unittest.TestCase):
                 "relative_to": "paragraph",
                 "offset": {"value": 0.4, "unit": "pt"},
             },
+            "anchor_distances": {
+                "top": {"value": 1.0, "unit": "pt"},
+                "right": {"value": 4.0, "unit": "pt"},
+                "bottom": {"value": 2.0, "unit": "pt"},
+                "left": {"value": 3.0, "unit": "pt"},
+            },
+            "anchor_effect_extent": {
+                "left": {"value": 0.0, "unit": "pt"},
+                "top": {"value": 0.0, "unit": "pt"},
+                "right": {"value": 0.0, "unit": "pt"},
+                "bottom": {"value": 0.0, "unit": "pt"},
+            },
             "wrap": {
                 "mode": "square",
                 "side": "both_sides",
-                "distance_top": {"value": 1.0, "unit": "pt"},
-                "distance_right": {"value": 4.0, "unit": "pt"},
-                "distance_bottom": {"value": 2.0, "unit": "pt"},
-                "distance_left": {"value": 3.0, "unit": "pt"},
             },
             "relative_height": 1026,
             "behind_text": False,
@@ -891,24 +931,15 @@ class DocxImageTests(unittest.TestCase):
                 self.assertEqual(image["placement"], "floating")
                 self.assertEqual(
                     image["floating"]["wrap"],
+                    {"mode": mode},
+                )
+                self.assertEqual(
+                    image["floating"]["anchor_distances"],
                     {
-                        "mode": mode,
-                        "distance_top": {
-                            "value": 1.0,
-                            "unit": "pt",
-                        },
-                        "distance_right": {
-                            "value": 4.0,
-                            "unit": "pt",
-                        },
-                        "distance_bottom": {
-                            "value": 2.0,
-                            "unit": "pt",
-                        },
-                        "distance_left": {
-                            "value": 3.0,
-                            "unit": "pt",
-                        },
+                        "top": {"value": 1.0, "unit": "pt"},
+                        "right": {"value": 4.0, "unit": "pt"},
+                        "bottom": {"value": 2.0, "unit": "pt"},
+                        "left": {"value": 3.0, "unit": "pt"},
                     },
                 )
                 self.assertNotIn("side", image["floating"]["wrap"])
@@ -944,6 +975,231 @@ class DocxImageTests(unittest.TestCase):
                     updated.document.to_spec()["content"][0]["floating"],
                 )
                 self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+
+    def test_layered_anchor_and_wrap_geometry_updates_and_clears(
+        self,
+    ) -> None:
+        source = _image_document(anchored=True, cropped=True)
+        with ZipFile(io.BytesIO(source)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        anchor = root.find(f".//{_q(WP, 'anchor')}")
+        assert anchor is not None
+        anchor_effect = anchor.find(f"./{_q(WP, 'effectExtent')}")
+        wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
+        assert anchor_effect is not None
+        assert wrap is not None
+        anchor_effect.attrib.update(
+            {
+                "l": "-6350",
+                "t": "12700",
+                "r": "19050",
+                "b": "25400",
+            }
+        )
+        wrap.attrib.update(
+            {
+                "distT": "63500",
+                "distR": "76200",
+                "distB": "88900",
+                "distL": "101600",
+            }
+        )
+        ET.SubElement(
+            wrap,
+            _q(WP, "effectExtent"),
+            {
+                "l": "114300",
+                "t": "127000",
+                "r": "139700",
+                "b": "152400",
+            },
+        )
+        layered = _rewrite_package(
+            source,
+            replacements={
+                "word/document.xml": serialize_xml(root),
+            },
+            additions={},
+        )
+
+        document = Document.from_docx(layered)
+        image = document.to_spec()["content"][0]
+        floating = image["floating"]
+        self.assertEqual(
+            floating["anchor_distances"],
+            {
+                "top": {"value": 1.0, "unit": "pt"},
+                "right": {"value": 4.0, "unit": "pt"},
+                "bottom": {"value": 2.0, "unit": "pt"},
+                "left": {"value": 3.0, "unit": "pt"},
+            },
+        )
+        self.assertEqual(
+            floating["anchor_effect_extent"],
+            {
+                "left": {"value": -0.5, "unit": "pt"},
+                "top": {"value": 1.0, "unit": "pt"},
+                "right": {"value": 1.5, "unit": "pt"},
+                "bottom": {"value": 2.0, "unit": "pt"},
+            },
+        )
+        self.assertEqual(
+            floating["wrap"],
+            {
+                "mode": "square",
+                "side": "both_sides",
+                "distances": {
+                    "top": {"value": 5.0, "unit": "pt"},
+                    "right": {"value": 6.0, "unit": "pt"},
+                    "bottom": {"value": 7.0, "unit": "pt"},
+                    "left": {"value": 8.0, "unit": "pt"},
+                },
+                "effect_extent": {
+                    "left": {"value": 9.0, "unit": "pt"},
+                    "top": {"value": 10.0, "unit": "pt"},
+                    "right": {"value": 11.0, "unit": "pt"},
+                    "bottom": {"value": 12.0, "unit": "pt"},
+                },
+            },
+        )
+        self.assertEqual(document.to_bytes("docx"), layered)
+
+        requested = {
+            "anchor_distances": {
+                "top": {"value": 2.5, "unit": "pt"},
+            },
+            "anchor_effect_extent": {
+                "left": {"value": -1, "unit": "pt"},
+                "top": {"value": 2, "unit": "pt"},
+                "right": {"value": 3, "unit": "pt"},
+                "bottom": {"value": 4, "unit": "pt"},
+            },
+            "wrap": {
+                "mode": "top_and_bottom",
+                "distances": {
+                    "top": {"value": 6, "unit": "pt"},
+                    "bottom": {"value": 7, "unit": "pt"},
+                },
+                "effect_extent": {
+                    "left": {"value": -2, "unit": "pt"},
+                    "top": {"value": 1, "unit": "pt"},
+                    "right": {"value": 2, "unit": "pt"},
+                    "bottom": {"value": 3, "unit": "pt"},
+                },
+            },
+        }
+        updated = document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": requested,
+                }
+            ]
+        )
+        self.assertTrue(updated.success, updated.model_dump())
+        assert updated.document is not None
+        updated_layout = updated.document.to_spec()["content"][0][
+            "floating"
+        ]
+        for field_name, value in requested.items():
+            self.assertEqual(updated_layout[field_name], value)
+        output = updated.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            updated_root = parse_xml(package.read("word/document.xml"))
+            self.assertEqual(
+                package.read("word/media/image1.png"),
+                PNG,
+            )
+        updated_anchor = updated_root.find(f".//{_q(WP, 'anchor')}")
+        assert updated_anchor is not None
+        self.assertEqual(
+            {
+                name: updated_anchor.get(name)
+                for name in ("distT", "distR", "distB", "distL")
+            },
+            {
+                "distT": "31750",
+                "distR": None,
+                "distB": None,
+                "distL": None,
+            },
+        )
+        updated_anchor_effect = updated_anchor.find(
+            f"./{_q(WP, 'effectExtent')}"
+        )
+        assert updated_anchor_effect is not None
+        self.assertEqual(
+            updated_anchor_effect.attrib,
+            {
+                "l": "-12700",
+                "t": "25400",
+                "r": "38100",
+                "b": "50800",
+            },
+        )
+        updated_wrap = updated_anchor.find(
+            f"./{_q(WP, 'wrapTopAndBottom')}"
+        )
+        assert updated_wrap is not None
+        self.assertEqual(
+            updated_wrap.attrib,
+            {"distT": "76200", "distB": "88900"},
+        )
+        updated_wrap_effect = updated_wrap.find(
+            f"./{_q(WP, 'effectExtent')}"
+        )
+        assert updated_wrap_effect is not None
+        self.assertEqual(
+            updated_wrap_effect.attrib,
+            {
+                "l": "-25400",
+                "t": "12700",
+                "r": "25400",
+                "b": "38100",
+            },
+        )
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            reopened.to_spec()["content"][0]["floating"],
+            updated_layout,
+        )
+
+        cleared = reopened.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "clear": [
+                        "anchor_distances",
+                        "anchor_effect_extent",
+                    ],
+                }
+            ]
+        )
+        self.assertTrue(cleared.success, cleared.model_dump())
+        assert cleared.document is not None
+        cleared_layout = cleared.document.to_spec()["content"][0][
+            "floating"
+        ]
+        self.assertNotIn("anchor_distances", cleared_layout)
+        self.assertNotIn("anchor_effect_extent", cleared_layout)
+        cleared_bytes = cleared.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(cleared_bytes)) as package:
+            cleared_root = parse_xml(package.read("word/document.xml"))
+        cleared_anchor = cleared_root.find(f".//{_q(WP, 'anchor')}")
+        assert cleared_anchor is not None
+        for attribute_name in ("distT", "distR", "distB", "distL"):
+            self.assertNotIn(attribute_name, cleared_anchor.attrib)
+        self.assertIsNone(
+            cleared_anchor.find(f"./{_q(WP, 'effectExtent')}")
+        )
+        self.assertEqual(
+            Document.from_docx(cleared_bytes).to_spec()["content"][0][
+                "floating"
+            ],
+            cleared_layout,
+        )
 
     def test_floating_wrap_mode_switch_replaces_exact_native_child(
         self,
@@ -1035,18 +1291,22 @@ class DocxImageTests(unittest.TestCase):
         assert native_square is not None
         self.assertEqual(native_square.attrib, {"wrapText": "largest"})
         reopened = Document.from_docx(square_bytes)
+        reopened_layout = reopened.to_spec()["content"][0]["floating"]
         self.assertEqual(
-            reopened.to_spec()["content"][0]["floating"]["wrap"],
+            reopened_layout["wrap"],
             {
                 "mode": "square",
                 "side": "largest",
-                **{
-                    name: {
-                        "value": float(value["value"]),
-                        "unit": "pt",
-                    }
-                    for name, value in distances.items()
-                },
+            },
+        )
+        self.assertEqual(
+            reopened_layout["anchor_distances"],
+            {
+                field_name.removeprefix("distance_"): {
+                    "value": float(value["value"]),
+                    "unit": "pt",
+                }
+                for field_name, value in distances.items()
             },
         )
         self.assertEqual(reopened.image_bytes(image["id"]), PNG)
@@ -1110,7 +1370,15 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(
             capabilities["floating_wrap_distance_authority"],
-            "four_native_anchor_distances",
+            "native_anchor_and_wrap_element_attributes_are_separate",
+        )
+        self.assertEqual(
+            capabilities["floating_effect_extent_authority"],
+            "wrap_child_overrides_anchor_for_square_and_top_bottom",
+        )
+        self.assertEqual(
+            capabilities["floating_layout_clearable_fields"],
+            ["anchor_distances", "anchor_effect_extent"],
         )
 
         switched = document.apply(
@@ -1286,13 +1554,21 @@ class DocxImageTests(unittest.TestCase):
                 "relative_to": "margin",
                 "offset": {"value": -18, "unit": "pt"},
             },
+            "anchor_distances": {
+                "top": {"value": 5, "unit": "pt"},
+                "right": {"value": 6, "unit": "pt"},
+                "bottom": {"value": 7, "unit": "pt"},
+                "left": {"value": 8, "unit": "pt"},
+            },
+            "anchor_effect_extent": {
+                "left": {"value": -0.5, "unit": "pt"},
+                "top": {"value": 1, "unit": "pt"},
+                "right": {"value": 1.5, "unit": "pt"},
+                "bottom": {"value": 2, "unit": "pt"},
+            },
             "wrap": {
                 "mode": "square",
                 "side": "right",
-                "distance_top": {"value": 5, "unit": "pt"},
-                "distance_right": {"value": 6, "unit": "pt"},
-                "distance_bottom": {"value": 7, "unit": "pt"},
-                "distance_left": {"value": 8, "unit": "pt"},
             },
             "relative_height": 2048,
             "behind_text": True,
@@ -1385,6 +1661,18 @@ class DocxImageTests(unittest.TestCase):
             f"./{_q(WP, 'posOffset')}"
         ).text = "-228600"
         expected_wrap.set("wrapText", "right")
+        expected_effect_extent = expected_anchor.find(
+            f"./{_q(WP, 'effectExtent')}"
+        )
+        assert expected_effect_extent is not None
+        expected_effect_extent.attrib.update(
+            {
+                "l": "-6350",
+                "t": "12700",
+                "r": "19050",
+                "b": "25400",
+            }
+        )
         expected_anchor.attrib.update(
             {
                 "distT": "63500",
@@ -1524,22 +1812,27 @@ class DocxImageTests(unittest.TestCase):
                     "wrap": {
                         "mode": "square",
                         "side": "left",
-                        "distance_top": {
-                            "value": -1,
+                        "distances": {
+                            "top": {
+                                "value": -1,
+                                "unit": "pt",
+                            },
+                        },
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "anchor_effect_extent": {
+                        "left": {
+                            "value": 3_000_000_000,
                             "unit": "pt",
                         },
-                        "distance_right": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
-                        "distance_bottom": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
-                        "distance_left": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
+                        "top": {"value": 0, "unit": "pt"},
+                        "right": {"value": 0, "unit": "pt"},
+                        "bottom": {"value": 0, "unit": "pt"},
                     }
                 },
             },
@@ -1549,22 +1842,6 @@ class DocxImageTests(unittest.TestCase):
                 "set": {
                     "wrap": {
                         "mode": "square",
-                        "distance_top": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
-                        "distance_right": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
-                        "distance_bottom": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
-                        "distance_left": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
                     }
                 },
             },
@@ -1575,22 +1852,6 @@ class DocxImageTests(unittest.TestCase):
                     "wrap": {
                         "mode": "none",
                         "side": "both_sides",
-                        "distance_top": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
-                        "distance_right": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
-                        "distance_bottom": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
-                        "distance_left": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
                     }
                 },
             },
@@ -1600,22 +1861,26 @@ class DocxImageTests(unittest.TestCase):
                 "set": {
                     "wrap": {
                         "mode": "top_and_bottom",
-                        "side": None,
-                        "distance_top": {
-                            "value": 0,
-                            "unit": "pt",
+                        "distances": {
+                            "right": {
+                                "value": 0,
+                                "unit": "pt",
+                            },
                         },
-                        "distance_right": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
-                        "distance_bottom": {
-                            "value": 0,
-                            "unit": "pt",
-                        },
-                        "distance_left": {
-                            "value": 0,
-                            "unit": "pt",
+                    }
+                },
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {
+                    "wrap": {
+                        "mode": "none",
+                        "effect_extent": {
+                            "left": {"value": 0, "unit": "pt"},
+                            "top": {"value": 0, "unit": "pt"},
+                            "right": {"value": 0, "unit": "pt"},
+                            "bottom": {"value": 0, "unit": "pt"},
                         },
                     }
                 },
@@ -1624,7 +1889,21 @@ class DocxImageTests(unittest.TestCase):
                 "op": "image.anchor.update",
                 "target": image["id"],
                 "set": {"behind_text": True},
-                "clear": [],
+                "clear": ["behind_text"],
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "set": {"anchor_distances": {}},
+                "clear": ["anchor_distances"],
+            },
+            {
+                "op": "image.anchor.update",
+                "target": image["id"],
+                "clear": [
+                    "anchor_effect_extent",
+                    "anchor_effect_extent",
+                ],
             },
         )
         for operation in invalid_operations:
@@ -1774,7 +2053,7 @@ class DocxImageTests(unittest.TestCase):
             "tight_wrap",
             "wrap_none_attribute",
             "wrap_text_content",
-            "wrap_top_bottom_child",
+            "malformed_wrap_effect_extent",
             "duplicate_wrap",
             "nondefault_bw_mode",
             "duplicate_no_fill",
@@ -1814,7 +2093,7 @@ class DocxImageTests(unittest.TestCase):
                 wrap.tag = _q(WP, "wrapNone")
                 wrap.attrib.clear()
                 wrap.text = "unexpected"
-            elif case == "wrap_top_bottom_child":
+            elif case == "malformed_wrap_effect_extent":
                 wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
                 assert wrap is not None
                 wrap.tag = _q(WP, "wrapTopAndBottom")
@@ -1822,7 +2101,7 @@ class DocxImageTests(unittest.TestCase):
                 ET.SubElement(
                     wrap,
                     _q(WP, "effectExtent"),
-                    {"l": "0", "t": "0", "r": "0", "b": "0"},
+                    {"l": "0", "t": "0", "r": "0"},
                 )
             elif case == "duplicate_wrap":
                 ET.SubElement(anchor, _q(WP, "wrapNone"))
@@ -3147,23 +3426,47 @@ class DocxImageTests(unittest.TestCase):
                             "relative_to": "margin",
                             "offset": {"value": 24, "unit": "pt"},
                         },
+                        "anchor_distances": {
+                            "top": {"value": 2, "unit": "pt"},
+                            "right": {"value": 4, "unit": "pt"},
+                            "bottom": {"value": 2, "unit": "pt"},
+                            "left": {"value": 4, "unit": "pt"},
+                        },
+                        "anchor_effect_extent": {
+                            "left": {"value": -0.5, "unit": "pt"},
+                            "top": {"value": 1, "unit": "pt"},
+                            "right": {"value": 1.5, "unit": "pt"},
+                            "bottom": {"value": 2, "unit": "pt"},
+                        },
                         "wrap": {
                             "mode": "top_and_bottom",
-                            "distance_top": {
-                                "value": 2,
-                                "unit": "pt",
+                            "distances": {
+                                "top": {
+                                    "value": 1,
+                                    "unit": "pt",
+                                },
+                                "bottom": {
+                                    "value": 2,
+                                    "unit": "pt",
+                                },
                             },
-                            "distance_right": {
-                                "value": 4,
-                                "unit": "pt",
-                            },
-                            "distance_bottom": {
-                                "value": 2,
-                                "unit": "pt",
-                            },
-                            "distance_left": {
-                                "value": 4,
-                                "unit": "pt",
+                            "effect_extent": {
+                                "left": {
+                                    "value": 3,
+                                    "unit": "pt",
+                                },
+                                "top": {
+                                    "value": 4,
+                                    "unit": "pt",
+                                },
+                                "right": {
+                                    "value": 5,
+                                    "unit": "pt",
+                                },
+                                "bottom": {
+                                    "value": 6,
+                                    "unit": "pt",
+                                },
                             },
                         },
                         "behind_text": True,
@@ -3205,8 +3508,32 @@ class DocxImageTests(unittest.TestCase):
         self.assertIsNone(anchor.find(f"./{_q(WP, 'wrapNone')}"))
         wrap = anchor.find(f"./{_q(WP, 'wrapTopAndBottom')}")
         assert wrap is not None
-        self.assertFalse(wrap.attrib)
-        self.assertFalse(len(wrap))
+        self.assertEqual(
+            wrap.attrib,
+            {"distT": "12700", "distB": "25400"},
+        )
+        wrap_effect = wrap.find(f"./{_q(WP, 'effectExtent')}")
+        assert wrap_effect is not None
+        self.assertEqual(
+            wrap_effect.attrib,
+            {
+                "l": "38100",
+                "t": "50800",
+                "r": "63500",
+                "b": "76200",
+            },
+        )
+        anchor_effect = anchor.find(f"./{_q(WP, 'effectExtent')}")
+        assert anchor_effect is not None
+        self.assertEqual(
+            anchor_effect.attrib,
+            {
+                "l": "-6350",
+                "t": "12700",
+                "r": "19050",
+                "b": "25400",
+            },
+        )
         self.assertEqual(
             anchor.get(_q(WP14, "anchorId")),
             "A1B2C3D4",
@@ -3226,8 +3553,20 @@ class DocxImageTests(unittest.TestCase):
         self.assertTrue(reopened_image["floating"]["behind_text"])
         self.assertFalse(reopened_image["floating"]["allow_overlap"])
         self.assertEqual(
-            reopened_image["floating"]["wrap"]["mode"],
-            "top_and_bottom",
+            reopened_image["floating"]["wrap"],
+            {
+                "mode": "top_and_bottom",
+                "distances": {
+                    "top": {"value": 1.0, "unit": "pt"},
+                    "bottom": {"value": 2.0, "unit": "pt"},
+                },
+                "effect_extent": {
+                    "left": {"value": 3.0, "unit": "pt"},
+                    "top": {"value": 4.0, "unit": "pt"},
+                    "right": {"value": 5.0, "unit": "pt"},
+                    "bottom": {"value": 6.0, "unit": "pt"},
+                },
+            },
         )
         self.assertNotIn(
             "side",
@@ -3858,13 +4197,21 @@ class DocxImageTests(unittest.TestCase):
                 "relative_to": "paragraph",
                 "offset": {"value": 0.5, "unit": "in"},
             },
+            "anchor_distances": {
+                "top": {"value": 2, "unit": "pt"},
+                "right": {"value": 6, "unit": "pt"},
+                "bottom": {"value": 2, "unit": "pt"},
+                "left": {"value": 6, "unit": "pt"},
+            },
+            "anchor_effect_extent": {
+                "left": {"value": -0.5, "unit": "pt"},
+                "top": {"value": 1, "unit": "pt"},
+                "right": {"value": 1.5, "unit": "pt"},
+                "bottom": {"value": 2, "unit": "pt"},
+            },
             "wrap": {
                 "mode": "square",
                 "side": "both_sides",
-                "distance_top": {"value": 2, "unit": "pt"},
-                "distance_right": {"value": 6, "unit": "pt"},
-                "distance_bottom": {"value": 2, "unit": "pt"},
-                "distance_left": {"value": 6, "unit": "pt"},
             },
             "relative_height": 1536,
             "behind_text": False,
@@ -3984,6 +4331,17 @@ class DocxImageTests(unittest.TestCase):
             anchor.find(f"./{_q(WP, 'wrapSquare')}").attrib,
             {"wrapText": "bothSides"},
         )
+        effect_extent = anchor.find(f"./{_q(WP, 'effectExtent')}")
+        assert effect_extent is not None
+        self.assertEqual(
+            effect_extent.attrib,
+            {
+                "l": "-6350",
+                "t": "12700",
+                "r": "19050",
+                "b": "25400",
+            },
+        )
         document_properties = anchor.find(f"./{_q(WP, 'docPr')}")
         assert document_properties is not None
         self.assertGreater(int(document_properties.get("id", "0")), 0)
@@ -4060,13 +4418,15 @@ class DocxImageTests(unittest.TestCase):
                 "relative_to": "page",
                 "alignment": "bottom",
             },
+            "anchor_distances": {
+                "top": {"value": 3, "unit": "pt"},
+                "right": {"value": 5, "unit": "pt"},
+                "bottom": {"value": 3, "unit": "pt"},
+                "left": {"value": 5, "unit": "pt"},
+            },
             "wrap": {
                 "mode": "square",
                 "side": "largest",
-                "distance_top": {"value": 3, "unit": "pt"},
-                "distance_right": {"value": 5, "unit": "pt"},
-                "distance_bottom": {"value": 3, "unit": "pt"},
-                "distance_left": {"value": 5, "unit": "pt"},
             },
             "relative_height": 4096,
             "behind_text": False,
@@ -4491,24 +4851,26 @@ class DocxImageTests(unittest.TestCase):
                         "relative_to": "page",
                         "alignment": "center",
                     },
+                    "anchor_distances": {
+                        "top": {
+                            "value": 3,
+                            "unit": "pt",
+                        },
+                        "right": {
+                            "value": 5,
+                            "unit": "pt",
+                        },
+                        "bottom": {
+                            "value": 3,
+                            "unit": "pt",
+                        },
+                        "left": {
+                            "value": 5,
+                            "unit": "pt",
+                        },
+                    },
                     "wrap": {
                         "mode": mode,
-                        "distance_top": {
-                            "value": 3,
-                            "unit": "pt",
-                        },
-                        "distance_right": {
-                            "value": 5,
-                            "unit": "pt",
-                        },
-                        "distance_bottom": {
-                            "value": 3,
-                            "unit": "pt",
-                        },
-                        "distance_left": {
-                            "value": 5,
-                            "unit": "pt",
-                        },
                     },
                     "relative_height": 2048,
                     "behind_text": mode == "none",
@@ -4573,13 +4935,15 @@ class DocxImageTests(unittest.TestCase):
                     "relative_to": "paragraph",
                     "offset": {"value": 24, "unit": "pt"},
                 },
+                "anchor_distances": {
+                    "top": {"value": 2, "unit": "pt"},
+                    "right": {"value": 4, "unit": "pt"},
+                    "bottom": {"value": 2, "unit": "pt"},
+                    "left": {"value": 4, "unit": "pt"},
+                },
                 "wrap": {
                     "mode": "square",
                     "side": "both_sides",
-                    "distance_top": {"value": 2, "unit": "pt"},
-                    "distance_right": {"value": 4, "unit": "pt"},
-                    "distance_bottom": {"value": 2, "unit": "pt"},
-                    "distance_left": {"value": 4, "unit": "pt"},
                 },
                 "relative_height": 1024,
                 "behind_text": False,

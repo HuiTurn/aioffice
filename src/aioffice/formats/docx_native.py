@@ -3701,7 +3701,8 @@ def apply_docx_operations(
                 mapped_elements[0],
                 source_part=source_ref.part_uri,
                 result=result_image,
-                fields=set(operation.get("set", {})),
+                fields=set(operation.get("set", {}))
+                | set(operation.get("clear", [])),
             )
             changed_xml_parts.add(source_ref.part_uri)
             continue

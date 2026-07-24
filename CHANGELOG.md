@@ -120,8 +120,24 @@
   Schema `oneOf`.
 - Taught `image.anchor.update` to switch the complete native wrap child safely and
   extended floating insertion, cloning, inspection, capabilities, and Workspace
-  metadata to all three supported modes; tight/through polygons and wrap-specific
-  effects remain opaque.
+  metadata to all three supported modes; tight/through polygons and unsupported
+  DrawingML visual effects remain opaque.
+- Split the floating-image protocol into native layers: optional
+  `wp:anchor/@dist*` values now project as `anchor_distances`, optional parent
+  `wp:effectExtent` as `anchor_effect_extent`, and square/top-and-bottom wrap-local
+  distances and child effect extents inside `wrap`.
+- Preserved attribute and element absence instead of inventing zero values, accepted
+  the full signed OOXML `ST_Coordinate` range for effect extents, and retained the
+  wrap-child-over-parent boundary precedence as explicit machine-readable evidence.
+- Added selective lowering for all layered fields, including complete wrap
+  replacement and `clear` support for optional parent distances/effect extent, with
+  exact native re-projection in body, header, and footer stories.
+- Kept dev38 layout input compatible by migrating legacy `wrap.distance_*` values to
+  their actual parent-anchor layer while emitting only the corrected dev39 canonical
+  representation.
+- Added standalone JSON Schemas and capability metadata for text distances and
+  effect extents, plus strict refusal for malformed leaves, illegal mode/edge
+  combinations, conflicting set/clear requests, and out-of-range values.
 - Preserved story-local relationship semantics while replacing a cloned header or
   footer logo copy-on-write, leaving the source story, relationship, media, body, and
   unrelated pages untouched.
@@ -479,6 +495,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.36`.
 - Advanced the AiOffice Document Spec to `0.2-draft.37`.
 - Advanced the AiOffice Document Spec to `0.2-draft.38`.
+- Advanced the AiOffice Document Spec to `0.2-draft.39`.
 
 ## 0.1.0
 

@@ -17,8 +17,10 @@ from aioffice.native import NativePackage
 from aioffice.native.xml import parse_xml, serialize_xml
 from aioffice.spec.models import (
     AssetRef,
+    FloatingImageEffectExtent,
     FloatingImageHorizontalPosition,
     FloatingImageLayout,
+    FloatingImageTextDistances,
     FloatingImageTextWrap,
     FloatingImageVerticalPosition,
     ImageBlock,
@@ -52,6 +54,8 @@ RELATIONSHIPS_CONTENT_TYPE = (
     "application/vnd.openxmlformats-package.relationships+xml"
 )
 EMU_PER_POINT = 12_700
+EFFECT_EXTENT_MIN_EMU = -27_273_042_329_600
+EFFECT_EXTENT_MAX_EMU = 27_273_042_316_900
 
 _VISUAL_EFFECT_NAMES = {
     "alphaBiLevel",
@@ -207,6 +211,18 @@ _VERTICAL_RELATIVE_TO_NATIVE = {
 _WRAP_SIDE_TO_NATIVE = {
     value: key for key, value in _WRAP_SIDES.items()
 }
+_TEXT_DISTANCE_FIELDS = (
+    ("top", "distT"),
+    ("right", "distR"),
+    ("bottom", "distB"),
+    ("left", "distL"),
+)
+_EFFECT_EXTENT_FIELDS = (
+    ("left", "l"),
+    ("top", "t"),
+    ("right", "r"),
+    ("bottom", "b"),
+)
 
 
 def _strict_boolean(value: str | None) -> bool | None:
@@ -221,6 +237,55 @@ def _emu_length(value: int) -> Length:
     return Length(
         value=round(value / EMU_PER_POINT, 6),
         unit="pt",
+    )
+
+
+def _floating_text_distances(
+    element: ET.Element,
+    *,
+    allowed_edges: frozenset[str],
+) -> FloatingImageTextDistances | None:
+    payload: dict[str, Length] = {}
+    for field_name, attribute_name in _TEXT_DISTANCE_FIELDS:
+        if attribute_name not in element.attrib:
+            continue
+        if field_name not in allowed_edges:
+            raise ValueError("Unsupported text-distance edge.")
+        native_value = int(element.attrib[attribute_name])
+        if native_value < 0 or native_value > 2**32 - 1:
+            raise ValueError("Text distance is outside UInt32.")
+        payload[field_name] = _emu_length(native_value)
+    if not payload:
+        return None
+    return FloatingImageTextDistances.model_validate(payload)
+
+
+def _floating_effect_extent(
+    element: ET.Element | None,
+) -> FloatingImageEffectExtent | None:
+    if element is None:
+        return None
+    if (
+        set(element.attrib) != {"l", "t", "r", "b"}
+        or len(element)
+        or (element.text or "").strip()
+    ):
+        raise ValueError("Effect extent is not one strict native leaf.")
+    values = {
+        field_name: int(element.attrib[attribute_name])
+        for field_name, attribute_name in _EFFECT_EXTENT_FIELDS
+    }
+    if any(
+        value < EFFECT_EXTENT_MIN_EMU
+        or value > EFFECT_EXTENT_MAX_EMU
+        for value in values.values()
+    ):
+        raise ValueError("Effect extent is outside ST_Coordinate.")
+    return FloatingImageEffectExtent.model_validate(
+        {
+            field_name: _emu_length(native_value)
+            for field_name, native_value in values.items()
+        }
     )
 
 
@@ -242,22 +307,86 @@ def _native_position_value(
     return "align", alignment
 
 
+def _native_text_distance_attributes(
+    distances: FloatingImageTextDistances | None,
+    *,
+    allowed_edges: frozenset[str],
+) -> dict[str, str] | None:
+    attributes: dict[str, str] = {}
+    if distances is None:
+        return attributes
+    for field_name, attribute_name in _TEXT_DISTANCE_FIELDS:
+        value = getattr(distances, field_name)
+        if value is None:
+            continue
+        if field_name not in allowed_edges:
+            return None
+        distance_emu = round(value.to_points() * EMU_PER_POINT)
+        if distance_emu < 0 or distance_emu > 2**32 - 1:
+            return None
+        attributes[attribute_name] = str(distance_emu)
+    return attributes
+
+
+def _native_effect_extent(
+    effect_extent: FloatingImageEffectExtent,
+) -> ET.Element | None:
+    attributes: dict[str, str] = {}
+    for field_name, attribute_name in _EFFECT_EXTENT_FIELDS:
+        extent_emu = round(
+            getattr(effect_extent, field_name).to_points()
+            * EMU_PER_POINT
+        )
+        if (
+            extent_emu < EFFECT_EXTENT_MIN_EMU
+            or extent_emu > EFFECT_EXTENT_MAX_EMU
+        ):
+            return None
+        attributes[attribute_name] = str(extent_emu)
+    return ET.Element(_q(WP, "effectExtent"), attributes)
+
+
 def _native_wrap_value(
     wrap: FloatingImageTextWrap,
-) -> tuple[str, dict[str, str]] | None:
+) -> ET.Element | None:
     tag = _WRAP_MODE_TO_TAG.get(wrap.mode)
     if tag is None:
         return None
+    attributes: dict[str, str] = {}
     if wrap.mode == "square":
         if wrap.side is None:
             return None
         native_side = _WRAP_SIDE_TO_NATIVE.get(wrap.side)
         if native_side is None:
             return None
-        return tag, {"wrapText": native_side}
-    if wrap.side is not None:
+        attributes["wrapText"] = native_side
+        allowed_edges = frozenset({"top", "right", "bottom", "left"})
+    elif wrap.mode == "top_and_bottom":
+        if wrap.side is not None:
+            return None
+        allowed_edges = frozenset({"top", "bottom"})
+    elif (
+        wrap.side is not None
+        or wrap.distances is not None
+        or wrap.effect_extent is not None
+    ):
         return None
-    return tag, {}
+    else:
+        allowed_edges = frozenset()
+    distance_attributes = _native_text_distance_attributes(
+        wrap.distances,
+        allowed_edges=allowed_edges,
+    )
+    if distance_attributes is None:
+        return None
+    attributes.update(distance_attributes)
+    element = ET.Element(tag, attributes)
+    if wrap.effect_extent is not None:
+        effect_extent = _native_effect_extent(wrap.effect_extent)
+        if effect_extent is None or wrap.mode == "none":
+            return None
+        element.append(effect_extent)
+    return element
 
 
 def floating_image_layout_matches(
@@ -284,6 +413,50 @@ def floating_image_layout_matches(
             return left_offset is right_offset
         return emu(left_offset) == emu(right_offset)
 
+    def distances_match(
+        left_distances: FloatingImageTextDistances | None,
+        right_distances: FloatingImageTextDistances | None,
+    ) -> bool:
+        for field_name, _ in _TEXT_DISTANCE_FIELDS:
+            left_value = (
+                getattr(left_distances, field_name)
+                if left_distances is not None
+                else None
+            )
+            right_value = (
+                getattr(right_distances, field_name)
+                if right_distances is not None
+                else None
+            )
+            if left_value is None or right_value is None:
+                if left_value is not right_value:
+                    return False
+            elif emu(left_value) != emu(right_value):
+                return False
+        return True
+
+    def effect_extents_match(
+        left_extent: FloatingImageEffectExtent | None,
+        right_extent: FloatingImageEffectExtent | None,
+    ) -> bool:
+        for field_name, _ in _EFFECT_EXTENT_FIELDS:
+            left_value = (
+                getattr(left_extent, field_name)
+                if left_extent is not None
+                else None
+            )
+            right_value = (
+                getattr(right_extent, field_name)
+                if right_extent is not None
+                else None
+            )
+            if left_value is None or right_value is None:
+                if left_value is not right_value:
+                    return False
+            elif emu(left_value) != emu(right_value):
+                return False
+        return True
+
     return (
         left.horizontal.relative_to == right.horizontal.relative_to
         and position_matches(
@@ -299,16 +472,24 @@ def floating_image_layout_matches(
             right.vertical.offset,
             right.vertical.alignment,
         )
+        and distances_match(
+            left.anchor_distances,
+            right.anchor_distances,
+        )
+        and effect_extents_match(
+            left.anchor_effect_extent,
+            right.anchor_effect_extent,
+        )
         and left.wrap.mode == right.wrap.mode
         and left.wrap.side == right.wrap.side
-        and emu(left.wrap.distance_top)
-        == emu(right.wrap.distance_top)
-        and emu(left.wrap.distance_right)
-        == emu(right.wrap.distance_right)
-        and emu(left.wrap.distance_bottom)
-        == emu(right.wrap.distance_bottom)
-        and emu(left.wrap.distance_left)
-        == emu(right.wrap.distance_left)
+        and distances_match(
+            left.wrap.distances,
+            right.wrap.distances,
+        )
+        and effect_extents_match(
+            left.wrap.effect_extent,
+            right.wrap.effect_extent,
+        )
         and left.relative_height == right.relative_height
         and left.behind_text == right.behind_text
         and left.locked == right.locked
@@ -335,10 +516,6 @@ def _floating_image_layout(
         _q(WP14, "editId"),
     }
     required_attributes = {
-        "distT",
-        "distB",
-        "distL",
-        "distR",
         "simplePos",
         "relativeHeight",
         "behindDoc",
@@ -468,33 +645,66 @@ def _floating_image_layout(
         return None
 
     wrap_side: WrapSide | None = None
+    wrap_distances: FloatingImageTextDistances | None
+    wrap_effect_extent: FloatingImageEffectExtent | None
     if (wrap.text or "").strip():
         return None
-    if wrap_mode == "square":
-        if set(wrap.attrib) != {"wrapText"} or len(wrap):
-            return None
-        wrap_side = _WRAP_SIDES.get(wrap.attrib["wrapText"])
-        if wrap_side is None:
-            return None
-    elif wrap.attrib or len(wrap):
-        return None
-
     try:
-        distances = {
-            edge: int(anchor.attrib[attribute])
-            for edge, attribute in (
-                ("top", "distT"),
-                ("right", "distR"),
-                ("bottom", "distB"),
-                ("left", "distL"),
+        if wrap_mode == "square":
+            if any(
+                attribute
+                not in {"wrapText", "distT", "distR", "distB", "distL"}
+                for attribute in wrap.attrib
+            ):
+                return None
+            wrap_side = _WRAP_SIDES.get(wrap.attrib.get("wrapText", ""))
+            if wrap_side is None:
+                return None
+            wrap_distances = _floating_text_distances(
+                wrap,
+                allowed_edges=frozenset(
+                    {"top", "right", "bottom", "left"}
+                ),
             )
-        }
+        elif wrap_mode == "top_and_bottom":
+            if any(
+                attribute not in {"distT", "distB"}
+                for attribute in wrap.attrib
+            ):
+                return None
+            wrap_distances = _floating_text_distances(
+                wrap,
+                allowed_edges=frozenset({"top", "bottom"}),
+            )
+        elif wrap.attrib or len(wrap):
+            return None
+        else:
+            wrap_distances = None
+        if wrap_mode == "none":
+            wrap_effect_extent = None
+        else:
+            if len(wrap) > 1 or any(
+                child.tag != _q(WP, "effectExtent")
+                for child in wrap
+            ):
+                return None
+            wrap_effect_extent = _floating_effect_extent(
+                wrap.find(f"./{_q(WP, 'effectExtent')}")
+            )
+        anchor_distances = _floating_text_distances(
+            anchor,
+            allowed_edges=frozenset(
+                {"top", "right", "bottom", "left"}
+            ),
+        )
+        anchor_effect_extent = _floating_effect_extent(
+            optional_effect_extent
+        )
         relative_height = int(anchor.attrib["relativeHeight"])
     except ValueError:
         return None
     if (
-        any(value < 0 or value > 2**32 - 1 for value in distances.values())
-        or relative_height < 0
+        relative_height < 0
         or relative_height > 2**32 - 1
     ):
         return None
@@ -548,6 +758,8 @@ def _floating_image_layout(
                 ),
             }
         ),
+        anchor_distances=anchor_distances,
+        anchor_effect_extent=anchor_effect_extent,
         wrap=FloatingImageTextWrap.model_validate(
             {
                 "mode": wrap_mode,
@@ -556,10 +768,16 @@ def _floating_image_layout(
                     if wrap_side is not None
                     else {}
                 ),
-                "distance_top": _emu_length(distances["top"]),
-                "distance_right": _emu_length(distances["right"]),
-                "distance_bottom": _emu_length(distances["bottom"]),
-                "distance_left": _emu_length(distances["left"]),
+                **(
+                    {"distances": wrap_distances}
+                    if wrap_distances is not None
+                    else {}
+                ),
+                **(
+                    {"effect_extent": wrap_effect_extent}
+                    if wrap_effect_extent is not None
+                    else {}
+                ),
             }
         ),
         relative_height=relative_height,
@@ -670,16 +888,23 @@ def simple_native_image(
     effect_extent = drawing_container.find(
         f"./{_q(WP, 'effectExtent')}"
     )
-    if effect_extent is not None:
-        try:
-            effect_values = [
-                int(effect_extent.attrib.get(edge, "0"))
-                for edge in ("l", "t", "r", "b")
-            ]
-        except ValueError:
-            return None
-        if any(effect_values):
-            return None
+    try:
+        parsed_effect_extent = _floating_effect_extent(effect_extent)
+    except ValueError:
+        return None
+    if (
+        placement == "inline"
+        and parsed_effect_extent is not None
+        and any(
+            round(
+                getattr(parsed_effect_extent, field_name).to_points()
+                * EMU_PER_POINT
+            )
+            != 0
+            for field_name, _ in _EFFECT_EXTENT_FIELDS
+        )
+    ):
+        return None
 
     graphic_data = graphic.find(f"./{_q(A, 'graphicData')}")
     if (
@@ -1191,26 +1416,45 @@ def patch_simple_native_image_anchor(
         wrap = wraps[0]
         wrap_index = list(anchor).index(wrap)
         anchor.remove(wrap)
-        anchor.insert(
-            wrap_index,
-            ET.Element(native_wrap[0], native_wrap[1]),
+        anchor.insert(wrap_index, native_wrap)
+    if "anchor_distances" in fields or "wrap" in fields:
+        native_distances = _native_text_distance_attributes(
+            layout.anchor_distances,
+            allowed_edges=frozenset(
+                {"top", "right", "bottom", "left"}
+            ),
         )
-        for field_name, attribute_name in (
-            ("distance_top", "distT"),
-            ("distance_right", "distR"),
-            ("distance_bottom", "distB"),
-            ("distance_left", "distL"),
-        ):
-            distance_emu = round(
-                getattr(layout.wrap, field_name).to_points()
-                * EMU_PER_POINT
+        if native_distances is None:
+            raise NativePackageError(
+                "image.anchor.update anchor distance is outside the "
+                "supported range."
             )
-            if distance_emu < 0 or distance_emu > 2**32 - 1:
+        for _, attribute_name in _TEXT_DISTANCE_FIELDS:
+            native_value = native_distances.get(attribute_name)
+            if native_value is None:
+                anchor.attrib.pop(attribute_name, None)
+            else:
+                anchor.set(attribute_name, native_value)
+    if "anchor_effect_extent" in fields:
+        existing_effect_extent = anchor.find(
+            f"./{_q(WP, 'effectExtent')}"
+        )
+        if existing_effect_extent is not None:
+            anchor.remove(existing_effect_extent)
+        if layout.anchor_effect_extent is not None:
+            native_effect_extent = _native_effect_extent(
+                layout.anchor_effect_extent
+            )
+            extent = anchor.find(f"./{_q(WP, 'extent')}")
+            if native_effect_extent is None or extent is None:
                 raise NativePackageError(
-                    "image.anchor.update wrap distance is outside the "
+                    "image.anchor.update effect extent is outside the "
                     "supported range."
                 )
-            anchor.set(attribute_name, str(distance_emu))
+            anchor.insert(
+                list(anchor).index(extent) + 1,
+                native_effect_extent,
+            )
     if "relative_height" in fields:
         anchor.set("relativeHeight", str(layout.relative_height))
     for field_name, attribute_name in (
@@ -1576,28 +1820,19 @@ def insert_simple_native_image_after(
             alignment=layout.vertical.alignment,
             allowed_alignments=_VERTICAL_ALIGNMENTS,
         )
-        distances = {
-            attribute_name: round(
-                getattr(layout.wrap, field_name).to_points()
-                * EMU_PER_POINT
-            )
-            for field_name, attribute_name in (
-                ("distance_top", "distT"),
-                ("distance_right", "distR"),
-                ("distance_bottom", "distB"),
-                ("distance_left", "distL"),
-            )
-        }
+        distances = _native_text_distance_attributes(
+            layout.anchor_distances,
+            allowed_edges=frozenset(
+                {"top", "right", "bottom", "left"}
+            ),
+        )
         if (
             horizontal_frame is None
             or vertical_frame is None
             or native_wrap is None
             or horizontal_value is None
             or vertical_value is None
-            or any(
-                value < 0 or value > 2**32 - 1
-                for value in distances.values()
-            )
+            or distances is None
         ):
             raise NativePackageError(
                 "Floating image insertion layout is outside the supported "
@@ -1608,7 +1843,7 @@ def insert_simple_native_image_after(
             _q(WP, "anchor"),
             {
                 **{
-                    attribute_name: str(value)
+                    attribute_name: value
                     for attribute_name, value in distances.items()
                 },
                 "simplePos": "0",
@@ -1653,22 +1888,29 @@ def insert_simple_native_image_after(
         _q(WP, "extent"),
         {"cx": str(width_emu), "cy": str(height_emu)},
     )
-    ET.SubElement(
-        placement,
-        _q(WP, "effectExtent"),
-        {"l": "0", "t": "0", "r": "0", "b": "0"},
-    )
     if image.placement == "floating":
         assert image.floating is not None
+        if image.floating.anchor_effect_extent is not None:
+            native_effect_extent = _native_effect_extent(
+                image.floating.anchor_effect_extent
+            )
+            if native_effect_extent is None:
+                raise NativePackageError(
+                    "Floating image insertion effect extent is outside "
+                    "the supported native range."
+                )
+            placement.append(native_effect_extent)
         native_wrap = _native_wrap_value(image.floating.wrap)
         if native_wrap is None:
             raise NativePackageError(
                 "Floating image insertion has invalid text wrapping."
             )
+        placement.append(native_wrap)
+    else:
         ET.SubElement(
             placement,
-            native_wrap[0],
-            native_wrap[1],
+            _q(WP, "effectExtent"),
+            {"l": "0", "t": "0", "r": "0", "b": "0"},
         )
     document_properties = {
         "id": str(_next_drawing_id(package, container)),

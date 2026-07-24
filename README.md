@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev38`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev39`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -118,8 +118,9 @@ part first, then update or replace its projected image in a subsequent Patch.
 
 For a supported floating picture, `image["floating"]` preserves explicit horizontal
 and vertical reference frames with offset or alignment positioning, supported
-square/no-wrap/top-and-bottom wrapping, four native anchor distances, relative
-height, behind-text behavior, anchor locking, cell layout, and overlap policy.
+square/no-wrap/top-and-bottom wrapping, optional parent-anchor distances, separate
+wrap-local distances, parent and wrap-child effect extents, relative height,
+behind-text behavior, anchor locking, cell layout, and overlap policy.
 `image.anchor.update` can selectively change or switch those proven groups without
 rebuilding the drawing or touching its image bytes, relationship, crop, extent,
 accessibility metadata, or Office 2010 anchor identities. Native DOCX rendering
@@ -266,13 +267,15 @@ result = doc.insert_image_after(
             "relative_to": "paragraph",
             "offset": {"value": 12, "unit": "pt"},
         },
+        "anchor_distances": {
+            "top": {"value": 4, "unit": "pt"},
+            "right": {"value": 8, "unit": "pt"},
+            "bottom": {"value": 4, "unit": "pt"},
+            "left": {"value": 8, "unit": "pt"},
+        },
         "wrap": {
             "mode": "square",
             "side": "both_sides",
-            "distance_top": {"value": 4, "unit": "pt"},
-            "distance_right": {"value": 8, "unit": "pt"},
-            "distance_bottom": {"value": 4, "unit": "pt"},
-            "distance_left": {"value": 8, "unit": "pt"},
         },
         "relative_height": 1024,
         "behind_text": False,
@@ -296,8 +299,11 @@ floating = {
 ```
 
 `wrap.mode` accepts `square`, `none`, or `top_and_bottom`. Only `square` accepts
-`side`; the other modes must omit it. All modes retain four explicit native anchor
-distances so an agent can round-trip the source geometry without hiding OOXML state.
+`side`; the other modes must omit it. `anchor_distances` preserves the optional
+distance attributes on `wp:anchor`. Square and top-and-bottom wrap may separately
+carry wrap-element `distances` and `effect_extent`; `anchor_effect_extent` preserves
+the parent value. AiOffice keeps these native sources distinct because the wrap
+child extent overrides the parent for its wrapping boundary.
 For `none`, `behind_text` chooses whether the picture is behind or in front of text.
 
 The target must be a mapped top-level body node. AiOffice inserts after its last

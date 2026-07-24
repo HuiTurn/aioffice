@@ -20,9 +20,11 @@ from aioffice.spec.models import (
     DocumentField,
     DocumentSection,
     DocumentSettings,
+    FloatingImageEffectExtent,
     FloatingImageHorizontalPosition,
     FloatingImageLayout,
     FloatingImageLayoutUpdate,
+    FloatingImageTextDistances,
     FloatingImageTextWrap,
     FloatingImageVerticalPosition,
     HeaderFooterBindings,
@@ -290,9 +292,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "document-section",
             "document-settings",
             "document-field",
+            "floating-image-effect-extent",
             "floating-image-horizontal-position",
             "floating-image-layout",
             "floating-image-layout-update",
+            "floating-image-text-distances",
             "floating-image-text-wrap",
             "floating-image-vertical-position",
             "header-footer-bindings",
@@ -871,11 +875,13 @@ def _run(args: argparse.Namespace) -> int:
             "document-section": DocumentSection,
             "document-settings": DocumentSettings,
             "document-field": DocumentField,
+            "floating-image-effect-extent": FloatingImageEffectExtent,
             "floating-image-horizontal-position": (
                 FloatingImageHorizontalPosition
             ),
             "floating-image-layout": FloatingImageLayout,
             "floating-image-layout-update": FloatingImageLayoutUpdate,
+            "floating-image-text-distances": FloatingImageTextDistances,
             "floating-image-text-wrap": FloatingImageTextWrap,
             "floating-image-vertical-position": (
                 FloatingImageVerticalPosition

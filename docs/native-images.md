@@ -68,13 +68,21 @@ A floating occurrence changes `placement` and adds explicit native layout eviden
       "relative_to": "paragraph",
       "offset": {"value": 0.4, "unit": "pt"}
     },
+    "anchor_distances": {
+      "top": {"value": 0, "unit": "pt"},
+      "right": {"value": 4, "unit": "pt"},
+      "bottom": {"value": 0, "unit": "pt"},
+      "left": {"value": 4, "unit": "pt"}
+    },
+    "anchor_effect_extent": {
+      "left": {"value": 0, "unit": "pt"},
+      "top": {"value": 0, "unit": "pt"},
+      "right": {"value": 0, "unit": "pt"},
+      "bottom": {"value": 0, "unit": "pt"}
+    },
     "wrap": {
       "mode": "square",
-      "side": "both_sides",
-      "distance_top": {"value": 0, "unit": "pt"},
-      "distance_right": {"value": 4, "unit": "pt"},
-      "distance_bottom": {"value": 0, "unit": "pt"},
-      "distance_left": {"value": 4, "unit": "pt"}
+      "side": "both_sides"
     },
     "relative_height": 1026,
     "behind_text": false,
@@ -85,17 +93,23 @@ A floating occurrence changes `placement` and adds explicit native layout eviden
 }
 ```
 
-For no-wrap or top-and-bottom placement, keep the same four explicit distances but
-omit `side`:
+No-wrap has no wrap-local fields. Top-and-bottom may carry its own optional top and
+bottom distances and its own effect extent, independently of the parent anchor:
 
 ```json
 {
   "wrap": {
     "mode": "top_and_bottom",
-    "distance_top": {"value": 6, "unit": "pt"},
-    "distance_right": {"value": 0, "unit": "pt"},
-    "distance_bottom": {"value": 6, "unit": "pt"},
-    "distance_left": {"value": 0, "unit": "pt"}
+    "distances": {
+      "top": {"value": 6, "unit": "pt"},
+      "bottom": {"value": 6, "unit": "pt"}
+    },
+    "effect_extent": {
+      "left": {"value": 0, "unit": "pt"},
+      "top": {"value": 1, "unit": "pt"},
+      "right": {"value": 0, "unit": "pt"},
+      "bottom": {"value": 1, "unit": "pt"}
+    }
   }
 }
 ```
@@ -139,18 +153,20 @@ An image becomes an `image` block only when all of these conditions hold:
 8. the target exists and has an `image/*` OPC content type;
 9. the picture uses one rectangular stretch fill, optionally preceded by one
    non-negative, non-overconstrained `a:srcRect`;
-10. the picture has no rotation, flip, visible outline, non-zero effect extent, or
-    recognized visual effect; LibreOffice's optional neutral
+10. the picture has no rotation, flip, visible outline, or recognized DrawingML
+    visual effect; LibreOffice's optional neutral
     `pic:spPr/@bwMode="auto"` and at most one empty `a:noFill` normalization are
     allowed.
 
 For `wp:anchor`, the proof additionally requires `simplePos="0"` with zero simple
 coordinates; one horizontal and vertical position, each containing exactly one
-recognized `wp:posOffset` or `wp:align`; recognized `relativeFrom` values; four
-non-negative native anchor distances; exactly one empty `wp:wrapNone`, empty
-`wp:wrapTopAndBottom`, or `wp:wrapSquare` with a recognized wrap side; bounded
-`relativeHeight`; and strict boolean values for `behindDoc`, `locked`,
-`layoutInCell`, and `allowOverlap`. Child order must match the native anchor schema.
+recognized `wp:posOffset` or `wp:align`; recognized `relativeFrom` values; zero or
+more optional non-negative native anchor distances; an optional strict parent
+`wp:effectExtent`; exactly one empty `wp:wrapNone`, or a `wp:wrapTopAndBottom` /
+`wp:wrapSquare` carrying only its schema-defined optional distances and at most one
+strict child `wp:effectExtent`; bounded `relativeHeight`; and strict boolean values
+for `behindDoc`, `locked`, `layoutInCell`, and `allowOverlap`. Child order must match
+the native anchor schema.
 
 Microsoft's Open XML contracts distinguish
 [`wp:inline`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.inline?view=openxml-3.0.1)
@@ -171,11 +187,14 @@ resample bytes, decode the bitmap, or guess missing dimensions.
 anchor. Horizontal and vertical positions deliberately keep the reference frame plus
 exactly one positioning mode: a signed physical `offset` or semantic `alignment`.
 Neither mode is meaningful without its frame. `wrap.mode` is `square`, `none`, or
-`top_and_bottom`; only square wrapping has a `side`. All three modes keep the four
-native `wp:anchor` distances so importing and reopening never hides source geometry,
-even when a particular Word layout mode does not use every distance visually.
-Native flags remain separate rather than being collapsed into a vague “floating”
-boolean.
+`top_and_bottom`; only square wrapping has a `side`. `anchor_distances` preserves
+each optional `wp:anchor/@dist*` attribute without inventing missing values.
+`anchor_effect_extent` preserves the optional parent element. Square wrap has four
+optional local distances; top-and-bottom has optional top and bottom distances.
+Both can carry a wrap-child `effect_extent`. These fields are deliberately not
+collapsed: for square and top-and-bottom wrapping, a present child effect extent
+defines that wrap boundary instead of the parent value. Native flags remain
+separate rather than being collapsed into a vague “floating” boolean.
 
 The accepted horizontal frames are `character`, `column`, `inside_margin`,
 `left_margin`, `margin`, `outside_margin`, `page`, and `right_margin`. The accepted
@@ -188,7 +207,11 @@ explicit unit. `relative_height` preserves Word's unsigned relative stacking val
 
 This model follows Wordprocessing Drawing's
 [`wp:anchor`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.anchor?view=openxml-3.0.1)
-container and its distinct position and wrap children.
+container and its distinct position and wrap children. Microsoft defines
+[`wp:effectExtent`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.effectextent?view=openxml-3.0.1)
+as the additional edge extents used for wrapping objects with drawing effects, while
+[`wp:wrapSquare`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.wrapsquare?view=openxml-3.0.1)
+and `wp:wrapTopAndBottom` may carry their own schema-defined boundary data.
 [`wp:wrapNone`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.wrapnone?view=openxml-3.0.1)
 causes no text reflow; `behind_text` then determines whether the picture is behind
 or in front of document text.
@@ -215,13 +238,27 @@ anchor layout remains identical afterward.
       "relative_to": "margin",
       "offset": {"value": -18, "unit": "pt"}
     },
+    "anchor_distances": {
+      "top": {"value": 5, "unit": "pt"},
+      "right": {"value": 6, "unit": "pt"},
+      "bottom": {"value": 7, "unit": "pt"},
+      "left": {"value": 8, "unit": "pt"}
+    },
+    "anchor_effect_extent": {
+      "left": {"value": -0.5, "unit": "pt"},
+      "top": {"value": 1, "unit": "pt"},
+      "right": {"value": 1.5, "unit": "pt"},
+      "bottom": {"value": 2, "unit": "pt"}
+    },
     "wrap": {
       "mode": "square",
       "side": "right",
-      "distance_top": {"value": 5, "unit": "pt"},
-      "distance_right": {"value": 6, "unit": "pt"},
-      "distance_bottom": {"value": 7, "unit": "pt"},
-      "distance_left": {"value": 8, "unit": "pt"}
+      "distances": {
+        "top": {"value": 2, "unit": "pt"},
+        "right": {"value": 3, "unit": "pt"},
+        "bottom": {"value": 2, "unit": "pt"},
+        "left": {"value": 3, "unit": "pt"}
+      }
     },
     "relative_height": 2048,
     "behind_text": true,
@@ -233,15 +270,30 @@ anchor layout remains identical afterward.
 ```
 
 Every top-level field is optional, but `set` must contain at least one non-null
-change. `horizontal`, `vertical`, and `wrap` are complete grouped values: callers
-must keep the reference frame with exactly one of `offset` or `alignment`, and the
-wrap mode with all four distances. `side` is required and non-null exactly for
-`square`; it must be omitted for `none` and `top_and_bottom`. This avoids partial
-native geometry whose meaning depends on hidden state. No anchor field is clearable.
-Signed offsets must fit OOXML Int64 EMUs; distances and `relative_height` must fit
-UInt32; booleans are strict JSON booleans.
+change. `horizontal`, `vertical`, `anchor_distances`, `anchor_effect_extent`, and
+`wrap` are complete grouped values. Position callers keep the reference frame with
+exactly one of `offset` or `alignment`. `side` is required and non-null exactly for
+`square`; it must be omitted for `none` and `top_and_bottom`. No-wrap forbids
+wrap-local distances and effect extent; top-and-bottom forbids left and right local
+distances. Use `clear: ["anchor_distances"]`,
+`clear: ["anchor_effect_extent"]`, or both to remove those optional parent-native
+values. A wrap update omitting its optional `distances` or `effect_extent` removes
+them as part of the complete wrap replacement. Signed offsets must fit OOXML Int64
+EMUs; text distances and `relative_height` must fit UInt32; effect extents must fit
+OOXML `ST_Coordinate`; booleans are strict JSON booleans.
 `aioffice schema --kind floating-image-layout-update` exposes the same contract,
 including machine-readable `oneOf` constraints for position and wrap modes.
+
+For example, removing both optional parent-native groups without changing the wrap
+child is a clear-only operation:
+
+```json
+{
+  "op": "image.anchor.update",
+  "target": "#image_3A17C04E",
+  "clear": ["anchor_distances", "anchor_effect_extent"]
+}
+```
 
 Native lowering changes only the selected `wp:positionH`, `wp:positionV`,
 the one selected wrap child, and `wp:anchor` attributes in the already-proven tree.
@@ -258,6 +310,12 @@ Physical lengths are compared by their rounded native EMU value, not by unit
 spelling. For example, an accepted `1 in` offset reopens as the canonical native
 projection `72 pt` without becoming a semantic or integrity mismatch.
 
+Dev38 payloads that placed `distance_top`, `distance_right`, `distance_bottom`, and
+`distance_left` inside `wrap` are still accepted when validating a complete layout
+or layout update. They are migrated to `anchor_distances`, which is where those
+values were always lowered natively. Dev39 emits only the corrected layered form;
+new callers should not author the legacy keys.
+
 An inline image, detached JSON projection, opaque or stale drawing, unsupported
 anchor variant, empty update, partial group, both/neither positioning modes, null,
 unknown field, invalid unit/range/alignment, or non-boolean flag fails closed. The
@@ -265,17 +323,24 @@ operation does not convert an inline picture to floating and does not create or
 reconstruct an anchor.
 
 Active simple positioning, Office 2010 percentage positioning, tight/through
-polygons, wrap-level distances or effect extents outside the conservative empty
-no-wrap/top-and-bottom subset, relative-size extensions, missing or unknown
-compatibility values, extra position/wrap children, and mixed text plus drawing
-paragraphs stay opaque. This is a deliberate protocol boundary, not an indication
-that their native XML is discarded.
+polygons, relative-size extensions, malformed or out-of-range distance/effect
+metadata, missing or unknown compatibility values, extra position/wrap children,
+and mixed text plus drawing paragraphs stay opaque. This is a deliberate protocol
+boundary, not an indication that their native XML is discarded.
 
 LibreOffice may add `bwMode="auto"` and an empty `a:noFill` while saving an otherwise
 unchanged picture. AiOffice treats only those exact optional forms as neutral and
 preserves them through later edits. Other black-and-white modes,
 duplicate/non-empty no-fill elements, solid/gradient/pattern fills, and unknown
 shape attributes still fail the projection proof.
+
+Office-compatible producers may also normalize layered wrap geometry. In the dev39
+interoperability fixture, a LibreOffice open/save retained the parent anchor
+distance attributes but quantized some values, removed wrap-local distances and the
+wrap-child effect extent, and reset the parent effect extent to zero. AiOffice
+preserves the original fields exactly during its own no-op round trip; after an
+external producer rewrites them, AiOffice projects that producer's new native state
+instead of pretending the old source values survived.
 
 ## Verified binary access
 
@@ -464,8 +529,8 @@ The operation uses ordinary model-authored JSON, so the existing
 channel. Capability metadata exposes `native_layout_operation`,
 `native_layout_fields`, and `native_layout_target` for host-paragraph planning.
 Floating planning separately exposes `floating_layout_update_operation`,
-`floating_layout_update_fields`, group-replacement semantics, and an empty
-clearable-field list.
+`floating_layout_update_fields`, group-replacement semantics, the two clearable
+parent fields, native distance-layer authority, and effect-extent precedence.
 
 ## Out-of-band binary replacement
 
@@ -618,13 +683,15 @@ result = document.insert_image_after(
             "relative_to": "paragraph",
             "offset": {"value": 24, "unit": "pt"}
         },
+        "anchor_distances": {
+            "top": {"value": 2, "unit": "pt"},
+            "right": {"value": 6, "unit": "pt"},
+            "bottom": {"value": 2, "unit": "pt"},
+            "left": {"value": 6, "unit": "pt"}
+        },
         "wrap": {
             "mode": "square",
-            "side": "both_sides",
-            "distance_top": {"value": 2, "unit": "pt"},
-            "distance_right": {"value": 6, "unit": "pt"},
-            "distance_bottom": {"value": 2, "unit": "pt"},
-            "distance_left": {"value": 6, "unit": "pt"}
+            "side": "both_sides"
         },
         "relative_height": 1024,
         "behind_text": False,
@@ -651,7 +718,8 @@ The contract is deliberately explicit:
 - every horizontal and vertical position must select exactly one explicit `offset`
   or allowed semantic `alignment`;
 - `wrap.mode` must be `square`, `none`, or `top_and_bottom`; `side` is required only
-  for `square`, while all four explicit native anchor distances remain required;
+  for `square`; parent distances are optional and separate from the schema-defined
+  wrap-local distances and effect extent;
 - active simple-position or percentage-position anchors, tight/through polygon
   wrapping, crop, rotation, effects, and other drawing features are not silently
   inferred.

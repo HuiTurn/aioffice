@@ -18,7 +18,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.38"
+SPEC_VERSION = "0.2-draft.39"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1203,8 +1203,62 @@ class FloatingImageVerticalPosition(StrictModel):
         return self
 
 
+class FloatingImageTextDistances(StrictModel):
+    """Optional OOXML distance-from-text attributes, preserving absence."""
+
+    top: Length | None = None
+    right: Length | None = None
+    bottom: Length | None = None
+    left: Length | None = None
+
+    @model_validator(mode="after")
+    def validate_distances(self) -> "FloatingImageTextDistances":
+        for field_name in ("top", "right", "bottom", "left"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            emu = round(value.to_points() * 12_700)
+            if emu < 0 or emu > 2**32 - 1:
+                raise ValueError(
+                    f"Floating image text distance {field_name} must fit "
+                    "a non-negative OOXML UInt32 EMU."
+                )
+        return self
+
+    def has_values(self) -> bool:
+        """Return whether at least one native distance attribute is present."""
+
+        return any(
+            getattr(self, field_name) is not None
+            for field_name in ("top", "right", "bottom", "left")
+        )
+
+
+class FloatingImageEffectExtent(StrictModel):
+    """OOXML effect extents on all four edges, in signed EMU semantics."""
+
+    left: Length
+    top: Length
+    right: Length
+    bottom: Length
+
+    @model_validator(mode="after")
+    def validate_extents(self) -> "FloatingImageEffectExtent":
+        minimum = -27_273_042_329_600
+        maximum = 27_273_042_316_900
+        for field_name in ("left", "top", "right", "bottom"):
+            value = getattr(self, field_name)
+            emu = round(value.to_points() * 12_700)
+            if emu < minimum or emu > maximum:
+                raise ValueError(
+                    f"Floating image effect extent {field_name} must fit "
+                    "the OOXML ST_Coordinate range."
+                )
+        return self
+
+
 class FloatingImageTextWrap(StrictModel):
-    """Conservative native text wrapping around a floating image."""
+    """Native wrap element, separate from parent-anchor layout metadata."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -1224,11 +1278,21 @@ class FloatingImageTextWrap(StrictModel):
                         "mode": {"const": "none"},
                     },
                     "required": ["mode"],
-                    "not": {"required": ["side"]},
+                    "allOf": [
+                        {"not": {"required": ["side"]}},
+                        {"not": {"required": ["distances"]}},
+                        {"not": {"required": ["effect_extent"]}},
+                    ],
                 },
                 {
                     "properties": {
                         "mode": {"const": "top_and_bottom"},
+                        "distances": {
+                            "allOf": [
+                                {"not": {"required": ["left"]}},
+                                {"not": {"required": ["right"]}},
+                            ]
+                        },
                     },
                     "required": ["mode"],
                     "not": {"required": ["side"]},
@@ -1239,10 +1303,8 @@ class FloatingImageTextWrap(StrictModel):
 
     mode: Literal["square", "none", "top_and_bottom"] = "square"
     side: Literal["both_sides", "largest", "left", "right"] | None = None
-    distance_top: Length
-    distance_right: Length
-    distance_bottom: Length
-    distance_left: Length
+    distances: FloatingImageTextDistances | None = None
+    effect_extent: FloatingImageEffectExtent | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -1260,29 +1322,92 @@ class FloatingImageTextWrap(StrictModel):
                 raise ValueError(
                     "Floating image wrap side is only valid for square mode."
                 )
+            if mode == "none" and any(
+                field_name in value
+                for field_name in ("distances", "effect_extent")
+            ):
+                raise ValueError(
+                    "No-wrap floating images cannot carry wrap-local "
+                    "distances or effect extents."
+                )
+            distances = value.get("distances")
+            if (
+                mode == "top_and_bottom"
+                and isinstance(distances, Mapping)
+                and any(
+                    field_name in distances
+                    for field_name in ("left", "right")
+                )
+            ):
+                raise ValueError(
+                    "Top-and-bottom wrap only supports top and bottom "
+                    "wrap-local distances."
+                )
         return value
 
     @model_validator(mode="after")
-    def validate_distances(self) -> "FloatingImageTextWrap":
+    def validate_mode_fields(self) -> "FloatingImageTextWrap":
         if (self.mode == "square") != (self.side is not None):
             raise ValueError(
                 "Floating image wrap requires side exactly when mode is "
                 "square."
             )
-        for field_name in (
-            "distance_top",
-            "distance_right",
-            "distance_bottom",
-            "distance_left",
+        if self.mode == "none" and (
+            self.distances is not None or self.effect_extent is not None
         ):
-            value = getattr(self, field_name)
-            emu = round(value.to_points() * 12_700)
-            if emu < 0 or emu > 2**32 - 1:
+            raise ValueError(
+                "No-wrap floating images cannot carry wrap-local "
+                "distances or effect extents."
+            )
+        if self.mode == "top_and_bottom" and self.distances is not None:
+            if (
+                self.distances.left is not None
+                or self.distances.right is not None
+            ):
                 raise ValueError(
-                    f"Floating image {field_name} must fit a non-negative "
-                    "OOXML UInt32 EMU."
+                    "Top-and-bottom wrap only supports top and bottom "
+                    "wrap-local distances."
                 )
+        if self.distances is not None and not self.distances.has_values():
+            self.distances = None
         return self
+
+
+_LEGACY_FLOATING_DISTANCE_FIELDS = {
+    "distance_top": "top",
+    "distance_right": "right",
+    "distance_bottom": "bottom",
+    "distance_left": "left",
+}
+
+
+def _lift_legacy_floating_anchor_distances(value: object) -> object:
+    """Migrate dev38 wrap distances to their actual parent-anchor layer."""
+
+    if not isinstance(value, Mapping):
+        return value
+    wrap_value = value.get("wrap")
+    if not isinstance(wrap_value, Mapping):
+        return value
+    legacy = {
+        edge_name: wrap_value[field_name]
+        for field_name, edge_name in _LEGACY_FLOATING_DISTANCE_FIELDS.items()
+        if field_name in wrap_value
+    }
+    if not legacy:
+        return value
+    if "anchor_distances" in value:
+        raise ValueError(
+            "Legacy wrap distance fields cannot be combined with "
+            "anchor_distances."
+        )
+    migrated = dict(value)
+    migrated_wrap = dict(wrap_value)
+    for field_name in _LEGACY_FLOATING_DISTANCE_FIELDS:
+        migrated_wrap.pop(field_name, None)
+    migrated["wrap"] = migrated_wrap
+    migrated["anchor_distances"] = legacy
+    return migrated
 
 
 class FloatingImageLayout(StrictModel):
@@ -1290,6 +1415,8 @@ class FloatingImageLayout(StrictModel):
 
     horizontal: FloatingImageHorizontalPosition
     vertical: FloatingImageVerticalPosition
+    anchor_distances: FloatingImageTextDistances | None = None
+    anchor_effect_extent: FloatingImageEffectExtent | None = None
     wrap: FloatingImageTextWrap
     relative_height: int = Field(ge=0, le=2**32 - 1, strict=True)
     behind_text: bool = Field(strict=True)
@@ -1297,12 +1424,28 @@ class FloatingImageLayout(StrictModel):
     layout_in_cell: bool = Field(strict=True)
     allow_overlap: bool = Field(strict=True)
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_distances(cls, value: object) -> object:
+        return _lift_legacy_floating_anchor_distances(value)
+
+    @model_validator(mode="after")
+    def normalize_empty_anchor_distances(self) -> "FloatingImageLayout":
+        if (
+            self.anchor_distances is not None
+            and not self.anchor_distances.has_values()
+        ):
+            self.anchor_distances = None
+        return self
+
 
 class FloatingImageLayoutUpdate(StrictModel):
     """Selectable fields accepted by ``image.anchor.update``."""
 
     horizontal: FloatingImageHorizontalPosition | None = None
     vertical: FloatingImageVerticalPosition | None = None
+    anchor_distances: FloatingImageTextDistances | None = None
+    anchor_effect_extent: FloatingImageEffectExtent | None = None
     wrap: FloatingImageTextWrap | None = None
     relative_height: int | None = Field(
         default=None,
@@ -1314,6 +1457,11 @@ class FloatingImageLayoutUpdate(StrictModel):
     locked: bool | None = Field(default=None, strict=True)
     layout_in_cell: bool | None = Field(default=None, strict=True)
     allow_overlap: bool | None = Field(default=None, strict=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_distances(cls, value: object) -> object:
+        return _lift_legacy_floating_anchor_distances(value)
 
     @model_validator(mode="after")
     def validate_changes(self) -> "FloatingImageLayoutUpdate":
@@ -1586,6 +1734,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.36",
         "0.2-draft.37",
         "0.2-draft.38",
+        "0.2-draft.39",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

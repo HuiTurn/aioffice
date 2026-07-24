@@ -1217,6 +1217,8 @@ class Document:
                 "floating_layout_update_fields": [
                     "horizontal",
                     "vertical",
+                    "anchor_distances",
+                    "anchor_effect_extent",
                     "wrap",
                     "relative_height",
                     "behind_text",
@@ -1225,7 +1227,8 @@ class Document:
                     "allow_overlap",
                 ],
                 "floating_layout_group_update": (
-                    "horizontal_vertical_and_wrap_are_complete_objects"
+                    "positions_anchor_distances_effect_extent_and_wrap_"
+                    "are_complete_objects"
                 ),
                 "floating_position_modes": [
                     "offset",
@@ -1257,9 +1260,15 @@ class Document:
                     "right",
                 ],
                 "floating_wrap_distance_authority": (
-                    "four_native_anchor_distances"
+                    "native_anchor_and_wrap_element_attributes_are_separate"
                 ),
-                "floating_layout_clearable_fields": [],
+                "floating_effect_extent_authority": (
+                    "wrap_child_overrides_anchor_for_square_and_top_bottom"
+                ),
+                "floating_layout_clearable_fields": [
+                    "anchor_distances",
+                    "anchor_effect_extent",
+                ],
                 "floating_layout_authority": "native_docx_and_render",
                 "crop_unit": "percentage_points",
                 "crop_precision": 0.001,
@@ -4458,7 +4467,7 @@ class Document:
 
         if operation_name == "image.anchor.update":
             unexpected = sorted(
-                set(operation) - {"op", "target", "set"}
+                set(operation) - {"op", "target", "set", "clear"}
             )
             image = Document._find_image(
                 payload,
@@ -4495,31 +4504,72 @@ class Document:
                     )
                 )
             set_values = operation.get("set", {})
+            clear_values = operation.get("clear", [])
             known_fields = set(FloatingImageLayoutUpdate.model_fields)
-            valid_shape = isinstance(set_values, dict)
-            unknown = (
+            clearable_fields = {
+                "anchor_distances",
+                "anchor_effect_extent",
+            }
+            valid_set_shape = isinstance(set_values, dict)
+            valid_clear_shape = (
+                isinstance(clear_values, list)
+                and all(
+                    isinstance(field_name, str)
+                    for field_name in clear_values
+                )
+                and len(clear_values) == len(set(clear_values))
+            )
+            unknown_set = (
                 sorted(set(set_values) - known_fields)
-                if valid_shape
+                if valid_set_shape
+                else []
+            )
+            unknown_clear = (
+                sorted(set(clear_values) - clearable_fields)
+                if valid_clear_shape
+                else []
+            )
+            overlapping = (
+                sorted(set(set_values) & set(clear_values))
+                if valid_set_shape and valid_clear_shape
                 else []
             )
             has_null = (
                 any(value is None for value in set_values.values())
-                if valid_shape
+                if valid_set_shape
                 else False
             )
             if (
-                not valid_shape
-                or not set_values
-                or unknown
+                not valid_set_shape
+                or not valid_clear_shape
+                or (not set_values and not clear_values)
+                or unknown_set
+                or unknown_clear
+                or overlapping
                 or has_null
             ):
                 detail = (
                     "set must be an object"
-                    if not valid_shape
+                    if not valid_set_shape
+                    else "clear must be a unique string array"
+                    if not valid_clear_shape
                     else "at least one change is required"
-                    if not set_values
-                    else f"unknown properties: {', '.join(unknown)}"
-                    if unknown
+                    if not set_values and not clear_values
+                    else (
+                        "unknown set properties: "
+                        f"{', '.join(unknown_set)}"
+                    )
+                    if unknown_set
+                    else (
+                        "properties cannot be cleared: "
+                        f"{', '.join(unknown_clear)}"
+                    )
+                    if unknown_clear
+                    else (
+                        "properties cannot be both set and cleared: "
+                        f"{', '.join(overlapping)}"
+                    )
+                    if overlapping
                     else "set values cannot be null"
                 )
                 raise _PatchFailure(
@@ -4537,6 +4587,8 @@ class Document:
                     FloatingImageLayoutUpdate.model_validate(
                         set_values
                     ).model_dump(mode="json", exclude_none=True)
+                    if set_values
+                    else {}
                 )
             except ValidationError as error:
                 raise _PatchFailure(
@@ -4566,6 +4618,8 @@ class Document:
             candidate = deepcopy(before)
             candidate_layout = deepcopy(candidate["floating"])
             candidate_layout.update(deepcopy(normalized_set))
+            for field_name in clear_values:
+                candidate_layout.pop(field_name, None)
             candidate["floating"] = candidate_layout
             candidate["revision_updated"] = next_revision
             try:
@@ -4602,7 +4656,9 @@ class Document:
                 ) from error
             image.clear()
             image.update(normalized)
-            changed_fields = sorted(set(set_values))
+            changed_fields = sorted(
+                set(normalized_set) | set(clear_values)
+            )
             return {
                 "operation": "image.anchor.update",
                 "image_ids": [image["id"]],
