@@ -40,6 +40,11 @@ occurrence lives in its `header_footers[].content`:
         "flip_horizontal": true,
         "flip_vertical": false
       },
+      "outline": {
+        "width": {"value": 2, "unit": "pt"},
+        "color": "#CC0000",
+        "dash": "dash_dot"
+      },
       "name": "Expert diagram",
       "alt_text": "A compact expert workflow diagram",
       "title": "Workflow",
@@ -189,10 +194,13 @@ An image becomes an `image` block only when all of these conditions hold:
    non-negative, non-overconstrained `a:srcRect`;
 10. `a:xfrm` has zero `a:off`, one `a:ext` matching the outer extent, and only
     valid signed-Int32 rotation plus strict horizontal/vertical flip attributes;
-11. the picture has no visible outline or recognized DrawingML visual effect;
-    LibreOffice's optional neutral
-    `pic:spPr/@bwMode="auto"` and at most one empty `a:noFill` normalization are
-    allowed.
+11. `pic:spPr` uses exact supported child order and has at most one direct picture
+    line: either a neutral absent/zero-width `a:noFill` line or one positive
+    `ST_LineWidth` line with direct `a:srgbClr`, a supported preset dash, and only
+    the supported default cap, compound, alignment, and round-join semantics;
+12. the picture has no recognized DrawingML visual effect; LibreOffice's optional
+    neutral `pic:spPr/@bwMode="auto"` and at most one empty shape `a:noFill`
+    normalization are allowed.
 
 For `wp:anchor`, the proof additionally requires `simplePos="0"` with zero simple
 coordinates; one horizontal and vertical position, each containing exactly one
@@ -489,6 +497,13 @@ rotation/flip combinations and quantized or rewrote extent evidence. When that n
 geometry no longer has exact matching inner and outer extents, AiOffice deliberately
 reopens it as opaque instead of claiming the original editable subset survived.
 
+The dev44 outline fixture preserves its complete supported `a:ln` subtree
+byte-for-byte on exact no-op and through unrelated AiOffice edits. LibreOffice 26.8
+retained the tested visible red outline, width, and direct RGB color but removed the
+preset dash plus explicit default line attributes and round-join element on save,
+making the rewritten native line solid. AiOffice reopens that producer-authored
+solid outline instead of claiming the original dash rule survived.
+
 ## Verified binary access
 
 Use the projected image node ID, never a part path:
@@ -511,7 +526,8 @@ document.extract_image(
 4. resolves the embedded relationship from the correct source part;
 5. confirms the image target and OPC media type;
 6. compares native identity, asset ID, placement, floating layout, displayed extent,
-   crop, picture transform, accessibility metadata, declared size, and SHA-256;
+   crop, picture transform, picture outline, accessibility metadata, declared size,
+   and SHA-256;
 7. hashes the returned bytes again.
 
 Any stale, forged, missing, external, or structurally changed reference fails closed.
@@ -530,7 +546,7 @@ filename, size, SHA-256, and output path as JSON.
 ## Selective native updates
 
 `image.update` changes only the supported native picture's accessibility metadata,
-displayed extent, rectangular source crop, and/or picture transform:
+displayed extent, rectangular source crop, picture transform, and/or direct outline:
 
 ```python
 result = document.apply([
@@ -549,6 +565,11 @@ result = document.apply([
                 "rotation_degrees_clockwise": 90,
                 "flip_horizontal": true
             },
+            "outline": {
+                "width": {"value": 2, "unit": "pt"},
+                "color": "#CC0000",
+                "dash": "dash_dot"
+            },
             "alt_text": "Expert workflow with three approval stages",
             "title": "Expert workflow",
         },
@@ -557,14 +578,15 @@ result = document.apply([
 assert result.success
 ```
 
-The operation accepts `width`, `height`, `crop`, `transform`, `alt_text`, and
-`title` in `set`. `crop`, `transform`, `alt_text`, and `title` are clearable:
+The operation accepts `width`, `height`, `crop`, `transform`, `outline`, `alt_text`,
+and `title` in `set`. `crop`, `transform`, `outline`, `alt_text`, and `title` are
+clearable:
 
 ```json
 {
   "op": "image.update",
   "target": "#image_3A17C04E",
-  "clear": ["crop", "transform", "alt_text", "title"]
+  "clear": ["crop", "transform", "outline", "alt_text", "title"]
 }
 ```
 
@@ -641,6 +663,40 @@ invalid XML booleans, non-integer or out-of-Int32 rotations, nonzero `a:off`,
 mismatched extents, extra children, or malformed child order fail closed as opaque.
 Semantic HTML publishes normalized `data-aioffice-rotation-degrees-clockwise` and
 flip attributes as evidence but does not pretend to be Word's layout engine.
+
+### Picture outline
+
+`outline.width` is an explicit `Length` that must quantize to DrawingML
+`ST_LineWidth` from 1 through 20,116,800 EMUs. AiOffice normalizes it to points at
+the exact nearest-EMU value. `outline.color` is one direct six-digit sRGB value,
+normalized to uppercase. `outline.dash` is one of:
+
+`solid`, `dot`, `system_dot`, `dash`, `system_dash`, `large_dash`, `dash_dot`,
+`system_dash_dot`, `large_dash_dot`, `large_dash_dot_dot`, or
+`system_dash_dot_dot`.
+
+Those names map one-to-one onto DrawingML preset-dash tokens. Setting `outline`
+replaces the complete supported line group. AiOffice writes explicit flat caps,
+single compound lines, centered pen alignment, direct RGB solid fill, one preset
+dash, and a round join, making the authored subset independent of inherited line
+attributes. Clearing it removes the direct `a:ln` and restores the ordinary
+unoutlined picture state.
+
+For import, the same values may be omitted only where Office's supported default
+resolution is equivalent. A missing preset dash projects as `solid`; a missing join
+projects as the Office round default. A neutral absent/zero-width line containing
+only `a:noFill` projects as no semantic outline and remains byte-exact through
+unrelated edits.
+
+Theme, system, preset, HSL, or scRGB colors; color transforms; gradient or pattern
+fills; custom dash arrays; non-default caps, compound modes, or alignment; bevel or
+miter joins; arrowheads; extension lists; unknown attributes; duplicate lines; and
+malformed child order all fail closed as opaque. This bounded subset follows
+Microsoft's [`LinePropertiesType`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.linepropertiestype?view=openxml-3.0.1),
+[`RGBColorModelHex`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.rgbcolormodelhex?view=openxml-3.0.1),
+and [Office DrawingML default-resolution notes](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/a9897c2b-0404-4676-aa5c-8f25bc6d66ca).
+Semantic HTML exposes width, color, and dash as evidence attributes; DOCX rendering
+remains the visual authority.
 
 The native lowering re-proves the conservative image shape before and after mutation.
 It does not decode, resample, replace, or recompress the image, and it does not change
@@ -901,6 +957,8 @@ The contract is deliberately explicit:
   background, and supported borders around the picture's host paragraph;
 - optional `transform` sets one complete clockwise rotation and horizontal/vertical
   mirror group using the same strict semantics as `image.update`;
+- optional `outline` sets one complete direct-RGB picture line using the same
+  width and preset-dash semantics as `image.update`;
 - placement defaults to `inline`; a non-null `floating` value selects floating
   placement and must validate as one complete `FloatingImageLayout`;
 - every horizontal and vertical position must select exactly one explicit `offset`,
@@ -913,7 +971,8 @@ The contract is deliberately explicit:
   ordered polygon; parent distances are optional and separate from schema-defined
   wrap-local geometry;
 - active simple-position anchors, malformed relative-size rules, polygons, or
-  transforms, crop, effects, and other drawing features are not silently inferred.
+  transforms, outlines, crop, effects, and other drawing features are not silently
+  inferred.
 
 The native lowering adds or reuses the content-addressed image part, creates a fresh
 relationship ID, creates a `w:p/w:r/w:drawing` tree with `wp:inline` or canonical
@@ -949,15 +1008,17 @@ aioffice insert-image-after \
   --alt-text "Expert workflow with three approval stages" \
   --image-id expert_workflow \
   --transform image-transform.json \
+  --outline image-outline.json \
   --floating-layout floating-layout.json \
   -o inserted.docx
 ```
 
-`image-transform.json` and `floating-layout.json` are exactly the objects accepted
-by `aioffice schema --kind image-transform` and
+`image-transform.json`, `image-outline.json`, and `floating-layout.json` are exactly
+the objects accepted by `aioffice schema --kind image-transform`,
+`aioffice schema --kind image-outline`, and
 `aioffice schema --kind floating-image-layout`. Omitting the floating-layout flag
 keeps inline placement. The Workspace CLI accepts the same flags and records the
-normalized transform, placement, and layout in its binary-free patch log.
+normalized transform, outline, placement, and layout in its binary-free patch log.
 
 Tracked insertion creates one new workspace revision without storing binary data in
 the patch log:
@@ -992,8 +1053,9 @@ These cases remain native and explicit `opaque`/read-only projections:
 - multiple pictures or alternate representations;
 - linked or external images;
 - negative, overconstrained, malformed, or otherwise unsupported crop rectangles;
-- malformed/unknown picture transforms, nonzero transform offsets, outlines, or
-  effects;
+- malformed/unknown picture transforms or nonzero transform offsets;
+- unsupported picture outline fills, colors, joins, compound modes, arrowheads,
+  custom dashes, extensions, or malformed line structures;
 - drawings inside tables;
 - complex header/footer drawings that do not satisfy the same one-picture proof;
 - VML pictures, OLE objects, embedded files, charts, SmartArt, and other graphic
@@ -1009,9 +1071,10 @@ subset are not claimed in this release.
 ## Preview and visual authority
 
 Semantic HTML emits an accessible, dimensioned placeholder with the asset ID, media
-type, placement, and normalized crop evidence. Markdown emits an `aioffice-asset:`
-reference. Neither exporter embeds binary data or claims to reproduce native
-floating placement, wrapping, crop, or picture content.
+type, placement, and normalized crop, transform, and outline evidence. Markdown
+emits an `aioffice-asset:` reference. Neither exporter embeds binary data or claims
+to reproduce native floating placement, wrapping, crop, transform, outline, or
+picture content.
 
 Use the native LibreOffice PDF/PNG provider to judge the actual picture, cropping,
 position, pagination, and surrounding layout. Native rendering remains the visual

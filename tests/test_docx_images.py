@@ -96,6 +96,7 @@ def _image_document(
     wrap_mode: str = "square",
     cropped: bool = False,
     transform_attributes: dict[str, str] | None = None,
+    outlined: bool = False,
     alt_text: str | None = "A compact expert workflow diagram",
 ) -> bytes:
     if (aligned or percentage_position or relative_size) and not anchored:
@@ -330,6 +331,29 @@ def _image_document(
         {"prst": "rect"},
     )
     ET.SubElement(geometry, _q(A, "avLst"))
+    if outlined:
+        outline = ET.SubElement(
+            shape,
+            _q(A, "ln"),
+            {
+                "w": "25400",
+                "cap": "flat",
+                "cmpd": "sng",
+                "algn": "ctr",
+            },
+        )
+        solid_fill = ET.SubElement(outline, _q(A, "solidFill"))
+        ET.SubElement(
+            solid_fill,
+            _q(A, "srgbClr"),
+            {"val": "CC0000"},
+        )
+        ET.SubElement(
+            outline,
+            _q(A, "prstDash"),
+            {"val": "dashDot"},
+        )
+        ET.SubElement(outline, _q(A, "round"))
     if relative_size:
         relative_width = ET.SubElement(
             placement,
@@ -400,6 +424,7 @@ def _header_image_document(
     relative_size: bool = False,
     wrap_mode: str = "square",
     transform_attributes: dict[str, str] | None = None,
+    outlined: bool = False,
 ) -> bytes:
     assert kind in {"header", "footer"}
     body_image = _image_document(
@@ -410,6 +435,7 @@ def _header_image_document(
         relative_size=relative_size,
         wrap_mode=wrap_mode,
         transform_attributes=transform_attributes,
+        outlined=outlined,
     )
     with ZipFile(io.BytesIO(body_image)) as archive:
         image_document = parse_xml(
@@ -522,6 +548,10 @@ class DocxImageTests(unittest.TestCase):
                 },
             ),
             (
+                "image-outline",
+                {"width", "color", "dash"},
+            ),
+            (
                 "floating-image-effect-extent",
                 {"left", "top", "right", "bottom"},
             ),
@@ -622,6 +652,7 @@ class DocxImageTests(unittest.TestCase):
                     "width",
                     "height",
                     "transform",
+                    "outline",
                     "alt_text",
                     "paragraph_style",
                 },
@@ -633,6 +664,7 @@ class DocxImageTests(unittest.TestCase):
                     "height",
                     "crop",
                     "transform",
+                    "outline",
                     "alt_text",
                     "title",
                 },
@@ -781,7 +813,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.43")
+        self.assertEqual(spec["spec_version"], "0.2-draft.44")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -869,13 +901,14 @@ class DocxImageTests(unittest.TestCase):
                 "height",
                 "crop",
                 "transform",
+                "outline",
                 "alt_text",
                 "title",
             ],
         )
         self.assertEqual(
             capabilities["clearable_update_fields"],
-            ["crop", "transform", "alt_text", "title"],
+            ["crop", "transform", "outline", "alt_text", "title"],
         )
         self.assertEqual(
             capabilities["single_dimension_resize"],
@@ -3162,6 +3195,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(
             _image_document(
                 anchored=True,
+                outlined=True,
                 transform_attributes={
                     "rot": "21660000",
                     "flipV": "true",
@@ -3192,6 +3226,10 @@ class DocxImageTests(unittest.TestCase):
             result.document.to_spec()["content"][0]["transform"],
             image["transform"],
         )
+        self.assertEqual(
+            result.document.to_spec()["content"][0]["outline"],
+            image["outline"],
+        )
         with ZipFile(io.BytesIO(result.document.to_bytes("docx"))) as package:
             root = parse_xml(package.read("word/document.xml"))
         native_transform = root.find(
@@ -3202,6 +3240,197 @@ class DocxImageTests(unittest.TestCase):
             native_transform.attrib,
             {"rot": "21660000", "flipV": "true"},
         )
+
+    def test_picture_outline_projects_updates_clears_and_preserves(
+        self,
+    ) -> None:
+        source = _image_document(outlined=True)
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        expected_outline = {
+            "width": {"value": 2.0, "unit": "pt"},
+            "color": "#CC0000",
+            "dash": "dash_dot",
+        }
+        self.assertEqual(image["outline"], expected_outline)
+        self.assertEqual(
+            document.inspect()["nodes"][0]["outline"],
+            expected_outline,
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+        html = document.to_bytes("html").decode()
+        self.assertIn('data-aioffice-outline-width-pt="2"', html)
+        self.assertIn('data-aioffice-outline-color="#CC0000"', html)
+        self.assertIn('data-aioffice-outline-dash="dash_dot"', html)
+
+        capabilities = document.capabilities()["assets"]
+        self.assertIn("outline", capabilities["native_update_fields"])
+        self.assertIn("outline", capabilities["clearable_update_fields"])
+        self.assertEqual(
+            capabilities["image_outline_native_width_bounds"],
+            {
+                "minimum_inclusive": 1,
+                "maximum_inclusive": 20_116_800,
+            },
+        )
+
+        metadata_update = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"alt_text": "Outlined expert workflow"},
+                }
+            ]
+        )
+        self.assertTrue(metadata_update.success, metadata_update.model_dump())
+        assert metadata_update.document is not None
+        metadata_output = metadata_update.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(metadata_output)) as after,
+        ):
+            before_root = parse_xml(before.read("word/document.xml"))
+            after_root = parse_xml(after.read("word/document.xml"))
+        before_outline = before_root.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'ln')}"
+        )
+        after_outline = after_root.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'ln')}"
+        )
+        assert before_outline is not None
+        assert after_outline is not None
+        self.assertEqual(
+            serialize_xml(after_outline),
+            serialize_xml(before_outline),
+        )
+
+        updated = metadata_update.document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "outline": {
+                            "width": {"value": 1.23456, "unit": "pt"},
+                            "color": "#00aaff",
+                            "dash": "large_dash_dot_dot",
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(updated.success, updated.model_dump())
+        self.assertEqual(
+            updated.changes[0]["property_changes"],
+            [
+                {
+                    "path": "outline",
+                    "before": expected_outline,
+                    "after": {
+                        "width": {"value": 1.234567, "unit": "pt"},
+                        "color": "#00AAFF",
+                        "dash": "large_dash_dot_dot",
+                    },
+                }
+            ],
+        )
+        assert updated.document is not None
+        updated_output = updated.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(updated_output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        native_outline = root.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'ln')}"
+        )
+        assert native_outline is not None
+        self.assertEqual(
+            native_outline.attrib,
+            {
+                "w": "15679",
+                "cap": "flat",
+                "cmpd": "sng",
+                "algn": "ctr",
+            },
+        )
+        self.assertEqual(
+            native_outline.find(f"./{_q(A, 'solidFill')}/{_q(A, 'srgbClr')}").attrib,
+            {"val": "00AAFF"},
+        )
+        self.assertEqual(
+            native_outline.find(f"./{_q(A, 'prstDash')}").attrib,
+            {"val": "lgDashDotDot"},
+        )
+        reopened = Document.from_docx(updated_output)
+        self.assertEqual(
+            reopened.to_spec()["content"][0]["outline"],
+            {
+                "width": {"value": 1.234567, "unit": "pt"},
+                "color": "#00AAFF",
+                "dash": "large_dash_dot_dot",
+            },
+        )
+
+        replaced = reopened.replace_image(image["id"], JPEG)
+        self.assertTrue(replaced.success, replaced.model_dump())
+        assert replaced.document is not None
+        self.assertEqual(
+            replaced.document.to_spec()["content"][0]["outline"],
+            reopened.to_spec()["content"][0]["outline"],
+        )
+
+        cleared = replaced.document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "clear": ["outline"],
+                }
+            ]
+        )
+        self.assertTrue(cleared.success, cleared.model_dump())
+        assert cleared.document is not None
+        cleared_output = cleared.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(cleared_output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        self.assertIsNone(
+            root.find(f".//{_q(PIC, 'spPr')}/{_q(A, 'ln')}")
+        )
+        self.assertNotIn(
+            "outline",
+            Document.from_docx(cleared_output).to_spec()["content"][0],
+        )
+
+    def test_picture_outline_projects_all_preset_dashes(self) -> None:
+        mappings = {
+            "solid": "solid",
+            "dot": "dot",
+            "sysDot": "system_dot",
+            "dash": "dash",
+            "sysDash": "system_dash",
+            "lgDash": "large_dash",
+            "dashDot": "dash_dot",
+            "sysDashDot": "system_dash_dot",
+            "lgDashDot": "large_dash_dot",
+            "lgDashDotDot": "large_dash_dot_dot",
+            "sysDashDotDot": "system_dash_dot_dot",
+        }
+        for native_dash, semantic_dash in mappings.items():
+            source = _image_document(outlined=True)
+            with ZipFile(io.BytesIO(source)) as package:
+                root = parse_xml(package.read("word/document.xml"))
+            preset = root.find(f".//{_q(A, 'prstDash')}")
+            assert preset is not None
+            preset.set("val", native_dash)
+            mutated = _rewrite_package(
+                source,
+                replacements={
+                    "word/document.xml": serialize_xml(root),
+                },
+                additions={},
+            )
+            with self.subTest(native_dash=native_dash):
+                image = Document.from_docx(mutated).to_spec()["content"][0]
+                self.assertEqual(image["outline"]["dash"], semantic_dash)
 
     def test_rectangular_source_crop_projects_updates_and_clears(
         self,
@@ -3412,6 +3641,130 @@ class DocxImageTests(unittest.TestCase):
             elif case == "wrong_child_order":
                 transform.remove(offset)
                 transform.append(offset)
+            mutated = _rewrite_package(
+                source,
+                replacements={
+                    "word/document.xml": serialize_xml(root),
+                },
+                additions={},
+            )
+            with self.subTest(case=case):
+                document = Document.from_docx(mutated)
+                self.assertEqual(
+                    document.to_spec()["content"][0]["type"],
+                    "opaque",
+                )
+                self.assertEqual(document.to_spec()["assets"], [])
+                self.assertEqual(document.to_bytes("docx"), mutated)
+
+    def test_neutral_zero_width_no_fill_outline_is_preserved(self) -> None:
+        source = _image_document()
+        with ZipFile(io.BytesIO(source)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        shape = root.find(f".//{_q(PIC, 'spPr')}")
+        assert shape is not None
+        outline = ET.SubElement(shape, _q(A, "ln"), {"w": "0"})
+        ET.SubElement(outline, _q(A, "noFill"))
+        source = _rewrite_package(
+            source,
+            replacements={
+                "word/document.xml": serialize_xml(root),
+            },
+            additions={},
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(image["type"], "image")
+        self.assertNotIn("outline", image)
+        self.assertEqual(document.to_bytes("docx"), source)
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"alt_text": "Neutral outline preserved"},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        with ZipFile(io.BytesIO(result.document.to_bytes("docx"))) as package:
+            updated_root = parse_xml(package.read("word/document.xml"))
+        updated_outline = updated_root.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'ln')}"
+        )
+        assert updated_outline is not None
+        self.assertEqual(updated_outline.attrib, {"w": "0"})
+        self.assertEqual(
+            [child.tag for child in updated_outline],
+            [_q(A, "noFill")],
+        )
+
+    def test_invalid_native_picture_outlines_remain_opaque(self) -> None:
+        for case in (
+            "unknown_attribute",
+            "zero_visible_width",
+            "nondefault_cap",
+            "bad_color",
+            "color_transform",
+            "theme_color",
+            "bad_dash",
+            "wrong_child_order",
+            "shape_wrong_child_order",
+            "bevel_join",
+            "duplicate_outline",
+            "nonzero_no_fill",
+        ):
+            source = _image_document(outlined=True)
+            with ZipFile(io.BytesIO(source)) as package:
+                root = parse_xml(package.read("word/document.xml"))
+            shape = root.find(f".//{_q(PIC, 'spPr')}")
+            outline = root.find(
+                f".//{_q(PIC, 'spPr')}/{_q(A, 'ln')}"
+            )
+            assert shape is not None
+            assert outline is not None
+            color = outline.find(
+                f"./{_q(A, 'solidFill')}/{_q(A, 'srgbClr')}"
+            )
+            dash = outline.find(f"./{_q(A, 'prstDash')}")
+            join = outline.find(f"./{_q(A, 'round')}")
+            assert color is not None
+            assert dash is not None
+            assert join is not None
+            if case == "unknown_attribute":
+                outline.set("future", "1")
+            elif case == "zero_visible_width":
+                outline.set("w", "0")
+            elif case == "nondefault_cap":
+                outline.set("cap", "rnd")
+            elif case == "bad_color":
+                color.set("val", "XYZ123")
+            elif case == "color_transform":
+                ET.SubElement(color, _q(A, "alpha"), {"val": "50000"})
+            elif case == "theme_color":
+                color.tag = _q(A, "schemeClr")
+                color.set("val", "accent1")
+            elif case == "bad_dash":
+                dash.set("val", "futureDash")
+            elif case == "wrong_child_order":
+                solid_fill = outline.find(f"./{_q(A, 'solidFill')}")
+                assert solid_fill is not None
+                outline.remove(solid_fill)
+                outline.append(solid_fill)
+            elif case == "shape_wrong_child_order":
+                shape.remove(outline)
+                shape.insert(0, outline)
+            elif case == "bevel_join":
+                join.tag = _q(A, "bevel")
+            elif case == "duplicate_outline":
+                shape.append(copy.deepcopy(outline))
+            elif case == "nonzero_no_fill":
+                for child in list(outline):
+                    outline.remove(child)
+                outline.attrib.clear()
+                outline.set("w", "1")
+                ET.SubElement(outline, _q(A, "noFill"))
             mutated = _rewrite_package(
                 source,
                 replacements={
@@ -4070,6 +4423,47 @@ class DocxImageTests(unittest.TestCase):
                 "set": {
                     "transform": {
                         "flip_horizontal": "true",
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "outline": {
+                        "width": {"value": 0, "unit": "pt"},
+                        "color": "#112233",
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "outline": {
+                        "width": {"value": 1, "unit": "pt"},
+                        "color": "112233",
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "outline": {
+                        "width": {"value": 1, "unit": "pt"},
+                        "color": "#112233",
+                        "dash": "custom",
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "outline": {
+                        "width": {"value": 1584.001, "unit": "pt"},
+                        "color": "#112233",
                     }
                 },
             },
@@ -5017,6 +5411,7 @@ class DocxImageTests(unittest.TestCase):
             anchored=True,
             relative_size=True,
             wrap_mode="tight",
+            outlined=True,
             transform_attributes={
                 "rot": "1350000",
                 "flipH": "1",
@@ -5067,6 +5462,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             cloned_image["transform"],
             source_image["transform"],
+        )
+        self.assertEqual(
+            cloned_image["outline"],
+            source_image["outline"],
         )
 
         replaced = cloned.document.replace_image(
@@ -5164,6 +5563,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_clone_image["transform"],
             reopened_source_image["transform"],
+        )
+        self.assertEqual(
+            reopened_clone_image["outline"],
+            reopened_source_image["outline"],
         )
         self.assertEqual(reopened.to_bytes("docx"), output)
 
@@ -5411,6 +5814,11 @@ class DocxImageTests(unittest.TestCase):
                 "rotation_degrees_clockwise": 45.123456,
                 "flip_horizontal": True,
             },
+            outline={
+                "width": {"value": 1.5, "unit": "pt"},
+                "color": "#2457A7",
+                "dash": "dash",
+            },
             paragraph_style={
                 "alignment": "center",
                 "spacing_before": {"value": 6, "unit": "pt"},
@@ -5464,6 +5872,14 @@ class DocxImageTests(unittest.TestCase):
                 "rotation_degrees_clockwise": 45.12345,
                 "flip_horizontal": True,
                 "flip_vertical": False,
+            },
+        )
+        self.assertEqual(
+            inserted["outline"],
+            {
+                "width": {"value": 1.5, "unit": "pt"},
+                "color": "#2457A7",
+                "dash": "dash",
             },
         )
         self.assertEqual(
@@ -5525,6 +5941,19 @@ class DocxImageTests(unittest.TestCase):
             inserted_transform.attrib,
             {"rot": "2707407", "flipH": "1"},
         )
+        inserted_outline = inserted_paragraph.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'ln')}"
+        )
+        assert inserted_outline is not None
+        self.assertEqual(
+            inserted_outline.attrib,
+            {
+                "w": "19050",
+                "cap": "flat",
+                "cmpd": "sng",
+                "algn": "ctr",
+            },
+        )
         inserted_relationship_id = inserted_paragraph.find(
             f".//{_q(A, 'blip')}"
         ).get(_q(R, "embed"))
@@ -5566,6 +5995,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_inserted["transform"],
             inserted["transform"],
+        )
+        self.assertEqual(
+            reopened_inserted["outline"],
+            inserted["outline"],
         )
         self.assertEqual(reopened.image_bytes("inserted_chart"), JPEG)
 
@@ -6508,9 +6941,15 @@ class DocxImageTests(unittest.TestCase):
             output_path = root / "inserted.docx"
             floating_layout_path = root / "floating-layout.json"
             transform_path = root / "transform.json"
+            outline_path = root / "outline.json"
             transform = {
                 "rotation_degrees_clockwise": 15,
                 "flip_vertical": True,
+            }
+            outline = {
+                "width": {"value": 1, "unit": "pt"},
+                "color": "#0F6B4F",
+                "dash": "dot",
             }
             floating_layout = {
                 "horizontal": {
@@ -6549,6 +6988,10 @@ class DocxImageTests(unittest.TestCase):
                 json.dumps(transform),
                 encoding="utf-8",
             )
+            outline_path.write_text(
+                json.dumps(outline),
+                encoding="utf-8",
+            )
             stdout = io.StringIO()
             with redirect_stdout(stdout):
                 exit_code = main(
@@ -6571,6 +7014,8 @@ class DocxImageTests(unittest.TestCase):
                         "cli_chart",
                         "--transform",
                         str(transform_path),
+                        "--outline",
+                        str(outline_path),
                         "--floating-layout",
                         str(floating_layout_path),
                         "--align",
@@ -6598,6 +7043,7 @@ class DocxImageTests(unittest.TestCase):
                     "flip_vertical": True,
                 },
             )
+            self.assertEqual(cli_image["outline"], outline)
             self.assertEqual(
                 cli_image["floating"]["horizontal"],
                 floating_layout["horizontal"],
@@ -6614,6 +7060,7 @@ class DocxImageTests(unittest.TestCase):
                 alt_text="Workspace inserted chart",
                 image_id="workspace_chart",
                 transform=transform,
+                outline=outline,
                 floating=floating_layout,
                 paragraph_style={"alignment": "right"},
                 base_revision=tracked.revision,
@@ -6640,6 +7087,7 @@ class DocxImageTests(unittest.TestCase):
                 workspace_image["transform"],
                 cli_image["transform"],
             )
+            self.assertEqual(workspace_image["outline"], outline)
             self.assertIn(
                 "insert_image_after",
                 workspace.capabilities(tracked.id)["operations"],
@@ -6686,6 +7134,10 @@ class DocxImageTests(unittest.TestCase):
             self.assertEqual(
                 patch["operations"][0]["image"]["transform"],
                 cli_image["transform"],
+            )
+            self.assertEqual(
+                patch["operations"][0]["image"]["outline"],
+                outline,
             )
             self.assertEqual(
                 patch["changes"][0]["binary_transport"],

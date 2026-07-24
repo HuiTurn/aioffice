@@ -18,7 +18,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.43"
+SPEC_VERSION = "0.2-draft.44"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1885,6 +1885,45 @@ class ImageTransform(StrictModel):
         return self
 
 
+class ImageOutline(StrictModel):
+    """Direct RGB DrawingML outline for one picture occurrence."""
+
+    width: Length
+    color: HexColor
+    dash: Literal[
+        "solid",
+        "dot",
+        "system_dot",
+        "dash",
+        "system_dash",
+        "large_dash",
+        "dash_dot",
+        "system_dash_dot",
+        "large_dash_dot",
+        "large_dash_dot_dot",
+        "system_dash_dot_dot",
+    ] = "solid"
+
+    @field_validator("color")
+    @classmethod
+    def normalize_color(cls, value: str) -> str:
+        return value.upper()
+
+    @model_validator(mode="after")
+    def validate_width(self) -> "ImageOutline":
+        native_width = round(self.width.to_points() * 12_700)
+        if native_width <= 0 or native_width > 20_116_800:
+            raise ValueError(
+                "Image outline width must fit DrawingML ST_LineWidth "
+                "(1..20116800 EMUs)."
+            )
+        self.width = Length(
+            value=round(native_width / 12_700, 6),
+            unit="pt",
+        )
+        return self
+
+
 class ImageBlock(NodeBase):
     """One AI-addressable image occurrence backed by a native binary asset."""
 
@@ -1896,6 +1935,7 @@ class ImageBlock(NodeBase):
     height: Length
     crop: ImageCrop | None = None
     transform: ImageTransform | None = None
+    outline: ImageOutline | None = None
     floating: FloatingImageLayout | None = None
     name: str | None = None
     alt_text: str | None = None
@@ -1986,6 +2026,7 @@ class ImageUpdate(StrictModel):
     height: Length | None = None
     crop: ImageCrop | None = None
     transform: ImageTransform | None = None
+    outline: ImageOutline | None = None
     alt_text: str | None = Field(default=None, min_length=1, max_length=4096)
     title: str | None = Field(default=None, min_length=1, max_length=1024)
 
@@ -2028,6 +2069,7 @@ class ImageInsert(StrictModel):
     width: Length
     height: Length
     transform: ImageTransform | None = None
+    outline: ImageOutline | None = None
     name: str | None = Field(default=None, min_length=1, max_length=1024)
     alt_text: str = Field(min_length=1, max_length=4096)
     title: str | None = Field(default=None, min_length=1, max_length=1024)
@@ -2155,6 +2197,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.41",
         "0.2-draft.42",
         "0.2-draft.43",
+        "0.2-draft.44",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

@@ -400,6 +400,18 @@ def _image_transform_attributes(image: ImageBlock) -> str:
     )
 
 
+def _image_outline_attributes(image: ImageBlock) -> str:
+    if image.outline is None:
+        return ""
+    outline = image.outline
+    return (
+        ' data-aioffice-outline-width-pt="'
+        f'{outline.width.to_points():g}"'
+        f' data-aioffice-outline-color="{outline.color}"'
+        f' data-aioffice-outline-dash="{outline.dash}"'
+    )
+
+
 def _image_placement_attributes(image: ImageBlock) -> str:
     return f' data-aioffice-placement="{image.placement}"'
 
@@ -486,6 +498,7 @@ def _header_footer_html(
                 f"{_image_placement_attributes(block)}"
                 f"{_image_crop_attributes(block)}"
                 f"{_image_transform_attributes(block)}"
+                f"{_image_outline_attributes(block)}"
                 f"{figure_style}>"
                 '<div class="native-image-placeholder" role="img" '
                 f'aria-label="{escape(label, quote=True)}" '
@@ -968,6 +981,7 @@ def export_html(
                 f"{_image_placement_attributes(block)}"
                 f"{_image_crop_attributes(block)}"
                 f"{_image_transform_attributes(block)}"
+                f"{_image_outline_attributes(block)}"
                 f"{_style_attribute(figure_css)}>"
             )
             lines.append(

@@ -38,6 +38,7 @@ from aioffice.spec.models import (
     ImageBlock,
     ImageCrop,
     ImageInsert,
+    ImageOutline,
     ImageTransform,
     ImageUpdate,
     NamedStyle,
@@ -174,6 +175,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--transform",
         type=Path,
         help="JSON file containing one strict ImageTransform.",
+    )
+    insert_image.add_argument(
+        "--outline",
+        type=Path,
+        help="JSON file containing one strict ImageOutline.",
     )
     insert_image.add_argument(
         "--floating-layout",
@@ -321,6 +327,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "image-block",
             "image-crop",
             "image-insert",
+            "image-outline",
             "image-transform",
             "image-update",
             "named-style",
@@ -439,6 +446,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--transform",
         type=Path,
         help="JSON file containing one strict ImageTransform.",
+    )
+    workspace_insert_image.add_argument(
+        "--outline",
+        type=Path,
+        help="JSON file containing one strict ImageOutline.",
     )
     workspace_insert_image.add_argument(
         "--floating-layout",
@@ -624,6 +636,14 @@ def _run(args: argparse.Namespace) -> int:
                     if args.transform is not None
                     else None
                 ),
+                outline=(
+                    _load_json_object(
+                        args.outline,
+                        label="Image outline",
+                    )
+                    if args.outline is not None
+                    else None
+                ),
                 floating=(
                     _load_json_object(
                         args.floating_layout,
@@ -771,6 +791,14 @@ def _run(args: argparse.Namespace) -> int:
                     label="Image transform",
                 )
                 if args.transform is not None
+                else None
+            ),
+            outline=(
+                _load_json_object(
+                    args.outline,
+                    label="Image outline",
+                )
+                if args.outline is not None
                 else None
             ),
             floating=(
@@ -937,6 +965,7 @@ def _run(args: argparse.Namespace) -> int:
             "image-block": ImageBlock,
             "image-crop": ImageCrop,
             "image-insert": ImageInsert,
+            "image-outline": ImageOutline,
             "image-transform": ImageTransform,
             "image-update": ImageUpdate,
             "named-style": NamedStyle,

@@ -147,6 +147,20 @@
   but may normalize equivalent rotation/flip state and rewrite or quantize extents;
   AiOffice truthfully falls back to opaque when the rewritten geometry no longer
   satisfies the exact projection proof.
+- Added strict `ImageOutline` semantics for direct-RGB DrawingML picture lines in
+  body, header, and footer stories, with explicit widths quantized to native EMUs
+  and all eleven preset dash styles exposed as AI-readable values.
+- Added complete-group outline set/clear lowering, outlined inline and floating
+  insertion, semantic HTML evidence, CLI and Workspace transport, verified reads,
+  copy-on-write replacement, anchor-update preservation, and header/footer cloning.
+- Preserved supported native `a:ln` subtrees byte-for-byte through no-op and
+  unrelated edits, accepted neutral absent/zero-width `a:noFill` lines, and kept
+  theme/gradient/pattern colors, color transforms, custom dashes, compound lines,
+  non-default joins/caps/alignment, arrowheads, extensions, and malformed order
+  fail-closed as opaque.
+- Verified that LibreOffice 26.8 retains the tested visible direct-RGB outline but
+  may drop its preset dash and explicit default line state on save; AiOffice
+  truthfully reopens the producer's normalized solid outline.
 - Accepted LibreOffice's visually neutral picture normalization
   (`pic:spPr/@bwMode="auto"` and at most one empty `a:noFill`) so aligned pictures
   remain projected and editable after an Office-compatible open/save cycle, while
@@ -552,6 +566,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.41`.
 - Advanced the AiOffice Document Spec to `0.2-draft.42`.
 - Advanced the AiOffice Document Spec to `0.2-draft.43`.
+- Advanced the AiOffice Document Spec to `0.2-draft.44`.
 
 ## 0.1.0
 

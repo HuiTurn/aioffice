@@ -72,6 +72,7 @@ from aioffice.spec.models import (
     Heading,
     ImageBlock,
     ImageInsert,
+    ImageOutline,
     ImageTransform,
     ImageUpdate,
     LEGACY_DOCUMENT_SCHEMA_URL,
@@ -368,6 +369,7 @@ class Document:
             )
             or image.crop != native_image.crop
             or image.transform != native_image.transform
+            or image.outline != native_image.outline
             or round(image.width.to_points() * 12_700)
             != round(native_image.width.to_points() * 12_700)
             or round(image.height.to_points() * 12_700)
@@ -526,6 +528,7 @@ class Document:
         name: str | None = None,
         title: str | None = None,
         transform: ImageTransform | Mapping[str, Any] | None = None,
+        outline: ImageOutline | Mapping[str, Any] | None = None,
         floating: FloatingImageLayout | Mapping[str, Any] | None = None,
         paragraph_style: ParagraphStyle | Mapping[str, Any] | None = None,
         dry_run: bool = False,
@@ -597,6 +600,7 @@ class Document:
             "width": width,
             "height": height,
             "transform": transform,
+            "outline": outline,
             "name": name or prepared.asset.filename,
             "alt_text": alt_text,
             "title": title,
@@ -787,6 +791,11 @@ class Document:
                             if node.transform is not None
                             else None
                         ),
+                        outline=(
+                            node.outline.model_dump(mode="json")
+                            if node.outline is not None
+                            else None
+                        ),
                         floating=(
                             node.floating.model_dump(
                                 mode="json",
@@ -935,6 +944,13 @@ class Document:
                                                 mode="json"
                                             )
                                             if block.transform is not None
+                                            else None
+                                        ),
+                                        "outline": (
+                                            block.outline.model_dump(
+                                                mode="json"
+                                            )
+                                            if block.outline is not None
                                             else None
                                         ),
                                         "placement": block.placement,
@@ -1208,12 +1224,14 @@ class Document:
                     "height",
                     "crop",
                     "transform",
+                    "outline",
                     "alt_text",
                     "title",
                 ],
                 "clearable_update_fields": [
                     "crop",
                     "transform",
+                    "outline",
                     "alt_text",
                     "title",
                 ],
@@ -1231,6 +1249,35 @@ class Document:
                 },
                 "image_transform_group_update": "complete_object",
                 "image_transform_clear_restores_identity": True,
+                "image_outline_schema": "image-outline",
+                "image_outline_fields": [
+                    "width",
+                    "color",
+                    "dash",
+                ],
+                "image_outline_width_unit": "explicit_length",
+                "image_outline_native_width_unit": "emu",
+                "image_outline_native_width_bounds": {
+                    "minimum_inclusive": 1,
+                    "maximum_inclusive": 20_116_800,
+                },
+                "image_outline_color": "direct_srgb_hex",
+                "image_outline_dash_values": [
+                    "solid",
+                    "dot",
+                    "system_dot",
+                    "dash",
+                    "system_dash",
+                    "large_dash",
+                    "dash_dot",
+                    "system_dash_dot",
+                    "large_dash_dot",
+                    "large_dash_dot_dot",
+                    "system_dash_dot_dot",
+                ],
+                "image_outline_width_quantization": "nearest_native_emu",
+                "image_outline_group_update": "complete_object",
+                "image_outline_clear_removes_direct_line": True,
                 "single_dimension_resize": "preserve_aspect_ratio",
                 "two_dimension_resize": "exact",
                 "native_geometry_patch": [
@@ -1238,6 +1285,7 @@ class Document:
                     "pic:spPr/a:xfrm/a:ext",
                     "pic:blipFill/a:srcRect",
                     "pic:spPr/a:xfrm/@rot|@flipH|@flipV",
+                    "pic:spPr/a:ln",
                 ],
                 "projected_placements": [
                     "inline",
@@ -1401,6 +1449,7 @@ class Document:
                     "display_extent",
                     "source_crop",
                     "picture_transform",
+                    "picture_outline",
                     "native_placement_and_anchor_layout",
                     "alternative_text",
                     "title",
@@ -1409,7 +1458,8 @@ class Document:
                 ],
                 "native_insert_api": (
                     "Document.insert_image_after(target, source, width=..., "
-                    "height=..., alt_text=..., transform=None, floating=None)"
+                    "height=..., alt_text=..., transform=None, outline=None, "
+                    "floating=None)"
                 ),
                 "native_insert_operation": "image.insert_after",
                 "insert_placement": (
@@ -1429,6 +1479,7 @@ class Document:
                 ),
                 "insert_dimensions": "explicit_width_and_height",
                 "insert_transform_schema": "image-transform",
+                "insert_outline_schema": "image-outline",
                 "insert_alt_text": "required",
                 "insert_target": "mapped_top_level_body_node",
                 "insert_supports_paragraph_style": True,
@@ -1466,7 +1517,11 @@ class Document:
                         "optional canonical DrawingML rotation and horizontal/"
                         "vertical flips"
                     ),
-                    "no visible outline or visual effect",
+                    (
+                        "optional direct-RGB DrawingML outline with native "
+                        "preset dash"
+                    ),
+                    "no visual effect",
                     (
                         "optional LibreOffice-neutral bwMode auto and empty "
                         "shape no-fill"
@@ -1486,7 +1541,7 @@ class Document:
                     "linked or external image",
                     (
                         "negative, overconstrained, malformed-transform, "
-                        "outlined, or effected picture"
+                        "unsupported-outline, or effected picture"
                     ),
                     "picture in table",
                     "VML, OLE, or embedded object",
@@ -4171,6 +4226,7 @@ class Document:
                 width=image_insert.width,
                 height=image_insert.height,
                 transform=image_insert.transform,
+                outline=image_insert.outline,
                 name=image_insert.name,
                 alt_text=image_insert.alt_text,
                 title=image_insert.title,
@@ -4406,7 +4462,13 @@ class Document:
             invalid_clear = (
                 sorted(
                     set(clear_values)
-                    - {"crop", "transform", "alt_text", "title"}
+                    - {
+                        "crop",
+                        "transform",
+                        "outline",
+                        "alt_text",
+                        "title",
+                    }
                 )
                 if valid_shape
                 else []

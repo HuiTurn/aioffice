@@ -83,6 +83,12 @@ clockwise degrees and booleans. A story-local `image.update`, anchor update, or
 copy-on-write binary replacement re-proves that the transform remains isolated to
 the intended occurrence.
 
+In `0.2.0.dev44`, clone-safe pictures may also carry one supported direct-RGB
+DrawingML outline with an explicit native width and preset dash. The clone retains
+the complete `a:ln` subtree and shares the same media target; later outline,
+transform, anchor, paragraph, or binary updates re-prove that only the selected
+story occurrence changed.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

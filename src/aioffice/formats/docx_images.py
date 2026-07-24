@@ -35,6 +35,7 @@ from aioffice.spec.models import (
     ImageBlock,
     ImageCrop,
     ImageInsert,
+    ImageOutline,
     ImageTransform,
     Length,
     NativeRef,
@@ -56,6 +57,23 @@ _REPLACEMENT_EXTENSIONS = {
     "image/gif": "gif",
     "image/bmp": "bmp",
     "image/tiff": "tif",
+}
+_OUTLINE_DASH_TO_NATIVE = {
+    "solid": "solid",
+    "dot": "dot",
+    "system_dot": "sysDot",
+    "dash": "dash",
+    "system_dash": "sysDash",
+    "large_dash": "lgDash",
+    "dash_dot": "dashDot",
+    "system_dash_dot": "sysDashDot",
+    "large_dash_dot": "lgDashDot",
+    "large_dash_dot_dot": "lgDashDotDot",
+    "system_dash_dot_dot": "sysDashDotDot",
+}
+_OUTLINE_DASH_FROM_NATIVE = {
+    native: semantic
+    for semantic, native in _OUTLINE_DASH_TO_NATIVE.items()
 }
 
 IMAGE_RELATIONSHIP_TYPE = (
@@ -125,6 +143,7 @@ class SimpleNativeImage:
     height: Length
     crop: ImageCrop | None
     transform: ImageTransform | None
+    outline: ImageOutline | None
     placement: Literal["inline", "floating"]
     floating: FloatingImageLayout | None
     name: str | None
@@ -156,6 +175,19 @@ VerticalRelativeTo: TypeAlias = Literal[
     "page",
     "paragraph",
     "top_margin",
+]
+ImageOutlineDashValue: TypeAlias = Literal[
+    "solid",
+    "dot",
+    "system_dot",
+    "dash",
+    "system_dash",
+    "large_dash",
+    "dash_dot",
+    "system_dash_dot",
+    "large_dash_dot",
+    "large_dash_dot_dot",
+    "system_dash_dot_dot",
 ]
 RelativeWidthTo: TypeAlias = Literal[
     "inside_margin",
@@ -672,6 +704,41 @@ def _native_image_transform_attributes(
     if transform.flip_vertical:
         attributes["flipV"] = "1"
     return attributes or None
+
+
+def _native_image_outline_element(
+    outline: ImageOutline,
+) -> ET.Element | None:
+    native_width = round(outline.width.to_points() * EMU_PER_POINT)
+    native_dash = _OUTLINE_DASH_TO_NATIVE.get(outline.dash)
+    if (
+        native_width <= 0
+        or native_width > 20_116_800
+        or native_dash is None
+    ):
+        return None
+    line = ET.Element(
+        _q(A, "ln"),
+        {
+            "w": str(native_width),
+            "cap": "flat",
+            "cmpd": "sng",
+            "algn": "ctr",
+        },
+    )
+    solid_fill = ET.SubElement(line, _q(A, "solidFill"))
+    ET.SubElement(
+        solid_fill,
+        _q(A, "srgbClr"),
+        {"val": outline.color.removeprefix("#").upper()},
+    )
+    ET.SubElement(
+        line,
+        _q(A, "prstDash"),
+        {"val": native_dash},
+    )
+    ET.SubElement(line, _q(A, "round"))
+    return line
 
 
 def floating_image_layout_matches(
@@ -1480,6 +1547,15 @@ def simple_native_image(
         or any(no_fill.attrib or len(no_fill) for no_fill in no_fills)
     ):
         return None
+    outline_elements = shape_properties.findall(f"./{_q(A, 'ln')}")
+    expected_shape_children = [
+        _q(A, "xfrm"),
+        _q(A, "prstGeom"),
+        *([_q(A, "noFill")] if no_fills else []),
+        *([_q(A, "ln")] if outline_elements else []),
+    ]
+    if [child.tag for child in shape_properties] != expected_shape_children:
+        return None
     transforms = shape_properties.findall(f"./{_q(A, 'xfrm')}")
     if len(transforms) != 1:
         return None
@@ -1557,13 +1633,126 @@ def simple_native_image(
         and _native_image_transform_attributes(image_transform) is None
     ):
         return None
-    for outline in picture.findall(f".//{_q(A, 'ln')}"):
+    if len(outline_elements) > 1:
+        return None
+    image_outline: ImageOutline | None = None
+    if outline_elements:
+        outline_element = outline_elements[0]
+        outline_children = list(outline_element)
         if (
-            outline.attrib
-            or len(outline) != 1
-            or outline[0].tag != _q(A, "noFill")
+            len(outline_children) == 1
+            and outline_children[0].tag == _q(A, "noFill")
         ):
-            return None
+            no_fill = outline_children[0]
+            if (
+                no_fill.attrib
+                or len(no_fill)
+                or set(outline_element.attrib) - {"w"}
+            ):
+                return None
+            if "w" in outline_element.attrib:
+                try:
+                    no_fill_width = int(outline_element.attrib["w"])
+                except ValueError:
+                    return None
+                if no_fill_width != 0:
+                    return None
+        else:
+            if (
+                set(outline_element.attrib)
+                - {"w", "cap", "cmpd", "algn"}
+                or "w" not in outline_element.attrib
+                or outline_element.attrib.get("cap", "flat") != "flat"
+                or outline_element.attrib.get("cmpd", "sng") != "sng"
+                or outline_element.attrib.get("algn", "ctr") != "ctr"
+            ):
+                return None
+            try:
+                outline_width = int(outline_element.attrib["w"])
+            except ValueError:
+                return None
+            if outline_width <= 0 or outline_width > 20_116_800:
+                return None
+            child_tags = [child.tag for child in outline_children]
+            if (
+                not child_tags
+                or child_tags[0] != _q(A, "solidFill")
+                or any(
+                    tag not in {
+                        _q(A, "solidFill"),
+                        _q(A, "prstDash"),
+                        _q(A, "round"),
+                    }
+                    for tag in child_tags
+                )
+                or len(child_tags) != len(set(child_tags))
+                or (
+                    _q(A, "prstDash") in child_tags
+                    and child_tags.index(_q(A, "prstDash"))
+                    < child_tags.index(_q(A, "solidFill"))
+                )
+                or (
+                    _q(A, "round") in child_tags
+                    and child_tags[-1] != _q(A, "round")
+                )
+            ):
+                return None
+            solid_fill = outline_children[0]
+            if (
+                solid_fill.attrib
+                or len(solid_fill) != 1
+                or solid_fill[0].tag != _q(A, "srgbClr")
+            ):
+                return None
+            rgb_color = solid_fill[0]
+            color_value = rgb_color.attrib.get("val", "")
+            if (
+                set(rgb_color.attrib) != {"val"}
+                or len(rgb_color)
+                or len(color_value) != 6
+                or any(
+                    character not in "0123456789abcdefABCDEF"
+                    for character in color_value
+                )
+            ):
+                return None
+            dash_elements = outline_element.findall(
+                f"./{_q(A, 'prstDash')}"
+            )
+            if dash_elements:
+                dash_element = dash_elements[0]
+                if (
+                    set(dash_element.attrib) != {"val"}
+                    or len(dash_element)
+                ):
+                    return None
+                outline_dash = _OUTLINE_DASH_FROM_NATIVE.get(
+                    dash_element.attrib["val"]
+                )
+                if outline_dash is None:
+                    return None
+            else:
+                outline_dash = "solid"
+            round_elements = outline_element.findall(f"./{_q(A, 'round')}")
+            if any(element.attrib or len(element) for element in round_elements):
+                return None
+            image_outline = ImageOutline(
+                width=Length(
+                    value=round(
+                        outline_width / EMU_PER_POINT,
+                        6,
+                    ),
+                    unit="pt",
+                ),
+                color=f"#{color_value.upper()}",
+                dash=cast(ImageOutlineDashValue, outline_dash),
+            )
+    if any(
+        element.tag == _q(A, "ln")
+        and element not in outline_elements
+        for element in picture.iter()
+    ):
+        return None
     if any(
         _local_name(element.tag) in _VISUAL_EFFECT_NAMES
         for element in picture.iter()
@@ -1616,6 +1805,7 @@ def simple_native_image(
         ),
         crop=crop,
         transform=image_transform,
+        outline=image_outline,
         placement=placement,
         floating=floating,
         name=optional_attribute("name"),
@@ -1814,6 +2004,35 @@ def patch_simple_native_image(
         transforms[0].attrib.clear()
         transforms[0].attrib.update(native_transform or {})
 
+    if "outline" in fields:
+        shape_properties = drawing_container.find(
+            f"./{_q(A, 'graphic')}/{_q(A, 'graphicData')}/"
+            f"{_q(PIC, 'pic')}/{_q(PIC, 'spPr')}"
+        )
+        if shape_properties is None:
+            raise NativePackageError(
+                "Supported native image has no pic:spPr element."
+            )
+        outlines = shape_properties.findall(f"./{_q(A, 'ln')}")
+        if len(outlines) > 1:
+            raise NativePackageError(
+                "Supported native image has duplicate direct outlines."
+            )
+        existing_index = (
+            list(shape_properties).index(outlines[0])
+            if outlines
+            else len(shape_properties)
+        )
+        if outlines:
+            shape_properties.remove(outlines[0])
+        if result.outline is not None:
+            native_outline = _native_image_outline_element(result.outline)
+            if native_outline is None:
+                raise NativePackageError(
+                    "image.update outline is outside the supported range."
+                )
+            shape_properties.insert(existing_index, native_outline)
+
     verified = simple_native_image(
         package,
         paragraph,
@@ -1823,6 +2042,7 @@ def patch_simple_native_image(
         verified is None
         or verified.crop != result.crop
         or verified.transform != result.transform
+        or verified.outline != result.outline
         or verified.placement != original.placement
         or not floating_image_layout_matches(
             verified.floating,
@@ -2037,6 +2257,7 @@ def patch_simple_native_image_anchor(
         or verified.height != original.height
         or verified.crop != original.crop
         or verified.transform != original.transform
+        or verified.outline != original.outline
         or verified.name != original.name
         or verified.alt_text != original.alt_text
         or verified.title != original.title
@@ -2231,6 +2452,7 @@ def replace_simple_native_image(
         or replaced.size_bytes != asset.size_bytes
         or replaced.crop != original.crop
         or replaced.transform != original.transform
+        or replaced.outline != original.outline
         or replaced.placement != original.placement
         or not floating_image_layout_matches(
             replaced.floating,
@@ -2548,6 +2770,13 @@ def insert_simple_native_image_after(
         {"prst": "rect"},
     )
     ET.SubElement(geometry, _q(A, "avLst"))
+    if image.outline is not None:
+        native_outline = _native_image_outline_element(image.outline)
+        if native_outline is None:
+            raise NativePackageError(
+                "Image insertion outline is outside the supported range."
+            )
+        shape.append(native_outline)
     if image.placement == "floating":
         assert image.floating is not None
         native_relative_size = _native_relative_size(
@@ -2590,6 +2819,7 @@ def insert_simple_native_image_after(
         or projected.alt_text != image.alt_text
         or projected.title != image.title
         or projected.transform != image.transform
+        or projected.outline != image.outline
         or projected.placement != image.placement
         or not floating_image_layout_matches(
             projected.floating,

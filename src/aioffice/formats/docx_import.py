@@ -444,6 +444,11 @@ def _paragraph_projection(
                 if native_image.transform is not None
                 else None
             ),
+            "outline": (
+                native_image.outline.model_dump(mode="json")
+                if native_image.outline is not None
+                else None
+            ),
             "floating": (
                 native_image.floating.model_dump(
                     mode="json",

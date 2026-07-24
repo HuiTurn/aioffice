@@ -28,6 +28,7 @@ from aioffice.native import (
 from aioffice.security import SecurityPolicy
 from aioffice.spec.models import (
     FloatingImageLayout,
+    ImageOutline,
     ImageTransform,
     Length,
     ParagraphStyle,
@@ -410,6 +411,7 @@ class Workspace:
         name: str | None = None,
         title: str | None = None,
         transform: ImageTransform | Mapping[str, Any] | None = None,
+        outline: ImageOutline | Mapping[str, Any] | None = None,
         floating: FloatingImageLayout | Mapping[str, Any] | None = None,
         paragraph_style: ParagraphStyle | Mapping[str, Any] | None = None,
         dry_run: bool = False,
@@ -435,6 +437,7 @@ class Workspace:
             name=name,
             title=title,
             transform=transform,
+            outline=outline,
             floating=floating,
             paragraph_style=paragraph_style,
             dry_run=dry_run,
@@ -488,6 +491,7 @@ class Workspace:
                 "width",
                 "height",
                 "transform",
+                "outline",
                 "name",
                 "alt_text",
                 "title",
