@@ -445,12 +445,11 @@ def _paragraph_projection(
                 part_uri=part_uri,
                 root_path=root_path,
             ),
-            "capabilities": [
-                "inspect",
-                "extract",
-                "delete",
-                "render",
-            ],
+            "capabilities": (
+                ["inspect", "extract", "delete", "render"]
+                if part_uri == "/word/document.xml"
+                else ["inspect", "extract", "render"]
+            ),
             "editable": False,
             "metadata": {
                 "projection": "native_inline_image_metadata",
@@ -558,8 +557,13 @@ def _paragraph_projection(
         if feature != "field"
     ]
     if unsupported_native_features:
+        opaque_common = {
+            field_name: field_value
+            for field_name, field_value in common.items()
+            if field_name in {"id", "source_ref", "metadata"}
+        }
         return {
-            **common,
+            **opaque_common,
             "id": _unique_id("opaque", para_id, index, seen_ids),
             "type": "opaque",
             "summary": (
@@ -591,6 +595,7 @@ def _header_footer_part_projection(
     kind: str,
     seen_ids: set[str],
     named_styles: dict[str, NamedStyle],
+    assets: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     root = parse_xml(package.get_part(part_uri))
     expected_root = _q(W, "hdr" if kind == "header" else "ftr")
@@ -606,6 +611,22 @@ def _header_footer_part_projection(
     hyperlinks = _hyperlink_targets(package, source_part=part_uri)
     content: list[dict[str, Any]] = []
     for index, element in enumerate(list(root)):
+        if element.tag == _q(W, "p"):
+            content.append(
+                _paragraph_projection(
+                    element,
+                    index,
+                    seen_ids,
+                    hyperlinks,
+                    named_styles,
+                    package=package,
+                    assets=assets,
+                    part_uri=part_uri,
+                    root_path=root_path,
+                    allow_heading=False,
+                )
+            )
+            continue
         complex_features = [
             feature
             for feature, query in (
@@ -614,20 +635,6 @@ def _header_footer_part_projection(
             )
             if element.find(query) is not None
         ]
-        if element.tag == _q(W, "p") and not complex_features:
-            content.append(
-                _paragraph_projection(
-                    element,
-                    index,
-                    seen_ids,
-                    hyperlinks,
-                    named_styles,
-                    part_uri=part_uri,
-                    root_path=root_path,
-                    allow_heading=False,
-                )
-            )
-            continue
         native_kind = element.tag.rsplit("}", 1)[-1]
         summary = (
             f"Native {kind} paragraph contains "
@@ -1362,6 +1369,7 @@ def import_docx(
                         kind=kind,
                         seen_ids=seen_ids,
                         named_styles=named_styles,
+                        assets=assets_by_id,
                     )
                 except NativePackageError as error:
                     header_footer_diagnostics.append(
@@ -1440,6 +1448,7 @@ def import_docx(
                 kind=kind,
                 seen_ids=seen_ids,
                 named_styles=named_styles,
+                assets=assets_by_id,
             )
         except NativePackageError as error:
             header_footer_diagnostics.append(

@@ -62,6 +62,7 @@ from aioffice.spec.models import (
     DocumentField,
     DocumentSection,
     HeaderFooterBindings,
+    HeaderFooterImageBlock,
     HeaderFooterPart,
     Heading,
     ImageBlock,
@@ -109,6 +110,22 @@ def _document_fields(spec: AiOfficeDocumentSpec) -> list[DocumentField]:
         for block in blocks
         for inline in block.content
         if isinstance(inline, DocumentField)
+    ]
+
+
+def _document_images(spec: AiOfficeDocumentSpec) -> list[ImageBlock]:
+    return [
+        *(
+            node
+            for node in spec.content
+            if isinstance(node, ImageBlock)
+        ),
+        *(
+            block
+            for part in spec.header_footers
+            for block in part.content
+            if isinstance(block, ImageBlock)
+        ),
     ]
 
 
@@ -302,9 +319,8 @@ class Document:
         image = next(
             (
                 node
-                for node in self._spec.content
-                if isinstance(node, ImageBlock)
-                and node.id == normalized_id
+                for node in _document_images(self._spec)
+                if node.id == normalized_id
             ),
             None,
         )
@@ -631,8 +647,7 @@ class Document:
             "header_footer_count": len(self._spec.header_footers),
             "field_count": len(_document_fields(self._spec)),
             "image_count": sum(
-                isinstance(node, ImageBlock)
-                for node in self._spec.content
+                1 for _ in _document_images(self._spec)
             ),
             "asset_count": len(self._spec.assets),
         }
@@ -847,7 +862,32 @@ class Document:
                                     ],
                                 }
                                 if isinstance(block, Paragraph)
-                                else {"summary": block.summary}
+                                else (
+                                    {
+                                        "asset_id": block.asset_id,
+                                        "width": block.width.model_dump(
+                                            mode="json"
+                                        ),
+                                        "height": block.height.model_dump(
+                                            mode="json"
+                                        ),
+                                        "name": block.name,
+                                        "alt_text": block.alt_text,
+                                        "title": block.title,
+                                        "capabilities": block.capabilities,
+                                        "supported_operations": (
+                                            [
+                                                "image.replace",
+                                                "image.update",
+                                                "paragraph.format",
+                                            ]
+                                            if self._native is not None
+                                            else []
+                                        ),
+                                    }
+                                    if isinstance(block, ImageBlock)
+                                    else {"summary": block.summary}
+                                )
                             ),
                         }
                         for block in part.content
@@ -1015,8 +1055,7 @@ class Document:
                 "table.cell.format",
             ]
             if any(
-                isinstance(node, ImageBlock)
-                for node in self._spec.content
+                True for _ in _document_images(self._spec)
             ):
                 operations.append("image.replace")
                 operations.append("image.update")
@@ -1065,9 +1104,12 @@ class Document:
                 "binary_in_json": False,
                 "image_projection": "native_metadata_only",
                 "projected_image_count": sum(
-                    isinstance(node, ImageBlock)
-                    for node in self._spec.content
+                    1 for _ in _document_images(self._spec)
                 ),
+                "projected_story_scopes": [
+                    "document_body",
+                    "header_footer",
+                ],
                 "asset_count": len(self._spec.assets),
                 "read_api": "Document.read_image(image_id)",
                 "bytes_api": "Document.image_bytes(image_id)",
@@ -1145,7 +1187,10 @@ class Document:
                     "explicit positive extent",
                     "rectangular stretch fill",
                     "no crop, rotation, flip, visible outline, or visual effect",
-                    "body paragraph with no other visible content",
+                    (
+                        "body, header, or footer paragraph with no other "
+                        "visible content"
+                    ),
                 ],
                 "opaque_native_cases": [
                     "floating or anchored drawing",
@@ -1153,7 +1198,7 @@ class Document:
                     "multiple pictures",
                     "linked or external image",
                     "cropped, transformed, outlined, or effected picture",
-                    "picture in table, header, or footer",
+                    "picture in table",
                     "VML, OLE, or embedded object",
                 ],
                 "native_render_is_visual_authority": True,
@@ -1257,7 +1302,27 @@ class Document:
                     "part_model": "shared_reusable_parts",
                     "variants": ["default", "first", "even"],
                     "missing_binding": "inherit_previous_section",
-                    "editable_blocks": ["paragraph"],
+                    "editable_blocks": [
+                        "paragraph",
+                        "simple_inline_image",
+                    ],
+                    "image_operations": [
+                        "image.update",
+                        "image.replace",
+                        "paragraph.format",
+                    ],
+                    "image_schema_kind": (
+                        "header-footer-image-block"
+                    ),
+                    "image_binary_read_api": (
+                        "Document.read_image(image_id)"
+                    ),
+                    "image_binary_replace_api": (
+                        "Document.replace_image(image_id, source)"
+                    ),
+                    "image_replacement_strategy": (
+                        "occurrence_copy_on_write"
+                    ),
                     "create_operation": "header_footer.create",
                     "create_fields": [
                         "id",
@@ -2059,6 +2124,98 @@ class Document:
                             recoverable=True,
                         )
                     )
+                if isinstance(block, ImageBlock):
+                    if block.capabilities != [
+                        "inspect",
+                        "extract",
+                        "render",
+                    ]:
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=Severity.ERROR,
+                                code="INVALID_SPEC",
+                                message=(
+                                    f"Header/footer image {block.id!r} "
+                                    "declares capabilities that are not safe "
+                                    "for its story scope."
+                                ),
+                                node_ids=[block.id],
+                                path=f"{block_path}.capabilities",
+                            )
+                        )
+                    if block.asset_id not in assets_by_id:
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=Severity.ERROR,
+                                code="ASSET_NOT_FOUND",
+                                message=(
+                                    f"Header/footer image {block.id!r} "
+                                    "references missing asset "
+                                    f"{block.asset_id!r}."
+                                ),
+                                node_ids=[block.id, block.asset_id],
+                                path=f"{block_path}.asset_id",
+                                suggested_actions=[
+                                    {"action": "inspect_assets"}
+                                ],
+                            )
+                        )
+                    if not native_projection:
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=Severity.ERROR,
+                                code="UNSUPPORTED_FEATURE",
+                                message=(
+                                    "Header/footer image blocks can only be "
+                                    "projected from an attached native DOCX."
+                                ),
+                                node_ids=[block.id],
+                                path=block_path,
+                            )
+                        )
+                    if (
+                        block.alt_text is None
+                        or not block.alt_text.strip()
+                    ):
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=Severity.WARNING,
+                                code="IMAGE_ALT_TEXT_MISSING",
+                                message=(
+                                    f"Header/footer image {block.id!r} has "
+                                    "no native alternative text."
+                                ),
+                                node_ids=[block.id],
+                                path=f"{block_path}.alt_text",
+                                recoverable=True,
+                                suggested_actions=[
+                                    {
+                                        "action": (
+                                            "add_native_image_alt_text"
+                                        ),
+                                        "image_id": block.id,
+                                    }
+                                ],
+                            )
+                        )
+                    if (
+                        block.style_ref is not None
+                        and block.style_ref not in named_styles
+                    ):
+                        diagnostics.append(
+                            Diagnostic(
+                                severity=style_issue_severity,
+                                code="STYLE_NOT_FOUND",
+                                message=(
+                                    f"Header/footer image {block.id!r} "
+                                    "references missing paragraph style "
+                                    f"{block.style_ref!r}."
+                                ),
+                                node_ids=[block.id],
+                                path=f"{block_path}.style_ref",
+                                recoverable=True,
+                            )
+                        )
 
         for index, node in enumerate(self._spec.content):
             if node.id in seen:
@@ -2090,6 +2247,25 @@ class Document:
                 )
 
             if isinstance(node, ImageBlock):
+                if node.capabilities != [
+                    "inspect",
+                    "extract",
+                    "delete",
+                    "render",
+                ]:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=(
+                                f"Body image {node.id!r} declares "
+                                "capabilities that do not match its story "
+                                "scope."
+                            ),
+                            node_ids=[node.id],
+                            path=f"content.{index}.capabilities",
+                        )
+                    )
                 asset = assets_by_id.get(node.asset_id)
                 if asset is None:
                     diagnostics.append(
@@ -2993,8 +3169,7 @@ class Document:
         )
         image_ids = {
             node.id
-            for node in self._spec.content
-            if isinstance(node, ImageBlock)
+            for node in _document_images(self._spec)
         }
         image_layout_requested = any(
             operation.get("op") == "paragraph.format"
@@ -3371,7 +3546,7 @@ class Document:
         payload: dict[str, Any],
         target: Any,
     ) -> dict[str, Any]:
-        _, node = Document._find_content_node(payload, target)
+        _, node = Document._find_node(payload, target)
         if node.get("type") != "image":
             raise _PatchFailure(
                 Diagnostic(
@@ -3849,7 +4024,14 @@ class Document:
             image["revision_updated"] = next_revision
             referenced_asset_ids = {
                 node.get("asset_id")
-                for node in payload.get("content", [])
+                for node in [
+                    *payload.get("content", []),
+                    *(
+                        block
+                        for part in payload.get("header_footers", [])
+                        for block in part.get("content", [])
+                    ),
+                ]
                 if node.get("type") == "image"
             }
             retained_assets = [
@@ -4038,7 +4220,13 @@ class Document:
                 geometry_fields.add("width")
             candidate["revision_updated"] = next_revision
             try:
-                normalized = ImageBlock.model_validate(
+                image_model = (
+                    HeaderFooterImageBlock
+                    if candidate.get("capabilities")
+                    == ["inspect", "extract", "render"]
+                    else ImageBlock
+                )
+                normalized = image_model.model_validate(
                     candidate
                 ).model_dump(mode="json", exclude_none=True)
             except ValidationError as error:
@@ -5049,7 +5237,11 @@ class Document:
                 prefix = (
                     "para"
                     if block.get("type") == "paragraph"
-                    else "opaque"
+                    else (
+                        "image"
+                        if block.get("type") == "image"
+                        else "opaque"
+                    )
                 )
                 block_id = cloned_id(
                     source_block_id,

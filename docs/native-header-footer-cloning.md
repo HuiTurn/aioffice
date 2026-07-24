@@ -30,6 +30,12 @@ The semantic clone receives deterministic new IDs for every block and dynamic
 field. Its metadata records `cloned_from`. Reapplying the operation to the same
 base document produces the same semantic ID map.
 
+In `0.2.0.dev32`, a conservative simple inline DrawingML picture receives its own
+deterministic cloned image ID while continuing to share the source asset. The new ID
+is immediately readable and inspectable. Use `image.update`, `paragraph.format`, or
+the out-of-band `replace_image()` API in a subsequent transaction. Binary replacement
+then forks only that occurrence through the cloned part's local relationship graph.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

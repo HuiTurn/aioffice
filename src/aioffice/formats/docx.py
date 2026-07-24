@@ -756,9 +756,10 @@ def compile_header_footer_part(
     if not part.content:
         _add_paragraph(root, [], context)
     for block in part.content:
-        if isinstance(block, OpaqueBlock):
+        if isinstance(block, (ImageBlock, OpaqueBlock)):
             raise ValueError(
-                "Semantic DOCX generation cannot compile opaque header/footer content."
+                "Semantic DOCX generation cannot compile native image or "
+                "opaque header/footer content."
             )
         spans = block.content if block.text is None else [TextSpan(text=block.text)]
         element = _add_paragraph(

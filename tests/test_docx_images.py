@@ -232,11 +232,105 @@ def _image_document(
     )
 
 
+def _header_image_document(*, kind: str = "header") -> bytes:
+    assert kind in {"header", "footer"}
+    body_image = _image_document()
+    with ZipFile(io.BytesIO(body_image)) as archive:
+        image_document = parse_xml(
+            archive.read("word/document.xml")
+        )
+    image_body = image_document.find(_q(W, "body"))
+    assert image_body is not None
+    image_paragraph = next(
+        paragraph
+        for paragraph in image_body.findall(_q(W, "p"))
+        if paragraph.find(f".//{_q(W, 'drawing')}") is not None
+    )
+
+    source = (
+        DocumentBuilder(
+            header_footers=[
+                {
+                    "id": f"logo_{kind}",
+                    "kind": kind,
+                    "content": [
+                        {
+                            "id": "logo_placeholder",
+                            "type": "paragraph",
+                            "text": "",
+                        }
+                    ],
+                }
+            ],
+            sections=[
+                {
+                    "id": "logo_section",
+                    "header_footer": {
+                        f"{kind}_default": f"logo_{kind}",
+                    },
+                }
+            ],
+        )
+        .paragraph("Body", id="logo_body")
+        .build()
+        .to_bytes("docx")
+    )
+    part_name = f"word/{kind}1.xml"
+    relationship_name = f"word/_rels/{kind}1.xml.rels"
+    with ZipFile(io.BytesIO(source)) as archive:
+        header = parse_xml(archive.read(part_name))
+        content_types = parse_xml(
+            archive.read("[Content_Types].xml")
+        )
+    for child in list(header):
+        header.remove(child)
+    header.append(copy.deepcopy(image_paragraph))
+    if not any(
+        child.get("Extension", "").casefold() == "png"
+        for child in content_types
+    ):
+        ET.SubElement(
+            content_types,
+            _q(CT, "Default"),
+            {
+                "Extension": "png",
+                "ContentType": "image/png",
+            },
+        )
+    relationships = ET.Element(_q(REL, "Relationships"))
+    ET.SubElement(
+        relationships,
+        _q(REL, "Relationship"),
+        {
+            "Id": "rIdImage1",
+            "Type": IMAGE_RELATIONSHIP_TYPE,
+            "Target": "media/image1.png",
+        },
+    )
+    return _rewrite_package(
+        source,
+        replacements={
+            part_name: serialize_xml(header),
+            "[Content_Types].xml": serialize_xml(content_types),
+        },
+        additions={
+            relationship_name: serialize_xml(
+                relationships
+            ),
+            "word/media/image1.png": PNG,
+        },
+    )
+
+
 class DocxImageTests(unittest.TestCase):
     def test_cli_exposes_strict_image_and_asset_schemas(self) -> None:
         for kind, required_properties in (
             (
                 "image-block",
+                {"asset_id", "placement", "width", "height", "editable"},
+            ),
+            (
+                "header-footer-image-block",
                 {"asset_id", "placement", "width", "height", "editable"},
             ),
             (
@@ -269,13 +363,26 @@ class DocxImageTests(unittest.TestCase):
             self.assertTrue(
                 required_properties.issubset(schema["properties"])
             )
+            if kind == "header-footer-image-block":
+                capabilities = schema["properties"]["capabilities"]
+                self.assertEqual(
+                    capabilities["prefixItems"],
+                    [
+                        {"const": "inspect"},
+                        {"const": "extract"},
+                        {"const": "render"},
+                    ],
+                )
+                self.assertFalse(capabilities["items"])
+                self.assertEqual(capabilities["minItems"], 3)
+                self.assertEqual(capabilities["maxItems"], 3)
 
     def test_projects_metadata_and_reads_verified_native_bytes(self) -> None:
         source = _image_document()
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.31")
+        self.assertEqual(spec["spec_version"], "0.2-draft.32")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -1151,6 +1258,7 @@ class DocxImageTests(unittest.TestCase):
                 replacement_part,
             ],
         )
+
         assert result.document is not None
         self.assertEqual(result.document.image_bytes(first_id), JPEG)
         self.assertEqual(result.document.image_bytes(second_id), PNG)
@@ -1227,6 +1335,324 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(reopened.image_bytes(first_id), JPEG)
         self.assertEqual(reopened.image_bytes(second_id), PNG)
         self.assertEqual(len(reopened.to_spec()["assets"]), 2)
+
+    def test_header_image_projects_reads_updates_and_renders_semantically(
+        self,
+    ) -> None:
+        source = _header_image_document()
+        document = Document.from_docx(source)
+        spec = document.to_spec()
+        header = spec["header_footers"][0]
+        image = header["content"][0]
+        self.assertEqual(image["type"], "image")
+        self.assertEqual(
+            image["capabilities"],
+            ["inspect", "extract", "render"],
+        )
+        self.assertEqual(
+            image["source_ref"]["part_uri"],
+            "/word/header1.xml",
+        )
+        self.assertEqual(document.image_bytes(image["id"]), PNG)
+        self.assertEqual(document.inspect()["image_count"], 1)
+        inspected = document.inspect()["header_footers"][0][
+            "blocks"
+        ][0]
+        self.assertEqual(inspected["type"], "image")
+        self.assertIn("image.update", inspected["supported_operations"])
+        capabilities = document.capabilities()
+        self.assertIn("image.replace", capabilities["operations"])
+        self.assertEqual(
+            capabilities["assets"]["projected_story_scopes"],
+            ["document_body", "header_footer"],
+        )
+        header_footer_contract = capabilities["formatting"][
+            "header_footer_contract"
+        ]
+        self.assertIn(
+            "simple_inline_image",
+            header_footer_contract["editable_blocks"],
+        )
+        self.assertEqual(
+            header_footer_contract["image_operations"],
+            ["image.update", "image.replace", "paragraph.format"],
+        )
+        self.assertEqual(
+            header_footer_contract["image_schema_kind"],
+            "header-footer-image-block",
+        )
+        self.assertIn(
+            'data-aioffice-asset-id="',
+            document.to_bytes("html").decode(),
+        )
+        detached = Document.from_spec(spec)
+        self.assertTrue(detached.validate().valid)
+        detached_result = detached.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"alt_text": "Detached update"},
+                }
+            ]
+        )
+        self.assertFalse(detached_result.success)
+        self.assertEqual(
+            detached_result.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": f"#{image['id']}",
+                    "set": {
+                        "width": {"value": 72, "unit": "pt"},
+                        "alt_text": "Updated header logo",
+                    },
+                },
+                {
+                    "op": "paragraph.format",
+                    "target": f"#{image['id']}",
+                    "set": {"alignment": "right"},
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            self.assertEqual(
+                before.read("word/document.xml"),
+                after.read("word/document.xml"),
+            )
+            self.assertEqual(
+                before.read("word/_rels/header1.xml.rels"),
+                after.read("word/_rels/header1.xml.rels"),
+            )
+            self.assertEqual(
+                before.read("word/media/image1.png"),
+                after.read("word/media/image1.png"),
+            )
+        reopened = Document.from_docx(output)
+        reopened_image = reopened.to_spec()["header_footers"][0][
+            "content"
+        ][0]
+        self.assertEqual(
+            reopened_image["width"],
+            {"value": 72.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            reopened_image["height"],
+            {"value": 36.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            reopened_image["alt_text"],
+            "Updated header logo",
+        )
+        self.assertEqual(
+            reopened_image["paragraph_style"]["alignment"],
+            "right",
+        )
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_footer_image_projects_and_updates_in_its_own_part(self) -> None:
+        source = _header_image_document(kind="footer")
+        document = Document.from_docx(source)
+        image = document.to_spec()["header_footers"][0]["content"][0]
+        self.assertEqual(image["type"], "image")
+        self.assertEqual(
+            image["source_ref"]["part_uri"],
+            "/word/footer1.xml",
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"alt_text": "Accessible footer logo"},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            self.assertEqual(
+                before.read("word/document.xml"),
+                after.read("word/document.xml"),
+            )
+            self.assertEqual(
+                before.read("word/_rels/footer1.xml.rels"),
+                after.read("word/_rels/footer1.xml.rels"),
+            )
+            self.assertEqual(
+                before.read("word/media/image1.png"),
+                after.read("word/media/image1.png"),
+            )
+        reopened = Document.from_docx(output)
+        reopened_image = reopened.to_spec()["header_footers"][0][
+            "content"
+        ][0]
+        self.assertEqual(
+            reopened_image["alt_text"],
+            "Accessible footer logo",
+        )
+        self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+
+    def test_cloned_header_image_can_be_replaced_copy_on_write(
+        self,
+    ) -> None:
+        source = _header_image_document()
+        document = Document.from_docx(source)
+        spec = document.to_spec()
+        source_part = spec["header_footers"][0]
+        source_image = source_part["content"][0]
+        section_id = spec["sections"][0]["id"]
+        cloned = document.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": f"#{source_part['id']}",
+                    "part": {"id": "alternate_logo_header"},
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": f"#{section_id}",
+                    "set": {
+                        "header_default": "alternate_logo_header",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(cloned.success, cloned.model_dump())
+        assert cloned.document is not None
+        cloned_part = next(
+            part
+            for part in cloned.document.to_spec()["header_footers"]
+            if part["id"] == "alternate_logo_header"
+        )
+        cloned_image = cloned_part["content"][0]
+        self.assertEqual(cloned_image["type"], "image")
+        self.assertNotEqual(cloned_image["id"], source_image["id"])
+        self.assertEqual(
+            cloned_image["asset_id"],
+            source_image["asset_id"],
+        )
+
+        replaced = cloned.document.replace_image(
+            cloned_image["id"],
+            JPEG,
+            media_type="image/jpeg",
+        )
+        self.assertTrue(replaced.success, replaced.model_dump())
+        assert replaced.document is not None
+        output = replaced.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            source_relationships = parse_xml(
+                package.read("word/_rels/header1.xml.rels")
+            )
+            clone_relationships = parse_xml(
+                package.read("word/_rels/header2.xml.rels")
+            )
+            clone_root = parse_xml(
+                package.read("word/header2.xml")
+            )
+            source_target = source_relationships.find(
+                _q(REL, "Relationship")
+            )
+            clone_blip = clone_root.find(
+                f".//{_q(A, 'blip')}"
+            )
+            assert source_target is not None
+            assert clone_blip is not None
+            clone_relationship_id = clone_blip.get(_q(R, "embed"))
+            clone_target = next(
+                relationship
+                for relationship in clone_relationships.findall(
+                    _q(REL, "Relationship")
+                )
+                if relationship.get("Id")
+                == clone_relationship_id
+            )
+            self.assertEqual(
+                source_target.get("Target"),
+                "media/image1.png",
+            )
+            self.assertNotEqual(
+                clone_target.get("Target"),
+                "media/image1.png",
+            )
+            self.assertEqual(
+                package.read("word/media/image1.png"),
+                PNG,
+            )
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            reopened.image_bytes(cloned_image["id"]),
+            JPEG,
+        )
+        self.assertEqual(
+            reopened.image_bytes(source_image["id"]),
+            PNG,
+        )
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_workspace_replaces_header_image_without_binary_patch_data(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "source.docx"
+            input_path.write_bytes(_header_image_document())
+            workspace = Workspace.init(root / "project")
+            document = workspace.import_document(input_path)
+            image = document.to_spec()["header_footers"][0]["content"][0]
+
+            result = workspace.replace_image(
+                document.id,
+                image["id"],
+                JPEG,
+                media_type="image/jpeg",
+                base_revision=document.revision,
+            )
+            self.assertTrue(result.success, result.model_dump())
+            reopened_workspace = Workspace.open(root / "project")
+            reopened = reopened_workspace.open_document(document.id)
+            reopened_image = reopened.to_spec()["header_footers"][0][
+                "content"
+            ][0]
+            self.assertEqual(reopened_image["id"], image["id"])
+            self.assertEqual(reopened.image_bytes(image["id"]), JPEG)
+
+            patch_path = (
+                root
+                / "project"
+                / ".aioffice"
+                / "artifacts"
+                / document.id
+                / "patches"
+                / f"{result.result_revision:08d}.json"
+            )
+            patch_text = patch_path.read_text(encoding="utf-8")
+            patch = json.loads(patch_text)
+            self.assertEqual(
+                patch["operations"][0]["op"],
+                "image.replace",
+            )
+            self.assertEqual(
+                patch["operations"][0]["target"],
+                image["id"],
+            )
+            self.assertNotIn("base64", patch_text)
+            self.assertNotIn("data", patch["operations"][0]["asset"])
 
     def test_image_replace_rejects_untrusted_binary_inputs(self) -> None:
         source = _image_document()

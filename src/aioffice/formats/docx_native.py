@@ -1727,6 +1727,22 @@ def _fields(spec: AiOfficeDocumentSpec) -> list[DocumentField]:
     ]
 
 
+def _images(spec: AiOfficeDocumentSpec) -> list[ImageBlock]:
+    return [
+        *(
+            node
+            for node in spec.content
+            if isinstance(node, ImageBlock)
+        ),
+        *(
+            block
+            for part in spec.header_footers
+            for block in part.content
+            if isinstance(block, ImageBlock)
+        ),
+    ]
+
+
 def _find_field(
     spec: AiOfficeDocumentSpec,
     target: Any,
@@ -1758,8 +1774,8 @@ def _find_image(
     target_id = _target_id(target)
     matches = [
         node
-        for node in spec.content
-        if isinstance(node, ImageBlock) and node.id == target_id
+        for node in _images(spec)
+        if node.id == target_id
     ]
     if len(matches) != 1:
         raise NativePackageError(
@@ -3570,9 +3586,8 @@ def apply_docx_operations(
             result_image = next(
                 (
                     candidate
-                    for candidate in result_spec.content
-                    if isinstance(candidate, ImageBlock)
-                    and candidate.id == source_image.id
+                    for candidate in _images(result_spec)
+                    if candidate.id == source_image.id
                 ),
                 None,
             )
@@ -3621,9 +3636,8 @@ def apply_docx_operations(
             result_image = next(
                 (
                     candidate
-                    for candidate in result_spec.content
-                    if isinstance(candidate, ImageBlock)
-                    and candidate.id == image_insert.id
+                    for candidate in _images(result_spec)
+                    if candidate.id == image_insert.id
                 ),
                 None,
             )
@@ -3662,9 +3676,8 @@ def apply_docx_operations(
             result_image = next(
                 (
                     candidate
-                    for candidate in result_spec.content
-                    if isinstance(candidate, ImageBlock)
-                    and candidate.id == source_image.id
+                    for candidate in _images(result_spec)
+                    if candidate.id == source_image.id
                 ),
                 None,
             )
@@ -4343,9 +4356,8 @@ def apply_docx_operations(
                     "paragraph.format requires a native reference to one w:p element."
                 )
             target_is_image = any(
-                isinstance(node, ImageBlock)
-                and node.id == target_id
-                for node in spec.content
+                node.id == target_id
+                for node in _images(spec)
             )
             original_image = (
                 simple_inline_image(

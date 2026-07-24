@@ -13,8 +13,9 @@ drawing.
 
 ## Projected semantic shape
 
-The first supported vertical slice is one embedded, inline DrawingML picture in an
-otherwise empty body paragraph:
+The supported vertical slice is one embedded, inline DrawingML picture in an
+otherwise empty body, header, or footer paragraph. A body occurrence lives in
+`content`; a reusable story occurrence lives in its `header_footers[].content`:
 
 ```json
 {
@@ -55,10 +56,19 @@ as a filesystem or package read request.
 
 `editable: false` means the image binary and full DrawingML object are not represented
 as generally editable JSON. On an attached native DOCX, compact inspection separately
-advertises
-`supported_operations: ["image.insert_after", "image.replace", "image.update",
-"paragraph.format", "node.remove"]`. This keeps the lossless boundary explicit while
-still exposing the small set of native mutations that AiOffice can prove safe.
+advertises the operations proven safe for that story. Body images expose insertion
+after the occurrence, replacement, update, paragraph formatting, and removal.
+Header/footer images expose replacement, update, and paragraph formatting; direct
+story-local insertion and deletion are not claimed. This keeps the lossless boundary
+explicit while still exposing the small set of native mutations AiOffice can prove.
+
+`capabilities()["assets"]["projected_story_scopes"]` reports
+`["document_body", "header_footer"]`. The header/footer contract independently
+reports `simple_inline_image`, the three safe operations, and
+`occurrence_copy_on_write` replacement so an AI does not have to infer scope from
+examples. `aioffice schema --kind image-block` describes the body occurrence;
+`aioffice schema --kind header-footer-image-block` describes the story-scoped
+occurrence and fixes its capability list to `inspect`, `extract`, and `render`.
 
 ## Conservative projection proof
 
@@ -70,7 +80,8 @@ An image becomes an `image` block only when all of these conditions hold:
 4. `wp:extent` has positive `cx` and `cy` values;
 5. the graphic data contains one DrawingML picture;
 6. one `a:blip` uses `r:embed`, with no `r:link`;
-7. that relationship is one internal image relationship from the containing part;
+7. that relationship is one internal image relationship from the containing body,
+   header, or footer part;
 8. the target exists and has an `image/*` OPC content type;
 9. the picture uses one rectangular stretch fill;
 10. the picture has no crop, rotation, flip, visible outline, non-zero effect
@@ -206,8 +217,9 @@ physical borders, before/after and line spacing, left/right/first-line/hanging
 indentation, keep-with-next, keep-together, page-break-before, widow control, and
 outline level. Every length keeps an explicit unit.
 
-The native lowering resolves the image's trusted paragraph reference and mutates only
-the requested supported `w:pPr` properties. It does not alter `w:drawing`,
+The native lowering resolves the image's trusted paragraph reference in the body,
+header, or footer part and mutates only the requested supported `w:pPr` properties.
+It does not alter `w:drawing`,
 `wp:inline`, either DrawingML extent, `a:blip`, the image relationship, or the image
 part. Clearing a field removes only its supported direct native value so normal Word
 style inheritance can apply again. Unknown paragraph-property XML is retained.
@@ -272,6 +284,16 @@ Always allocating a relationship for the target occurrence is essential. Two
 relationship would silently replace both pictures. AiOffice instead changes only the
 selected blip. The original relationship and image part remain untouched, so other
 occurrences and unknown native consumers are preserved.
+
+The relationship is allocated in the occurrence's own story. Replacing a logo in a
+cloned header therefore adds a relationship to the cloned header's `.rels`, changes
+only its `a:blip`, and leaves the source header relationship and shared source media
+unchanged. This is the intended copy-on-write workflow:
+
+1. clone the reusable header/footer and bind it to the selected section;
+2. reopen or use the returned document to obtain the cloned image ID;
+3. call `replace_image()` for that ID in a subsequent transaction;
+4. reopen and render affected pages through the native provider.
 
 The image occurrence ID, displayed width/height, alternative text, title, paragraph
 formatting, and surrounding layout remain stable. The asset ID, media type, native
@@ -416,15 +438,17 @@ These cases remain native and explicit `opaque`/read-only projections:
 - multiple pictures or alternate representations;
 - linked or external images;
 - crops, rotations, flips, outlines, or effects;
-- drawings inside tables, headers, or footers;
+- drawings inside tables;
+- complex header/footer drawings that do not satisfy the same one-picture proof;
 - VML pictures, OLE objects, embedded files, charts, SmartArt, and other graphic
   data types.
 
 The boundary is intentionally based on what the semantic layer can prove, not what it
 can approximately display. Unrelated edits preserve every original package part and
-unknown XML. Deleting a top-level projected image deletes its mapped paragraph only;
-orphan cleanup, insertion outside the proven top-level inline subset, and replacement
-outside the proven inline subset are not claimed in this release.
+unknown XML. Deleting a top-level body image deletes its mapped paragraph only;
+header/footer image deletion, orphan cleanup, insertion outside the proven top-level
+body subset, and replacement outside the proven inline subset are not claimed in this
+release.
 
 ## Preview and visual authority
 

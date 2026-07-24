@@ -425,6 +425,45 @@ def _header_footer_html(
                 f"{_style_attribute(_paragraph_css(resolved_paragraph))}>"
                 f"{value}</p>"
             )
+        elif isinstance(block, ImageBlock):
+            asset = next(
+                (
+                    candidate
+                    for candidate in spec.assets
+                    if candidate.id == block.asset_id
+                ),
+                None,
+            )
+            label = (
+                block.alt_text
+                or block.title
+                or block.name
+                or f"Native {kind} image"
+            )
+            media_type = (
+                asset.media_type if asset is not None else ""
+            )
+            figure_style = _style_attribute(
+                f"width:{block.width.to_css()}"
+            )
+            placeholder_style = _style_attribute(
+                f"width:{block.width.to_css()};"
+                f"height:{block.height.to_css()}"
+            )
+            lines.append(
+                f'<figure id="{block_id}" class="native-image" '
+                f'data-aioffice-asset-id="'
+                f'{escape(block.asset_id, quote=True)}" '
+                f'data-aioffice-media-type="'
+                f'{escape(media_type, quote=True)}" '
+                f"{figure_style}>"
+                '<div class="native-image-placeholder" role="img" '
+                f'aria-label="{escape(label, quote=True)}" '
+                f"{placeholder_style}>"
+                "Native image — use native rendering or extract the asset"
+                "</div>"
+                f"<figcaption>{escape(label)}</figcaption></figure>"
+            )
         elif isinstance(block, OpaqueBlock):
             lines.append(
                 f'<div id="{block_id}" class="opaque-header-footer">'

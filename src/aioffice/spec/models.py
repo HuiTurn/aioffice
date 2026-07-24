@@ -17,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.31"
+SPEC_VERSION = "0.2-draft.32"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1038,6 +1038,45 @@ class ImageBlock(NodeBase):
         return self
 
 
+class HeaderFooterImageBlock(ImageBlock):
+    """One supported native image occurrence inside a reusable page story."""
+
+    capabilities: list[
+        Literal["inspect", "extract", "delete", "render"]
+    ] = Field(
+        default_factory=lambda: [
+            "inspect",
+            "extract",
+            "render",
+        ],
+        json_schema_extra={
+            "prefixItems": [
+                {"const": "inspect"},
+                {"const": "extract"},
+                {"const": "render"},
+            ],
+            "items": False,
+            "minItems": 3,
+            "maxItems": 3,
+        },
+    )
+
+    @model_validator(mode="after")
+    def validate_size(self) -> "HeaderFooterImageBlock":
+        if self.width.to_points() <= 0 or self.height.to_points() <= 0:
+            raise ValueError("Image width and height must be greater than zero.")
+        if self.capabilities != [
+            "inspect",
+            "extract",
+            "render",
+        ]:
+            raise ValueError(
+                "A header/footer image must declare its exact supported "
+                "capabilities."
+            )
+        return self
+
+
 class ImageUpdate(StrictModel):
     """Fields accepted by the selective ``image.update`` operation."""
 
@@ -1137,7 +1176,7 @@ Block = Annotated[
 
 
 HeaderFooterBlock = Annotated[
-    Paragraph | OpaqueBlock,
+    Paragraph | HeaderFooterImageBlock | OpaqueBlock,
     Field(discriminator="type"),
 ]
 
@@ -1192,6 +1231,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.29",
         "0.2-draft.30",
         "0.2-draft.31",
+        "0.2-draft.32",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

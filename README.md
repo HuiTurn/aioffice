@@ -16,17 +16,18 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev31`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev32`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
 parts, structured dynamic fields, explicit table geometry, logical merged cells,
 rich table-cell paragraphs, explicit table/cell border control, paragraph
-background/border surfaces, conservative native image projection, verified asset
-extraction, selective native image metadata and geometry updates, occurrence-scoped
-copy-on-write image replacement, addressable native inline image insertion, direct
-image-paragraph layout formatting, semantic diffs, isolated LibreOffice/Poppler
-native rendering, safe reusable native header/footer creation, cloning, and binding, root
+background/border surfaces, conservative body and header/footer image projection,
+verified asset extraction, selective native image metadata and geometry updates,
+occurrence-scoped copy-on-write image replacement, addressable native inline image
+insertion, direct image-paragraph layout formatting, semantic diffs, isolated
+LibreOffice/Poppler native rendering, safe reusable native header/footer creation,
+cloning, and binding, root
 append plus bidirectional stable-ID native
 paragraph/heading/page-break/list/table insertion and block reordering, consistent
 multi-page evidence, page occupancy diagnostics, visual-regression contracts, and
@@ -89,9 +90,9 @@ Exporting an imported DOCX without changes returns the exact original package by
 When a supported edit is applied, AiOffice rewrites only the affected native part and
 preserves untouched part payloads.
 
-Image bytes deliberately stay out of the JSON Spec. A simple body paragraph
-containing exactly one embedded inline DrawingML picture is projected as an
-AI-addressable `image` block with physical extent, alternative text, media type,
+Image bytes deliberately stay out of the JSON Spec. A simple body, header, or footer
+paragraph containing exactly one embedded inline DrawingML picture is projected as
+an AI-addressable `image` block with physical extent, alternative text, media type,
 filename, byte count, and SHA-256 asset identity:
 
 ```python
@@ -104,6 +105,12 @@ verified = doc.read_image(image["id"])
 assert verified.sha256 == image["asset"]["sha256"]
 verified.write("extracted/" + verified.filename)
 ```
+
+Body images appear in `inspect()["nodes"]`; reusable header/footer images appear in
+`inspect()["header_footers"][...]["blocks"]`. Both use the same stable image ID and
+verified read, update, replacement, and paragraph-layout APIs. Header/footer
+insertion and deletion are not advertised: create or clone the complete reusable
+part first, then update or replace its projected image in a subsequent Patch.
 
 Supported projected images can be resized or given accessible metadata without
 rewriting their binary part or relationship:
@@ -209,12 +216,13 @@ Persistent workspaces expose the same operations through
 CLI commands, recording verified asset and insertion metadata but never base64 in the
 revision log.
 
-The read path re-resolves the trusted native paragraph and OPC relationship, then
-verifies the asset record, media type, size, and content hash before returning bytes.
-Mixed text/picture paragraphs, floating anchors, linked images, multiple pictures,
-crops, transforms, effects, tables, headers/footers, VML, OLE, and embedded objects
-remain explicit opaque native content. They are preserved losslessly and rendered
-through the native provider rather than flattened into a misleading image model. See
+The read path re-resolves the trusted native paragraph and its story-local OPC
+relationship, then verifies the asset record, media type, size, and content hash
+before returning bytes. Mixed text/picture paragraphs, floating anchors, linked
+images, multiple pictures, crops, transforms, effects, drawings in tables, complex
+header/footer drawings, VML, OLE, and embedded objects remain explicit opaque native
+content. They are preserved losslessly and rendered through the native provider
+rather than flattened into a misleading image model. See
 [the native image and asset contract](docs/native-images.md).
 
 AiOffice-generated DOCX files embed a versioned identity manifest. Artifact IDs,
@@ -590,9 +598,11 @@ relationship. See [native header/footer binding](docs/native-header-footer-bindi
 
 The paragraph IDs inside a header/footer are regular edit selectors. `text.replace`,
 `text.format`, and `paragraph.format` lower directly into the referenced
-`headerN.xml` or `footerN.xml` part. PAGE, NUMPAGES, SECTION, and SECTIONPAGES are
-structured fields with their own stable IDs. Their displayed result is explicitly a
-non-authoritative cache:
+`headerN.xml` or `footerN.xml` part. A conservative one-picture inline paragraph is
+instead exposed by its image ID for `image.update`, `paragraph.format`, verified
+extraction, and occurrence-scoped `replace_image()`. PAGE, NUMPAGES, SECTION, and
+SECTIONPAGES are structured fields with their own stable IDs. Their displayed result
+is explicitly a non-authoritative cache:
 
 ```python
 result = doc.apply([
@@ -606,7 +616,7 @@ result = doc.apply([
 
 Generated fields are marked dirty and `update_fields_on_open` is enabled unless
 explicitly disabled. Unknown field instructions remain structured but read-only;
-drawings, objects, tables, and malformed field structures remain opaque. See
+complex drawings, objects, tables, and malformed field structures remain opaque. See
 [the dynamic field contract](docs/dynamic-fields.md) and
 [the header/footer contract](docs/header-footer.md).
 

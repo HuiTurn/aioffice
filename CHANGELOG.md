@@ -56,6 +56,14 @@
   native regions, including exact local-relationship copying, shared media targets,
   rebased paragraph/DrawingML identities, same-Patch binding, and creation-time
   graph proof.
+- Projected conservative simple inline DrawingML pictures in headers and footers as
+  stable `ImageBlock` occurrences with shared content-addressed `AssetRef` records.
+- Extended verified image read/extraction, accessibility and geometry updates,
+  paragraph layout, occurrence-scoped binary replacement, compact inspection, CLI,
+  and Workspace persistence to projected header/footer images.
+- Preserved story-local relationship semantics while replacing a cloned header or
+  footer logo copy-on-write, leaving the source story, relationship, media, body, and
+  unrelated pages untouched.
 - Refused header/footer cloning when bookmarks, comments, tracked changes, content
   controls, VML, or other cross-story identities cannot yet be safely rebased.
 - Preserved intentionally empty header/footer semantics across native reopen while
@@ -64,9 +72,9 @@
   LibreOffice interoperability.
 - Extended `text.replace`, `paragraph.format`, and `text.format` native lowering to
   ordinary header/footer paragraphs while touching only the target part.
-- Added conservative opaque projection for native header/footer drawings, objects,
-  tables, malformed field containment, and unknown elements so unsupported content
-  is never reconstructed from display text.
+- Added conservative opaque projection for complex native header/footer drawings,
+  objects, tables, malformed field containment, and unknown elements so unsupported
+  content is never reconstructed from display text.
 - Added stable inline `DocumentField` objects for PAGE, NUMPAGES, SECTION, and
   SECTIONPAGES, with cached results explicitly separated from instructions.
 - Added complex-field generation, `w:fldSimple`/complex-field projection,
@@ -403,6 +411,7 @@
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
 - Advanced the AiOffice Document Spec to `0.2-draft.29`.
 - Advanced the AiOffice Document Spec to `0.2-draft.31`.
+- Advanced the AiOffice Document Spec to `0.2-draft.32`.
 
 ## 0.1.0
 
