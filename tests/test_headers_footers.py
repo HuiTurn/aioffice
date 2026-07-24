@@ -144,6 +144,97 @@ class HeaderFooterTests(unittest.TestCase):
             ],
         )
 
+    def test_semantic_header_footer_create_compiles_normally(
+        self,
+    ) -> None:
+        document = (
+            DocumentBuilder()
+            .paragraph("Semantic body", id="semantic_body")
+            .build()
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "header_footer.create",
+                    "part": {
+                        "id": "semantic_footer",
+                        "kind": "footer",
+                        "content": [
+                            {
+                                "id": "semantic_footer_text",
+                                "type": "paragraph",
+                                "text": "Semantic footer",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": "#section_default",
+                    "set": {
+                        "footer_default": "semantic_footer",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        self.assertIsNone(result.fidelity)
+        output = result.document.to_bytes("docx")
+        reopened = Document.from_docx(output)
+        self.assertEqual(
+            reopened.to_spec()["sections"][0]["header_footer"],
+            {"footer_default": "semantic_footer"},
+        )
+        self.assertEqual(
+            next(
+                part
+                for part in reopened.to_spec()["header_footers"]
+                if part["id"] == "semantic_footer"
+            )["content"][0]["text"],
+            "Semantic footer",
+        )
+
+    def test_created_empty_header_remains_semantically_empty(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Body", id="empty_header_body")
+            .build()
+            .to_bytes("docx")
+        )
+        imported = Document.from_docx(source)
+        result = imported.apply(
+            [
+                {
+                    "op": "header_footer.create",
+                    "part": {
+                        "id": "explicit_blank_header",
+                        "kind": "header",
+                        "content": [],
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            root = parse_xml(package.read("word/header1.xml"))
+        self.assertEqual(
+            [child.tag for child in list(root)],
+            [_q(W, "p")],
+        )
+        reopened = Document.from_docx(output)
+        created = next(
+            part
+            for part in reopened.to_spec()["header_footers"]
+            if part["id"] == "explicit_blank_header"
+        )
+        self.assertEqual(created["content"], [])
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
     def test_generation_projection_inheritance_and_settings(self) -> None:
         document = _document_with_regions()
         self.assertTrue(document.validate().valid, document.validate().diagnostics)
@@ -775,6 +866,363 @@ class HeaderFooterTests(unittest.TestCase):
         self.assertEqual(
             imported.to_bytes("docx"),
             duplicate_source,
+        )
+
+    def test_native_header_footer_create_then_bind_is_transactional(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Independent body", id="body")
+            .build()
+            .to_bytes("docx")
+        )
+        imported = Document.from_docx(source)
+        section_id = imported.to_spec()["sections"][0]["id"]
+        result = imported.apply(
+            [
+                {
+                    "op": "header_footer.create",
+                    "part": {
+                        "id": "created_header",
+                        "kind": "header",
+                        "metadata": {"role": "running_header"},
+                        "content": [
+                            {
+                                "id": "created_header_text",
+                                "type": "paragraph",
+                                "paragraph_style": {
+                                    "alignment": "right",
+                                },
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Expert report · ",
+                                        "marks": ["strong"],
+                                    },
+                                    {
+                                        "id": "created_page_field",
+                                        "type": "field",
+                                        "kind": "page_number",
+                                        "number_format": "decimal",
+                                    },
+                                    {
+                                        "type": "text",
+                                        "text": " · AiOffice",
+                                        "marks": ["link"],
+                                        "href": "https://aioffice.dev",
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": f"#{section_id}",
+                    "set": {
+                        "header_default": "#created_header",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(imported.to_bytes("docx"), source)
+        self.assertEqual(
+            result.changes,
+            [
+                {
+                    "operation": "header_footer.create",
+                    "part_ids": ["created_header"],
+                    "kind": "header",
+                    "created_nodes": ["created_header_text"],
+                },
+                {
+                    "operation": "section.header_footer.bind",
+                    "section_ids": [section_id],
+                    "binding_changes": [
+                        {
+                            "slot": "header_default",
+                            "before": None,
+                            "after": "created_header",
+                        }
+                    ],
+                },
+            ],
+        )
+        assert result.document is not None
+        assert result.fidelity is not None
+        output = result.document.to_bytes("docx")
+        output_spec = result.document.to_spec()
+        created = next(
+            part
+            for part in output_spec["header_footers"]
+            if part["id"] == "created_header"
+        )
+        self.assertEqual(
+            created["source_ref"]["part_uri"],
+            "/word/header1.xml",
+        )
+        self.assertEqual(
+            created["content"][0]["source_ref"]["part_uri"],
+            "/word/header1.xml",
+        )
+        field = next(
+            inline
+            for inline in created["content"][0]["content"]
+            if inline["type"] == "field"
+        )
+        self.assertEqual(field["revision_added"], 2)
+        self.assertEqual(
+            field["source_ref"]["native_kind"],
+            "w:complex-field",
+        )
+        self.assertEqual(
+            output_spec["sections"][0]["header_footer"],
+            {"header_default": "created_header"},
+        )
+
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            before_parts = {
+                name: before.read(name)
+                for name in before.namelist()
+            }
+            after_parts = {
+                name: after.read(name)
+                for name in after.namelist()
+            }
+            self.assertEqual(
+                set(after_parts) - set(before_parts),
+                {
+                    "word/header1.xml",
+                    "word/_rels/header1.xml.rels",
+                },
+            )
+            changed_existing = {
+                name
+                for name, payload in before_parts.items()
+                if after_parts[name] != payload
+            }
+            self.assertEqual(
+                changed_existing,
+                {
+                    "[Content_Types].xml",
+                    "customXml/aioffice-manifest.xml",
+                    "word/_rels/document.xml.rels",
+                    "word/document.xml",
+                },
+            )
+            relationships = parse_xml(
+                after.read("word/_rels/document.xml.rels")
+            )
+            self.assertNotIn(
+                b"ns0:",
+                after.read("word/_rels/document.xml.rels"),
+            )
+            self.assertIn(
+                (
+                    b'<Relationships xmlns="http://schemas.'
+                    b"openxmlformats.org/package/2006/relationships"
+                    b'">'
+                ),
+                after.read("word/_rels/document.xml.rels"),
+            )
+            created_relationships = [
+                relationship
+                for relationship in relationships.findall(
+                    _q(REL, "Relationship")
+                )
+                if relationship.get("Type", "").endswith(
+                    "/header"
+                )
+                and relationship.get("Target") == "header1.xml"
+            ]
+            self.assertEqual(len(created_relationships), 1)
+            local_relationships = parse_xml(
+                after.read("word/_rels/header1.xml.rels")
+            )
+            hyperlinks = [
+                relationship
+                for relationship in local_relationships.findall(
+                    _q(REL, "Relationship")
+                )
+                if relationship.get("Type", "").endswith(
+                    "/hyperlink"
+                )
+            ]
+            self.assertEqual(len(hyperlinks), 1)
+            self.assertEqual(
+                hyperlinks[0].get("Target"),
+                "https://aioffice.dev",
+            )
+            self.assertEqual(
+                hyperlinks[0].get("TargetMode"),
+                "External",
+            )
+            content_types = parse_xml(
+                after.read("[Content_Types].xml")
+            )
+            overrides = [
+                override
+                for override in content_types.findall(
+                    _q(CT, "Override")
+                )
+                if override.get("PartName")
+                == "/word/header1.xml"
+            ]
+            self.assertEqual(len(overrides), 1)
+
+        reopened = Document.from_docx(output)
+        reopened_spec = reopened.to_spec()
+        self.assertEqual(
+            reopened_spec["sections"][0]["header_footer"],
+            {"header_default": "created_header"},
+        )
+        reopened_created = next(
+            part
+            for part in reopened_spec["header_footers"]
+            if part["id"] == "created_header"
+        )
+        self.assertEqual(
+            "".join(
+                inline.get("text", "")
+                for inline in reopened_created["content"][0][
+                    "content"
+                ]
+            ),
+            "Expert report ·  · AiOffice",
+        )
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_native_header_footer_create_allocates_after_existing_parts(
+        self,
+    ) -> None:
+        source = _document_with_regions().to_bytes("docx")
+        imported = Document.from_docx(source)
+        result = imported.apply(
+            [
+                {
+                    "op": "header_footer.create",
+                    "part": {
+                        "id": "third_header",
+                        "kind": "header",
+                        "content": [
+                            {
+                                "id": "third_header_text",
+                                "type": "paragraph",
+                                "text": "Unbound but reusable",
+                            }
+                        ],
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        created = next(
+            part
+            for part in result.document.to_spec()["header_footers"]
+            if part["id"] == "third_header"
+        )
+        self.assertEqual(
+            created["source_ref"]["part_uri"],
+            "/word/header3.xml",
+        )
+        output = result.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(output)) as package:
+            self.assertIn("word/header3.xml", package.namelist())
+            self.assertNotIn(
+                "word/_rels/header3.xml.rels",
+                package.namelist(),
+            )
+        reopened = Document.from_docx(output)
+        reopened_created = next(
+            part
+            for part in reopened.to_spec()["header_footers"]
+            if part["id"] == "third_header"
+        )
+        self.assertEqual(
+            reopened_created["content"][0]["text"],
+            "Unbound but reusable",
+        )
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_native_header_footer_create_failures_are_atomic(self) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Body", id="body")
+            .build()
+            .to_bytes("docx")
+        )
+        imported = Document.from_docx(source)
+        claimed = imported.apply(
+            [
+                {
+                    "op": "header_footer.create",
+                    "part": {
+                        "id": "claimed_header",
+                        "kind": "header",
+                        "source_ref": {
+                            "format": "docx",
+                            "part_uri": "/word/header99.xml",
+                        },
+                    },
+                }
+            ]
+        )
+        self.assertFalse(claimed.success)
+        self.assertEqual(
+            claimed.diagnostics[0].code,
+            "INVALID_SPEC",
+        )
+        self.assertEqual(imported.to_bytes("docx"), source)
+
+        with ZipFile(io.BytesIO(source)) as package:
+            relationships = parse_xml(
+                package.read("word/_rels/document.xml.rels")
+            )
+        first = relationships.find(_q(REL, "Relationship"))
+        assert first is not None
+        relationships.append(copy.deepcopy(first))
+        ambiguous_source = _rewrite_part(
+            source,
+            "word/_rels/document.xml.rels",
+            serialize_xml(relationships),
+        )
+        ambiguous = Document.from_docx(ambiguous_source)
+        failed = ambiguous.apply(
+            [
+                {
+                    "op": "header_footer.create",
+                    "part": {
+                        "id": "safe_header",
+                        "kind": "header",
+                        "content": [
+                            {
+                                "id": "safe_header_text",
+                                "type": "paragraph",
+                                "text": "Safe",
+                            }
+                        ],
+                    },
+                }
+            ]
+        )
+        self.assertFalse(failed.success)
+        self.assertEqual(
+            failed.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "relationship IDs",
+            failed.diagnostics[0].message,
+        )
+        self.assertEqual(
+            ambiguous.to_bytes("docx"),
+            ambiguous_source,
         )
 
 

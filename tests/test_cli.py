@@ -261,6 +261,7 @@ class CliTests(unittest.TestCase):
                     "style.apply",
                     "style.define",
                     "style.format",
+                    "header_footer.create",
                     "section.header_footer.bind",
                     "section.insert_before",
                     "section.format",
@@ -673,6 +674,93 @@ class CliTests(unittest.TestCase):
                     for part in reopened.to_spec()["header_footers"]
                 },
                 {"primary_header", "alternate_header"},
+            )
+            self.assertEqual(reopened.to_bytes("docx"), output.read_bytes())
+
+    def test_apply_creates_and_binds_native_header_footer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "create-region.docx"
+            source.write_bytes(
+                DocumentBuilder()
+                .paragraph("Body", id="create_region_body")
+                .build()
+                .to_bytes("docx")
+            )
+            imported = Document.from_docx(source)
+            section_id = imported.to_spec()["sections"][0]["id"]
+            patch = root / "create-region.json"
+            patch.write_text(
+                json.dumps(
+                    {
+                        "operations": [
+                            {
+                                "op": "header_footer.create",
+                                "part": {
+                                    "id": "cli_created_header",
+                                    "kind": "header",
+                                    "content": [
+                                        {
+                                            "id": "cli_created_header_text",
+                                            "type": "paragraph",
+                                            "text": "Created by CLI",
+                                        }
+                                    ],
+                                },
+                            },
+                            {
+                                "op": (
+                                    "section.header_footer.bind"
+                                ),
+                                "target": section_id,
+                                "set": {
+                                    "header_default": (
+                                        "cli_created_header"
+                                    )
+                                },
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "created-region.docx"
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(
+                    main(
+                        [
+                            "apply",
+                            str(source),
+                            str(patch),
+                            "--output",
+                            str(output),
+                        ]
+                    ),
+                    0,
+                )
+            report = json.loads(stdout.getvalue())
+            self.assertTrue(report["success"])
+            self.assertEqual(
+                [change["operation"] for change in report["changes"]],
+                [
+                    "header_footer.create",
+                    "section.header_footer.bind",
+                ],
+            )
+            reopened = Document.from_docx(output)
+            self.assertEqual(
+                reopened.to_spec()["sections"][0]["header_footer"],
+                {"header_default": "cli_created_header"},
+            )
+            created = next(
+                part
+                for part in reopened.to_spec()["header_footers"]
+                if part["id"] == "cli_created_header"
+            )
+            self.assertEqual(
+                created["content"][0]["text"],
+                "Created by CLI",
             )
             self.assertEqual(reopened.to_bytes("docx"), output.read_bytes())
 

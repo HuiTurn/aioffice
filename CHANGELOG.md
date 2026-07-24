@@ -49,6 +49,13 @@
   `word/settings.xml` generation and projection.
 - Added header/footer relationship, content-type, inheritance, persistent identity,
   and semantic HTML preview support.
+- Added transactional `header_footer.create` native lowering with collision-free
+  part and relationship allocation, rich paragraph/field/hyperlink compilation,
+  same-Patch section binding, and final OPC graph proof.
+- Preserved intentionally empty header/footer semantics across native reopen while
+  retaining the mandatory blank Word paragraph in the package.
+- Kept newly mutated OPC relationship parts in the default package namespace for
+  LibreOffice interoperability.
 - Extended `text.replace`, `paragraph.format`, and `text.format` native lowering to
   ordinary header/footer paragraphs while touching only the target part.
 - Added conservative opaque projection for native header/footer drawings, objects,
@@ -389,6 +396,7 @@
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
 - Advanced the AiOffice Document Spec to `0.2-draft.29`.
+- Advanced the AiOffice Document Spec to `0.2-draft.30`.
 
 ## 0.1.0
 

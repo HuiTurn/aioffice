@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -732,11 +732,14 @@ def _document_xml(
     return _xml(root), refs
 
 
-def _header_footer_xml(
+def compile_header_footer_part(
     part: HeaderFooterPart,
     *,
     part_uri: str,
+    native_anchors: Mapping[str, str] | None = None,
 ) -> tuple[bytes, dict[str, NativeRef], bytes | None]:
+    """Compile one reusable header/footer part and its local relationships."""
+
     root_name = "hdr" if part.kind == "header" else "ftr"
     root = ET.Element(
         _q(W, root_name),
@@ -763,7 +766,14 @@ def _header_footer_xml(
             spans,
             context,
             style=block.style_ref,
-            native_anchor=_native_anchor(block.id),
+            native_anchor=(
+                native_anchors.get(
+                    block.id,
+                    _native_anchor(block.id),
+                )
+                if native_anchors is not None
+                else _native_anchor(block.id)
+            ),
             paragraph_style=block.paragraph_style,
             text_style=block.text_style,
         )
@@ -814,7 +824,7 @@ def _compile_header_footers(spec: AiOfficeDocumentSpec) -> _CompiledHeaderFooter
             if part.kind == "header"
             else FOOTER_CONTENT_TYPE
         )
-        payload, refs, relationships = _header_footer_xml(
+        payload, refs, relationships = compile_header_footer_part(
             part,
             part_uri=part_uri,
         )

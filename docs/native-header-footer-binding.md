@@ -1,6 +1,6 @@
 # Incremental native header/footer binding
 
-AiOffice `0.2.0.dev29` can change the explicit header/footer references of an
+AiOffice `0.2.0.dev30` can change the explicit header/footer references of an
 existing or newly inserted DOCX section without rebuilding any reusable region
 part. JSON carries the model-facing binding intent; the attached package remains
 authoritative for relationship IDs, section-property ordering, unknown XML, and
@@ -113,7 +113,7 @@ control parts are additionally changed once to attach it. Header/footer parts an
 
 This operation reuses projected parts. It does not:
 
-- create or delete a header/footer part;
+- create a part implicitly or delete a header/footer part;
 - clone a shared part for copy-on-write editing;
 - add or remove a document relationship;
 - bind an unprojected orphan package part;
@@ -124,6 +124,10 @@ Use `section.format` to set `different_first_page`. Even-page variants also requ
 the document-wide `settings.even_and_odd_headers` switch, which remains separately
 modeled. Capabilities expose the supported slots, set/clear semantics, native patch
 scope, preservation guarantees, and unsupported part lifecycle operations.
+
+Use [`header_footer.create`](native-header-footer-creation.md) to create a reusable
+semantic part explicitly, optionally immediately before this binding operation in
+the same atomic Patch.
 
 ## Visual verification
 

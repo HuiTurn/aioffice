@@ -348,6 +348,13 @@ class PatchTests(unittest.TestCase):
             "section.header_footer.bind",
         )
         self.assertEqual(
+            header_footer_contract["create_operation"],
+            "header_footer.create",
+        )
+        self.assertTrue(
+            header_footer_contract["create_then_bind_same_patch"]
+        )
+        self.assertEqual(
             header_footer_contract["binding_clear"],
             "remove_explicit_reference_and_inherit",
         )

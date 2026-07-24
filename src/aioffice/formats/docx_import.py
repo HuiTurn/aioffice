@@ -1140,6 +1140,59 @@ class ImportedDocx:
     diagnostics: list[Diagnostic]
 
 
+def _restore_manifest_empty_header_footers(
+    header_footers: list[dict[str, Any]],
+    manifest: IdentityManifest,
+) -> None:
+    """Hide the mandatory native blank paragraph when the manifest models no block."""
+
+    modeled_part_uris = {
+        node.source_ref.part_uri
+        for node in manifest.nodes
+        if node.node_type == "header_footer"
+    }
+    modeled_content_uris = {
+        node.source_ref.part_uri
+        for node in manifest.nodes
+        if node.node_type != "header_footer"
+    }
+    for part in header_footers:
+        source_ref = part.get("source_ref")
+        if not isinstance(source_ref, dict):
+            continue
+        part_uri = source_ref.get("part_uri")
+        content = part.get("content")
+        if (
+            not isinstance(part_uri, str)
+            or part_uri not in modeled_part_uris
+            or part_uri in modeled_content_uris
+            or not isinstance(content, list)
+            or len(content) != 1
+        ):
+            continue
+        block = content[0]
+        if not isinstance(block, dict):
+            continue
+        block_source_ref = block.get("source_ref")
+        metadata = block.get("metadata", {})
+        if (
+            block.get("type") == "paragraph"
+            and block.get("text", "") == ""
+            and block.get("content", []) == []
+            and block.get("style_ref") is None
+            and block.get("paragraph_style") is None
+            and block.get("text_style") is None
+            and isinstance(block_source_ref, dict)
+            and block_source_ref.get("part_uri") == part_uri
+            and block_source_ref.get("native_kind") == "w:p"
+            and block_source_ref.get("element_indices") == [0]
+            and isinstance(metadata, dict)
+            and metadata.get("native_style_id") is None
+            and metadata.get("native_features", []) == []
+        ):
+            part["content"] = []
+
+
 def import_docx(
     source: str | Path | bytes,
     *,
@@ -1528,6 +1581,10 @@ def import_docx(
                 sections=sections,
                 header_footers=header_footers,
             )
+        )
+        _restore_manifest_empty_header_footers(
+            header_footers,
+            active_identity_manifest,
         )
 
     for section_index, section in enumerate(sections):

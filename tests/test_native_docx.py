@@ -2741,6 +2741,10 @@ class NativeDocxTests(unittest.TestCase):
             "section.header_footer.bind",
             detached.capabilities()["operations"],
         )
+        self.assertNotIn(
+            "header_footer.create",
+            detached.capabilities()["operations"],
+        )
         detached_insert = detached.apply(
             [
                 {

@@ -154,6 +154,7 @@ class Workspace:
                 "style.apply",
                 "style.define",
                 "style.format",
+                "header_footer.create",
                 "section.header_footer.bind",
                 "section.insert_before",
                 "section.format",

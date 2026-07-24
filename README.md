@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev29`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev30`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -26,7 +26,8 @@ background/border surfaces, conservative native image projection, verified asset
 extraction, selective native image metadata and geometry updates, occurrence-scoped
 copy-on-write image replacement, addressable native inline image insertion, direct
 image-paragraph layout formatting, semantic diffs, isolated LibreOffice/Poppler
-native rendering, root append plus bidirectional stable-ID native
+native rendering, safe reusable native header/footer creation and binding, root
+append plus bidirectional stable-ID native
 paragraph/heading/page-break/list/table insertion and block reordering, consistent
 multi-page evidence, page occupancy diagnostics, visual-regression contracts, and
 fidelity reports.
@@ -505,6 +506,38 @@ doc = DocumentBuilder(
 ).paragraph("Report body", id="body").build()
 ```
 
+An imported DOCX can receive a new reusable region and bind it in one atomic Patch:
+
+```python
+result = doc.apply([
+    {
+        "op": "header_footer.create",
+        "part": {
+            "id": "appendix_header",
+            "kind": "header",
+            "content": [
+                {
+                    "id": "appendix_header_text",
+                    "type": "paragraph",
+                    "text": "Appendix",
+                }
+            ],
+        },
+    },
+    {
+        "op": "section.header_footer.bind",
+        "target": "#appendix_section",
+        "set": {"header_default": "appendix_header"},
+    },
+])
+```
+
+Native lowering allocates a collision-free part URI, document relationship,
+content-type override, optional hyperlink relationships, and persistent identities.
+It preserves every unrelated package part and refuses caller-supplied native
+references. See
+[native header/footer creation](docs/native-header-footer-creation.md).
+
 An existing section can explicitly reuse another projected native region, or clear
 one slot so Word inherits it from the previous section:
 
@@ -930,7 +963,7 @@ For imported DOCX, AiOffice moves the target's complete mapped XML range. A
 multi-paragraph list remains one contiguous unit, DrawingML and unknown XML stay in
 their original elements, and every native reference is reindexed. `node.move_after`
 and `node.move_before` cover every relative position without array indexes. The
-conservative dev29 boundary permits moves only within one semantic section, refuses
+conservative dev30 boundary permits moves only within one semantic section, refuses
 moving a section start anchor, and rebinds `section.start_at` when prepending within
 a later section. Native elements carrying `w:sectPr` remain immovable. See
 [the structural editing contract](docs/structural-editing.md).
@@ -943,7 +976,8 @@ relationships or parts rather than guessing that they are safe to delete.
 Semantic documents support `text.replace`, `paragraph.format`, `text.format`,
 `node.append`, `node.insert_after`, `node.insert_before`, `node.move_after`,
 `node.move_before`, `node.remove`, `node.update`, `style.define`, `style.apply`, `style.format`,
-`section.header_footer.bind`, `section.insert_before`, `section.format`, `field.update`,
+`header_footer.create`, `section.header_footer.bind`, `section.insert_before`,
+`section.format`, `field.update`,
 `table.format`, `table.column.format`, and `table.cell.format`. Imported DOCX
 documents support incremental before/after insertion for paragraphs, headings, page
 breaks, bullet/ordered lists, and tables, plus root append and safe native image

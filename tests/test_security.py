@@ -15,6 +15,7 @@ from aioffice.native import (
     MANIFEST_RELATIONSHIP_TYPE,
     NativePackage,
 )
+from aioffice.security import SecurityPolicy
 
 
 def _append(source: bytes, name: str, payload: bytes) -> bytes:
@@ -117,6 +118,47 @@ class NativeSecurityTests(unittest.TestCase):
         )
         with self.assertRaises(NativePackageError):
             Document.from_docx(malicious)
+
+    def test_header_creation_respects_external_relationship_policy(
+        self,
+    ) -> None:
+        document = Document.from_docx(
+            self.source,
+            security_policy=SecurityPolicy(
+                allow_external_relationships=False
+            ),
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "header_footer.create",
+                    "part": {
+                        "id": "linked_header",
+                        "kind": "header",
+                        "content": [
+                            {
+                                "id": "linked_header_text",
+                                "type": "paragraph",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "External",
+                                        "marks": ["link"],
+                                        "href": "https://example.com",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                }
+            ]
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.diagnostics[0].code,
+            "SECURITY_POLICY_VIOLATION",
+        )
+        self.assertEqual(document.to_bytes("docx"), self.source)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from aioffice.formats.docx import (
     DocxCompileContext,
     append_single_level_numbering_definition,
     compile_list_elements,
+    compile_header_footer_part,
     compile_table_element,
     register_table_refs,
 )
@@ -34,8 +35,10 @@ from aioffice.formats.docx_named_styles import (
     upsert_named_style,
 )
 from aioffice.formats.docx_header_footer import (
+    FOOTER_CONTENT_TYPE,
     FOOTER_RELATIONSHIP_TYPE,
     HEADER_FOOTER_BINDING_SLOTS,
+    HEADER_CONTENT_TYPE,
     HEADER_RELATIONSHIP_TYPE,
     binding_references,
     native_ref_for_header_footer_part,
@@ -89,6 +92,7 @@ from aioffice.spec.models import (
     BulletList,
     DocumentField,
     Heading,
+    HeaderFooterPart,
     ImageBlock,
     ImageInsert,
     InlineContent,
@@ -197,6 +201,245 @@ def _attach_hyperlink_relationship(
         ),
     )
     return relationship_id
+
+
+def _header_footer_contract(
+    kind: str,
+) -> tuple[str, str, str]:
+    if kind == "header":
+        return (
+            "hdr",
+            HEADER_RELATIONSHIP_TYPE,
+            HEADER_CONTENT_TYPE,
+        )
+    if kind == "footer":
+        return (
+            "ftr",
+            FOOTER_RELATIONSHIP_TYPE,
+            FOOTER_CONTENT_TYPE,
+        )
+    raise NativePackageError(
+        f"Unsupported header/footer part kind {kind!r}."
+    )
+
+
+def _fresh_header_footer_part_uri(
+    package: NativePackage,
+    *,
+    kind: str,
+) -> str:
+    existing = {
+        part.uri.casefold()
+        for part in package.parts
+        if part.state != "deleted"
+    }
+    number = 1
+    while True:
+        candidate = f"/word/{kind}{number}.xml"
+        if candidate.casefold() not in existing:
+            return candidate
+        number += 1
+
+
+def _create_header_footer_package_graph(
+    package: NativePackage,
+    part: HeaderFooterPart,
+    *,
+    native_anchors: Mapping[str, str],
+) -> tuple[
+    str,
+    str,
+    ET.Element,
+    dict[str, NativeRef],
+]:
+    root_name, relationship_type, content_type = (
+        _header_footer_contract(part.kind)
+    )
+    part_uri = _fresh_header_footer_part_uri(
+        package,
+        kind=part.kind,
+    )
+    payload, refs, local_relationships = (
+        compile_header_footer_part(
+            part,
+            part_uri=part_uri,
+            native_anchors=native_anchors,
+        )
+    )
+    root = parse_xml(payload)
+    if root.tag != _q(W, root_name):
+        raise NativePackageError(
+            "Generated header/footer part has the wrong root element."
+        )
+
+    document_relationship_part = _relationship_part_uri(
+        "/word/document.xml"
+    )
+    document_relationship_part_exists = package.has_part(
+        document_relationship_part
+    )
+    document_relationships = (
+        parse_xml(package.get_part(document_relationship_part))
+        if document_relationship_part_exists
+        else ET.Element(_q(REL, "Relationships"))
+    )
+    if document_relationships.tag != _q(REL, "Relationships"):
+        raise NativePackageError(
+            "DOCX document relationships part has an invalid root."
+        )
+    relationship_elements = document_relationships.findall(
+        _q(REL, "Relationship")
+    )
+    relationship_ids = [
+        element.get("Id", "")
+        for element in relationship_elements
+    ]
+    if (
+        any(not relationship_id for relationship_id in relationship_ids)
+        or len(relationship_ids) != len(set(relationship_ids))
+    ):
+        raise NativePackageError(
+            "DOCX document relationship IDs are incomplete or ambiguous."
+        )
+    relationship_number = 1
+    relationship_prefix = (
+        "rIdAiOfficeHeader"
+        if part.kind == "header"
+        else "rIdAiOfficeFooter"
+    )
+    while (
+        f"{relationship_prefix}{relationship_number}"
+        in relationship_ids
+    ):
+        relationship_number += 1
+    relationship_id = (
+        f"{relationship_prefix}{relationship_number}"
+    )
+    ET.SubElement(
+        document_relationships,
+        _q(REL, "Relationship"),
+        {
+            "Id": relationship_id,
+            "Type": relationship_type,
+            "Target": PurePosixPath(part_uri).name,
+        },
+    )
+
+    content_types = parse_xml(
+        package.get_part("/[Content_Types].xml")
+    )
+    if content_types.tag != _q(CT, "Types"):
+        raise NativePackageError(
+            "DOCX content types part has an invalid root."
+        )
+    relationship_defaults = [
+        element
+        for element in content_types.findall(_q(CT, "Default"))
+        if element.get("Extension", "").casefold() == "rels"
+    ]
+    if (
+        len(relationship_defaults) != 1
+        or relationship_defaults[0].get("ContentType")
+        != RELATIONSHIPS_CONTENT_TYPE
+    ):
+        raise NativePackageError(
+            "DOCX relationship content type default is missing or "
+            "ambiguous."
+        )
+    overrides = content_types.findall(_q(CT, "Override"))
+    override_names = [
+        override.get("PartName", "")
+        for override in overrides
+    ]
+    normalized_override_names = [
+        name.casefold()
+        for name in override_names
+    ]
+    if (
+        any(not name for name in override_names)
+        or len(normalized_override_names)
+        != len(set(normalized_override_names))
+        or part_uri.casefold() in normalized_override_names
+    ):
+        raise NativePackageError(
+            "DOCX content type overrides are incomplete, ambiguous, or "
+            "collide with the new header/footer part."
+        )
+    ET.SubElement(
+        content_types,
+        _q(CT, "Override"),
+        {
+            "PartName": part_uri,
+            "ContentType": content_type,
+        },
+    )
+
+    ET.register_namespace("", CT)
+    content_types_payload = serialize_xml(content_types)
+    ET.register_namespace("", REL)
+    document_relationships_payload = serialize_xml(
+        document_relationships
+    )
+    package.set_part(
+        "/[Content_Types].xml",
+        content_types_payload,
+    )
+    package.set_part(
+        document_relationship_part,
+        document_relationships_payload,
+        content_type=(
+            None
+            if document_relationship_part_exists
+            else RELATIONSHIPS_CONTENT_TYPE
+        ),
+    )
+    package.set_part(
+        part_uri,
+        payload,
+        content_type=content_type,
+    )
+    if local_relationships is not None:
+        package.set_part(
+            _relationship_part_uri(part_uri),
+            local_relationships,
+            content_type=RELATIONSHIPS_CONTENT_TYPE,
+        )
+
+    matching_relationships = [
+        relationship
+        for relationship in package.relationships
+        if relationship.source_part == "/word/document.xml"
+        and relationship.relationship_id == relationship_id
+        and relationship.relationship_type == relationship_type
+        and not relationship.external
+        and resolve_relationship_target(
+            relationship.source_part,
+            relationship.target,
+        )
+        == part_uri
+    ]
+    if len(matching_relationships) != 1:
+        raise NativePackageError(
+            "Could not prove the newly created header/footer document "
+            "relationship."
+        )
+    created_part = next(
+        (
+            native_part
+            for native_part in package.parts
+            if native_part.uri == part_uri
+        ),
+        None,
+    )
+    if (
+        created_part is None
+        or created_part.content_type != content_type
+        or package.get_part(part_uri) != payload
+    ):
+        raise NativePackageError(
+            "Could not prove the newly created header/footer native part."
+        )
+    return part_uri, relationship_id, root, refs
 
 
 def _native_paragraph_anchor(
@@ -1563,6 +1806,7 @@ def apply_docx_operations(
         "style.apply",
         "style.define",
         "style.format",
+        "header_footer.create",
         "section.header_footer.bind",
         "section.insert_before",
         "section.format",
@@ -1584,7 +1828,8 @@ def apply_docx_operations(
             "node.append, node.insert_after, node.insert_before, node.move_after, "
             "node.move_before, node.remove, "
             "style.apply, style.define, style.format, "
-            "section.header_footer.bind, section.insert_before, "
+            "header_footer.create, section.header_footer.bind, "
+            "section.insert_before, "
             "section.format, and "
             "field.update, image.insert_after, image.replace, image.update, "
             "table.format, "
@@ -1802,6 +2047,30 @@ def apply_docx_operations(
         part.id: part
         for part in spec.header_footers
     }
+    reserved_native_paragraph_ids = {
+        para_id
+        for native_part in updated.parts
+        if native_part.content_type
+        in {
+            HEADER_CONTENT_TYPE,
+            FOOTER_CONTENT_TYPE,
+        }
+        for paragraph in parse_xml(
+            updated.get_part(native_part.uri)
+        ).iter(_q(W, "p"))
+        if (
+            para_id := paragraph.get(_q(W14, "paraId"))
+        )
+        is not None
+    }
+    reserved_native_paragraph_ids.update(
+        para_id
+        for paragraph in root.iter(_q(W, "p"))
+        if (
+            para_id := paragraph.get(_q(W14, "paraId"))
+        )
+        is not None
+    )
     binding_slots = {
         field_name: (kind, variant)
         for field_name, kind, variant
@@ -1981,6 +2250,11 @@ def apply_docx_operations(
     inserted_images: dict[str, ET.Element] = {}
     inserted_nodes: set[str] = set()
     inserted_sections: set[str] = set()
+    inserted_header_footer_parts: dict[
+        str,
+        tuple[str, str, str],
+    ] = {}
+    created_identity_refs: dict[str, NativeRef] = {}
     rebound_header_footer_sections: set[str] = set()
     inserted_fields: dict[str, tuple[ET.Element, int]] = {}
     moved_nodes: set[str] = set()
@@ -2038,6 +2312,152 @@ def apply_docx_operations(
                 text_fields=text_fields,
             )
             styles_changed = True
+            continue
+        if operation_name == "header_footer.create":
+            raw_part = operation.get("part")
+            if not isinstance(raw_part, Mapping):
+                raise NativePackageError(
+                    "header_footer.create requires semantic part evidence."
+                )
+            part_ids = change.get("part_ids")
+            if (
+                change.get("operation") != operation_name
+                or not isinstance(part_ids, list)
+                or len(part_ids) != 1
+                or not isinstance(part_ids[0], str)
+            ):
+                raise NativePackageError(
+                    "header_footer.create semantic change evidence is "
+                    "missing or ambiguous."
+                )
+            part_id = part_ids[0]
+            if part_id in source_header_footer_parts:
+                raise NativePackageError(
+                    f"Header/footer part {part_id!r} already exists."
+                )
+            result_matches = [
+                candidate
+                for candidate in result_spec.header_footers
+                if candidate.id == part_id
+            ]
+            if len(result_matches) != 1:
+                raise NativePackageError(
+                    "header_footer.create result does not contain exactly "
+                    "one created part."
+                )
+            result_part = result_matches[0]
+            if (
+                change.get("kind") != result_part.kind
+                or change.get("created_nodes")
+                != [block.id for block in result_part.content]
+            ):
+                raise NativePackageError(
+                    "header_footer.create semantic change evidence does "
+                    "not match the result part."
+                )
+            claimed_refs = [
+                result_part.source_ref,
+                *(
+                    block.source_ref
+                    for block in result_part.content
+                ),
+                *(
+                    inline.source_ref
+                    for block in result_part.content
+                    if isinstance(block, Paragraph)
+                    for inline in block.content
+                    if isinstance(inline, DocumentField)
+                ),
+            ]
+            if any(
+                source_ref is not None
+                for source_ref in claimed_refs
+            ):
+                raise NativePackageError(
+                    "header_footer.create cannot claim existing native "
+                    "source references."
+                )
+            if any(
+                not isinstance(block, Paragraph)
+                for block in result_part.content
+            ):
+                raise NativePackageError(
+                    "header_footer.create can lower semantic paragraphs only."
+                )
+            native_anchors: dict[str, str] = {}
+            for block in result_part.content:
+                anchor = _fresh_native_paragraph_anchor(
+                    reserved_native_paragraph_ids,
+                    block.id,
+                )
+                native_anchors[block.id] = anchor
+                reserved_native_paragraph_ids.add(anchor)
+            (
+                part_uri,
+                relationship_id,
+                part_root,
+                compiled_refs,
+            ) = _create_header_footer_package_graph(
+                updated,
+                result_part,
+                native_anchors=native_anchors,
+            )
+            part_roots[part_uri] = part_root
+            part_containers[part_uri] = part_root
+            changed_xml_parts.add(part_uri)
+            created_identity_refs.update(compiled_refs)
+            inserted_header_footer_parts[part_id] = (
+                part_uri,
+                relationship_id,
+                result_part.kind,
+            )
+            live_part = result_part.model_copy(deep=True)
+            live_part.source_ref = compiled_refs[part_id]
+            source_header_footer_parts[part_id] = live_part
+            for block in live_part.content:
+                block_ref = compiled_refs.get(block.id)
+                if block_ref is None:
+                    raise NativePackageError(
+                        f"Created header/footer block {block.id!r} has no "
+                        "native identity."
+                    )
+                block.source_ref = block_ref
+                indices = _source_indices(block_ref)
+                elements = list(part_root)
+                if any(index >= len(elements) for index in indices):
+                    raise NativePackageError(
+                        f"Created header/footer block {block.id!r} has an "
+                        "invalid native range."
+                    )
+                source_elements[block.id] = (
+                    [elements[index] for index in indices],
+                    block_ref,
+                )
+            for block in live_part.content:
+                if not isinstance(block, Paragraph):
+                    continue
+                for document_field in (
+                    inline
+                    for inline in block.content
+                    if isinstance(inline, DocumentField)
+                ):
+                    field_ref = compiled_refs.get(document_field.id)
+                    if field_ref is None:
+                        raise NativePackageError(
+                            f"Created field {document_field.id!r} has no "
+                            "native identity."
+                        )
+                    document_field.source_ref = field_ref
+                    mapped = source_elements[block.id][0]
+                    if len(mapped) != 1:
+                        raise NativePackageError(
+                            f"Created field {document_field.id!r} has an "
+                            "ambiguous paragraph."
+                        )
+                    source_fields[document_field.id] = (
+                        mapped[0],
+                        field_ref,
+                    )
             continue
         if operation_name == "section.header_footer.bind":
             target_id = _target_id(operation.get("target"))
@@ -3376,9 +3796,81 @@ def apply_docx_operations(
             "Native section operations did not reproduce the semantic "
             "header/footer binding model."
         )
+    result_header_footer_kinds = {
+        part.id: part.kind
+        for part in result_spec.header_footers
+    }
+    live_header_footer_kinds = {
+        part_id: part.kind
+        for part_id, part in source_header_footer_parts.items()
+    }
+    if result_header_footer_kinds != live_header_footer_kinds:
+        raise NativePackageError(
+            "Native header/footer operations did not reproduce the "
+            "semantic reusable-part model."
+        )
+    final_content_types = parse_xml(
+        updated.get_part("/[Content_Types].xml")
+    )
+    for part_id, (
+        part_uri,
+        relationship_id,
+        kind,
+    ) in inserted_header_footer_parts.items():
+        root_name, relationship_type, content_type = (
+            _header_footer_contract(kind)
+        )
+        matching_relationships = [
+            relationship
+            for relationship in updated.relationships
+            if relationship.source_part == "/word/document.xml"
+            and relationship.relationship_id == relationship_id
+            and relationship.relationship_type == relationship_type
+            and not relationship.external
+            and resolve_relationship_target(
+                relationship.source_part,
+                relationship.target,
+            )
+            == part_uri
+        ]
+        relationships_to_part = [
+            relationship
+            for relationship in updated.relationships
+            if relationship.source_part == "/word/document.xml"
+            and not relationship.external
+            and resolve_relationship_target(
+                relationship.source_part,
+                relationship.target,
+            )
+            == part_uri
+        ]
+        overrides = [
+            override
+            for override in final_content_types.findall(
+                _q(CT, "Override")
+            )
+            if override.get("PartName", "").casefold()
+            == part_uri.casefold()
+            and override.get("ContentType") == content_type
+        ]
+        part_root = part_roots.get(part_uri)
+        if (
+            len(matching_relationships) != 1
+            or len(relationships_to_part) != 1
+            or len(overrides) != 1
+            or part_root is None
+            or part_root.tag != _q(W, root_name)
+            or not updated.has_part(part_uri)
+        ):
+            raise NativePackageError(
+                f"Created header/footer part {part_id!r} failed final "
+                "native graph verification."
+            )
 
     current_indices = {id(element): index for index, element in enumerate(list(body))}
-    identity_updates: dict[str, NativeRef] = {}
+    identity_updates: dict[str, NativeRef] = dict(
+        created_identity_refs
+    )
     for node_id, (elements, original_ref) in source_elements.items():
         current_container = part_containers[original_ref.part_uri]
         part_indices = {
@@ -3625,7 +4117,7 @@ def apply_docx_operations(
             index,
             container=container_kind,
         )
-    for part in spec.header_footers:
+    for part in source_header_footer_parts.values():
         source_ref = part.source_ref
         if not isinstance(source_ref, NativeRef):
             continue
@@ -3648,6 +4140,7 @@ def apply_docx_operations(
         inserted_images
         or inserted_nodes
         or inserted_sections
+        or inserted_header_footer_parts
         or rebound_header_footer_sections
         or moved_nodes
         or removed_nodes

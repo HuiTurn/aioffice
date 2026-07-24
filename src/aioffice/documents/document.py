@@ -62,6 +62,7 @@ from aioffice.spec.models import (
     DocumentField,
     DocumentSection,
     HeaderFooterBindings,
+    HeaderFooterPart,
     Heading,
     ImageBlock,
     ImageInsert,
@@ -978,6 +979,7 @@ class Document:
             "style.apply",
             "style.define",
             "style.format",
+            "header_footer.create",
             "section.header_footer.bind",
             "section.insert_before",
             "section.format",
@@ -1000,6 +1002,7 @@ class Document:
                 "style.apply",
                 "style.define",
                 "style.format",
+                "header_footer.create",
                 "section.header_footer.bind",
                 "section.insert_before",
                 "section.format",
@@ -1022,6 +1025,7 @@ class Document:
             operations.remove("node.move_after")
             operations.remove("node.move_before")
             operations.remove("node.remove")
+            operations.remove("header_footer.create")
             operations.remove("section.header_footer.bind")
             operations.remove("section.insert_before")
         ambiguous_node_ids = sorted(
@@ -1251,6 +1255,26 @@ class Document:
                     "variants": ["default", "first", "even"],
                     "missing_binding": "inherit_previous_section",
                     "editable_blocks": ["paragraph"],
+                    "create_operation": "header_footer.create",
+                    "create_fields": [
+                        "id",
+                        "kind",
+                        "content",
+                        "metadata",
+                    ],
+                    "create_native_parts": [
+                        "word/headerN.xml or word/footerN.xml",
+                        "word/_rels/document.xml.rels",
+                        "[Content_Types].xml",
+                        "optional part-local relationships",
+                    ],
+                    "create_content": [
+                        "paragraph",
+                        "rich_text",
+                        "field",
+                        "external_hyperlink",
+                    ],
+                    "create_then_bind_same_patch": True,
                     "binding_operation": (
                         "section.header_footer.bind"
                     ),
@@ -1273,7 +1297,6 @@ class Document:
                         "unbound_region_reusability",
                     ],
                     "binding_unsupported": [
-                        "create_part",
                         "delete_part",
                         "copy_on_write_part_content",
                         "external_relationship",
@@ -2975,6 +2998,7 @@ class Document:
                     "node.move_after",
                     "node.move_before",
                     "node.remove",
+                    "header_footer.create",
                     "section.header_footer.bind",
                     "section.insert_before",
                 }
@@ -2987,8 +3011,9 @@ class Document:
                 code="UNSUPPORTED_FEATURE",
                 message=(
                     "node.append, node.insert_after, node.insert_before, "
-                    "node.move_after, node.move_before, node.remove, and "
-                    "section.header_footer.bind and section.insert_before "
+                    "node.move_after, node.move_before, node.remove, "
+                    "header_footer.create, section.header_footer.bind, and "
+                    "section.insert_before "
                     "require the attached native DOCX package for a "
                     "native-authority projection; detached JSON cannot prove "
                     "or mutate the complete XML element range."
@@ -4553,6 +4578,195 @@ class Document:
                     }
                     for field_name in changed_fields
                     if before.get(field_name) != normalized.get(field_name)
+                ],
+            }
+
+        if operation_name == "header_footer.create":
+            unexpected = sorted(
+                set(operation) - {"op", "part"}
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.create received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                    )
+                )
+            raw_part = operation.get("part")
+            if not isinstance(raw_part, dict):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.create requires an object in part."
+                        ),
+                    )
+                )
+            allowed_part_fields = {
+                "id",
+                "type",
+                "kind",
+                "content",
+                "metadata",
+            }
+            unexpected_part_fields = sorted(
+                set(raw_part) - allowed_part_fields
+            )
+            if unexpected_part_fields:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.create part received unknown or "
+                            "native-owned fields: "
+                            f"{', '.join(unexpected_part_fields)}."
+                        ),
+                        suggested_actions=[
+                            {
+                                "action": "remove_native_owned_fields",
+                                "fields": [
+                                    "source_ref",
+                                    "revision_added",
+                                    "revision_updated",
+                                ],
+                            }
+                        ],
+                    )
+                )
+            candidate = deepcopy(raw_part)
+            candidate["revision_added"] = next_revision
+            candidate["revision_updated"] = next_revision
+            raw_content = candidate.get("content", [])
+            if not isinstance(raw_content, list):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.create part.content must be a list."
+                        ),
+                    )
+                )
+            normalized_content: list[dict[str, Any]] = []
+            for block_index, raw_block in enumerate(raw_content):
+                if not isinstance(raw_block, dict):
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=(
+                                "header_footer.create content entries must "
+                                "be paragraph objects."
+                            ),
+                            path=f"part.content.{block_index}",
+                        )
+                    )
+                if raw_block.get("source_ref") is not None:
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=(
+                                "header_footer.create cannot claim an "
+                                "existing native source_ref."
+                            ),
+                            path=f"part.content.{block_index}.source_ref",
+                        )
+                    )
+                raw_inline_content = raw_block.get("content", [])
+                if isinstance(raw_inline_content, list) and any(
+                    isinstance(inline, dict)
+                    and inline.get("source_ref") is not None
+                    for inline in raw_inline_content
+                ):
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=(
+                                "header_footer.create inline content cannot "
+                                "claim an existing native source_ref."
+                            ),
+                            path=f"part.content.{block_index}.content",
+                        )
+                    )
+                block = deepcopy(raw_block)
+                block["revision_added"] = next_revision
+                block["revision_updated"] = next_revision
+                if isinstance(block.get("content"), list):
+                    for inline in block["content"]:
+                        if (
+                            isinstance(inline, dict)
+                            and inline.get("type") == "field"
+                        ):
+                            inline["revision_added"] = next_revision
+                            inline["revision_updated"] = next_revision
+                normalized_content.append(block)
+            candidate["content"] = normalized_content
+            try:
+                normalized_part = HeaderFooterPart.model_validate(
+                    candidate
+                )
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.create part is not a valid "
+                            "header/footer definition."
+                        ),
+                        suggested_actions=[
+                            {
+                                "action": "fix_header_footer_part",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            if any(
+                isinstance(block, OpaqueBlock)
+                for block in normalized_part.content
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            "header_footer.create supports semantic "
+                            "paragraphs only; opaque native XML cannot be "
+                            "created through the model exchange protocol."
+                        ),
+                        node_ids=[normalized_part.id],
+                        suggested_actions=[
+                            {"action": "use_paragraph_content"}
+                        ],
+                    )
+                )
+            payload.setdefault("header_footers", []).append(
+                normalized_part.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+            )
+            return {
+                "operation": "header_footer.create",
+                "part_ids": [normalized_part.id],
+                "kind": normalized_part.kind,
+                "created_nodes": [
+                    block.id
+                    for block in normalized_part.content
                 ],
             }
 
@@ -6234,7 +6448,8 @@ class Document:
                     "node.remove, "
                     "node.update, style.apply, "
                     "style.define, style.format, "
-                    "section.header_footer.bind, section.insert_before, "
+                    "header_footer.create, section.header_footer.bind, "
+                    "section.insert_before, "
                     "section.format, field.update, "
                     "image.insert_after, image.replace, image.update, "
                     "table.format, table.column.format, and table.cell.format."

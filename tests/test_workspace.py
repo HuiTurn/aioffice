@@ -700,6 +700,81 @@ class WorkspaceTests(unittest.TestCase):
                 result.result_revision,
             )
 
+    def test_workspace_persists_created_native_header_footer(
+        self,
+    ) -> None:
+        document = (
+            DocumentBuilder()
+            .paragraph("Workspace body", id="workspace_create_body")
+            .build()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "create-region.docx"
+            source.write_bytes(document.to_bytes("docx"))
+            workspace = Workspace.init(root / "project")
+            imported = workspace.import_document(source)
+            section_id = imported.to_spec()["sections"][0]["id"]
+            operations = [
+                {
+                    "op": "header_footer.create",
+                    "part": {
+                        "id": "workspace_created_footer",
+                        "kind": "footer",
+                        "content": [
+                            {
+                                "id": "workspace_created_footer_text",
+                                "type": "paragraph",
+                                "text": "Created in workspace",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": section_id,
+                    "set": {
+                        "footer_default": (
+                            "workspace_created_footer"
+                        ),
+                    },
+                },
+            ]
+            result = workspace.apply(
+                imported.id,
+                operations,
+                idempotency_key="create-footer",
+            )
+            self.assertTrue(result.success, result.model_dump())
+            reopened_workspace = Workspace.open(root / "project")
+            reopened = reopened_workspace.open_document(imported.id)
+            self.assertEqual(
+                reopened.to_spec()["sections"][0]["header_footer"],
+                {"footer_default": "workspace_created_footer"},
+            )
+            created = next(
+                part
+                for part in reopened.to_spec()["header_footers"]
+                if part["id"] == "workspace_created_footer"
+            )
+            self.assertEqual(
+                created["source_ref"]["part_uri"],
+                "/word/footer1.xml",
+            )
+            self.assertEqual(
+                created["content"][0]["text"],
+                "Created in workspace",
+            )
+            replay = reopened_workspace.apply(
+                imported.id,
+                operations,
+                idempotency_key="create-footer",
+            )
+            self.assertEqual(
+                replay.result_revision,
+                result.result_revision,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

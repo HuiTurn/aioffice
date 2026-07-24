@@ -84,9 +84,37 @@ so section and part IDs remain stable after reopen.
 The native transaction refuses a missing or type-incompatible part, external or
 duplicate relationships, duplicate references for one slot, stale section
 boundaries, and clearing an invalid native reference that was not safely projected.
-Creating, deleting, cloning, or copy-on-write editing a reusable part remains a
-separate future operation. See
+Creating a reusable part is a separate explicit operation. Deleting, cloning, and
+copy-on-write editing remain future operations. See
 [the full native binding contract](native-header-footer-binding.md).
+
+## Reusable part creation
+
+`header_footer.create` adds one independent reusable header or footer:
+
+```json
+{
+  "op": "header_footer.create",
+  "part": {
+    "id": "appendix_header",
+    "kind": "header",
+    "content": [
+      {
+        "id": "appendix_header_line",
+        "type": "paragraph",
+        "text": "Appendix"
+      }
+    ]
+  }
+}
+```
+
+It may be followed by `section.header_footer.bind` in the same atomic Patch.
+AiOffice allocates the native part URI, document relationship, content-type
+override, optional hyperlink relationships, and native identities. The caller
+cannot provide those package-owned values. Existing parts and unrelated package
+content remain untouched. See
+[the full native creation contract](native-header-footer-creation.md).
 
 ## Conservative projection boundary
 
@@ -96,9 +124,9 @@ and never treated as authoritative text. Unknown field instructions are visible 
 read-only native fields. Malformed field containment, drawings, embedded objects,
 tables, and unknown header/footer elements remain non-editable opaque blocks.
 
-Semantic generation currently supports ordinary paragraph blocks, including rich
-text, hyperlinks, and normalized dynamic fields. Tables, images, creating/deleting
-parts, and copy-on-write region content remain planned behind explicit capabilities.
+Semantic creation currently supports ordinary paragraph blocks, including rich
+text, hyperlinks, and normalized dynamic fields. Tables, images, deleting parts,
+and copy-on-write region content remain planned behind explicit capabilities.
 See [the dynamic field contract](dynamic-fields.md).
 
 ## Preview boundary
