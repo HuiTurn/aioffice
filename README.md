@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev33`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev34`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -25,6 +25,7 @@ rich table-cell paragraphs, explicit table/cell border control, paragraph
 background/border surfaces, conservative body and header/footer image projection,
 verified asset extraction, selective native image metadata and geometry updates,
 bounded rectangular source cropping,
+conservative floating-image anchor projection,
 occurrence-scoped copy-on-write image replacement, addressable native inline image
 insertion, direct image-paragraph layout formatting, semantic diffs, isolated
 LibreOffice/Poppler native rendering, safe reusable native header/footer creation,
@@ -92,9 +93,10 @@ When a supported edit is applied, AiOffice rewrites only the affected native par
 preserves untouched part payloads.
 
 Image bytes deliberately stay out of the JSON Spec. A simple body, header, or footer
-paragraph containing exactly one embedded inline DrawingML picture is projected as
-an AI-addressable `image` block with physical extent, optional rectangular source
-crop, alternative text, media type, filename, byte count, and SHA-256 asset identity:
+paragraph containing exactly one supported embedded DrawingML picture is projected
+as an AI-addressable `image` block with inline or conservative floating placement,
+physical extent, optional rectangular source crop, alternative text, media type,
+filename, byte count, and SHA-256 asset identity:
 
 ```python
 image = next(
@@ -112,6 +114,13 @@ Body images appear in `inspect()["nodes"]`; reusable header/footer images appear
 verified read, update, replacement, and paragraph-layout APIs. Header/footer
 insertion and deletion are not advertised: create or clone the complete reusable
 part first, then update or replace its projected image in a subsequent Patch.
+
+For a supported floating picture, `image["floating"]` preserves explicit horizontal
+and vertical reference frames and offsets, square-wrap side and text distances,
+relative height, behind-text behavior, anchor locking, cell layout, and overlap
+policy. That layout is read-only evidence in dev34: extraction, crop, resize,
+metadata update, and occurrence-scoped replacement preserve it exactly, while native
+DOCX rendering remains the visual authority.
 
 Supported projected images can be resized, cropped, or given accessible metadata
 without rewriting their binary part or relationship:
@@ -229,12 +238,12 @@ revision log.
 
 The read path re-resolves the trusted native paragraph and its story-local OPC
 relationship, then verifies the asset record, media type, size, and content hash
-before returning bytes. Mixed text/picture paragraphs, floating anchors, linked
-images, multiple pictures, negative or overconstrained crop rectangles, transforms,
-effects, drawings in tables, complex header/footer drawings, VML, OLE, and embedded
-objects remain explicit opaque native content. They are preserved losslessly and
-rendered through the native provider rather than flattened into a misleading image
-model. See
+before returning bytes. Mixed text/picture paragraphs, floating alignment or
+simple-position anchors, non-square or polygon wrapping, linked images, multiple
+pictures, negative or overconstrained crop rectangles, transforms, effects,
+drawings in tables, complex header/footer drawings, VML, OLE, and embedded objects
+remain explicit opaque native content. They are preserved losslessly and rendered
+through the native provider rather than flattened into a misleading image model. See
 [the native image and asset contract](docs/native-images.md).
 
 AiOffice-generated DOCX files embed a versioned identity manifest. Artifact IDs,

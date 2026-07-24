@@ -22,6 +22,7 @@ from aioffice.workspace import Workspace
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+WP14 = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -118,10 +119,47 @@ def _image_document(
         text = ET.SubElement(run, _q(W, "t"))
         text.text = mixed_text
     drawing = ET.SubElement(run, _q(W, "drawing"))
+    placement_attributes = (
+        {
+            "distT": "12700",
+            "distB": "25400",
+            "distL": "38100",
+            "distR": "50800",
+            "simplePos": "0",
+            "relativeHeight": "1026",
+            "behindDoc": "0",
+            "locked": "1",
+            "layoutInCell": "1",
+            "allowOverlap": "1",
+            _q(WP14, "anchorId"): "A1B2C3D4",
+            _q(WP14, "editId"): "E5F60718",
+        }
+        if anchored
+        else {}
+    )
     placement = ET.SubElement(
         drawing,
         _q(WP, "anchor" if anchored else "inline"),
+        placement_attributes,
     )
+    if anchored:
+        ET.SubElement(
+            placement,
+            _q(WP, "simplePos"),
+            {"x": "0", "y": "0"},
+        )
+        horizontal = ET.SubElement(
+            placement,
+            _q(WP, "positionH"),
+            {"relativeFrom": "column"},
+        )
+        ET.SubElement(horizontal, _q(WP, "posOffset")).text = "457200"
+        vertical = ET.SubElement(
+            placement,
+            _q(WP, "positionV"),
+            {"relativeFrom": "paragraph"},
+        )
+        ET.SubElement(vertical, _q(WP, "posOffset")).text = "5080"
     ET.SubElement(
         placement,
         _q(WP, "extent"),
@@ -132,6 +170,12 @@ def _image_document(
         _q(WP, "effectExtent"),
         {"l": "0", "t": "0", "r": "0", "b": "0"},
     )
+    if anchored:
+        ET.SubElement(
+            placement,
+            _q(WP, "wrapSquare"),
+            {"wrapText": "bothSides"},
+        )
     document_properties = {
         "id": "7",
         "name": "Expert diagram",
@@ -245,9 +289,10 @@ def _header_image_document(
     *,
     kind: str = "header",
     cropped: bool = False,
+    anchored: bool = False,
 ) -> bytes:
     assert kind in {"header", "footer"}
-    body_image = _image_document(cropped=cropped)
+    body_image = _image_document(cropped=cropped, anchored=anchored)
     with ZipFile(io.BytesIO(body_image)) as archive:
         image_document = parse_xml(
             archive.read("word/document.xml")
@@ -351,6 +396,38 @@ class DocxImageTests(unittest.TestCase):
                 {"left", "top", "right", "bottom"},
             ),
             (
+                "floating-image-horizontal-position",
+                {"relative_to", "offset"},
+            ),
+            (
+                "floating-image-vertical-position",
+                {"relative_to", "offset"},
+            ),
+            (
+                "floating-image-text-wrap",
+                {
+                    "mode",
+                    "side",
+                    "distance_top",
+                    "distance_right",
+                    "distance_bottom",
+                    "distance_left",
+                },
+            ),
+            (
+                "floating-image-layout",
+                {
+                    "horizontal",
+                    "vertical",
+                    "wrap",
+                    "relative_height",
+                    "behind_text",
+                    "locked",
+                    "layout_in_cell",
+                    "allow_overlap",
+                },
+            ),
+            (
                 "asset-ref",
                 {"id", "sha256", "media_type", "size_bytes"},
             ),
@@ -399,7 +476,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.33")
+        self.assertEqual(spec["spec_version"], "0.2-draft.34")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -585,21 +662,168 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(document.image_bytes(images[0]["id"]), PNG)
         self.assertEqual(document.image_bytes(images[1]["id"]), PNG)
 
-    def test_mixed_and_floating_images_remain_opaque(self) -> None:
-        for source in (
-            _image_document(mixed_text="Caption"),
-            _image_document(anchored=True),
-        ):
-            with self.subTest():
-                document = Document.from_docx(source)
-                spec = document.to_spec()
-                self.assertEqual(spec["content"][0]["type"], "opaque")
-                self.assertEqual(spec["assets"], [])
-                self.assertEqual(document.to_bytes("docx"), source)
+    def test_mixed_image_remains_opaque(self) -> None:
+        source = _image_document(mixed_text="Caption")
+        document = Document.from_docx(source)
+        spec = document.to_spec()
+        self.assertEqual(spec["content"][0]["type"], "opaque")
+        self.assertEqual(spec["assets"], [])
+        self.assertEqual(document.to_bytes("docx"), source)
         mixed = Document.from_docx(
             _image_document(mixed_text="Caption")
         ).to_spec()["content"][0]
         self.assertIn("with text", mixed["summary"])
+
+    def test_floating_square_wrap_projects_and_preserves_native_layout(
+        self,
+    ) -> None:
+        source = _image_document(anchored=True, cropped=True)
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(image["type"], "image")
+        self.assertEqual(image["placement"], "floating")
+        expected_layout = {
+            "horizontal": {
+                "relative_to": "column",
+                "offset": {"value": 36.0, "unit": "pt"},
+            },
+            "vertical": {
+                "relative_to": "paragraph",
+                "offset": {"value": 0.4, "unit": "pt"},
+            },
+            "wrap": {
+                "mode": "square",
+                "side": "both_sides",
+                "distance_top": {"value": 1.0, "unit": "pt"},
+                "distance_right": {"value": 4.0, "unit": "pt"},
+                "distance_bottom": {"value": 2.0, "unit": "pt"},
+                "distance_left": {"value": 3.0, "unit": "pt"},
+            },
+            "relative_height": 1026,
+            "behind_text": False,
+            "locked": True,
+            "layout_in_cell": True,
+            "allow_overlap": True,
+        }
+        self.assertEqual(image["floating"], expected_layout)
+        self.assertEqual(document.to_bytes("docx"), source)
+        self.assertEqual(document.image_bytes(image["id"]), PNG)
+        inspected = document.inspect()["nodes"][0]
+        self.assertEqual(inspected["placement"], "floating")
+        self.assertEqual(inspected["floating"], expected_layout)
+        self.assertIn(
+            'data-aioffice-placement="floating"',
+            document.to_bytes("html").decode(),
+        )
+
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": f"#{image['id']}",
+                    "set": {
+                        "width": {"value": 3, "unit": "in"},
+                        "crop": {"left": 12.5, "right": 12.5},
+                        "alt_text": "Floating expert workflow",
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.diagnostics)
+        assert result.document is not None
+        updated = result.document.to_spec()["content"][0]
+        self.assertEqual(updated["floating"], expected_layout)
+        self.assertEqual(updated["placement"], "floating")
+        self.assertEqual(result.document.image_bytes(image["id"]), PNG)
+
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(result.document.to_bytes("docx"))) as after,
+        ):
+            self.assertEqual(
+                before.read("word/media/image1.png"),
+                after.read("word/media/image1.png"),
+            )
+            self.assertEqual(
+                before.read("word/_rels/document.xml.rels"),
+                after.read("word/_rels/document.xml.rels"),
+            )
+            updated_root = parse_xml(after.read("word/document.xml"))
+        anchor = updated_root.find(f".//{_q(WP, 'anchor')}")
+        assert anchor is not None
+        self.assertEqual(
+            anchor.find(f"./{_q(WP, 'positionH')}/{_q(WP, 'posOffset')}").text,
+            "457200",
+        )
+        self.assertEqual(
+            anchor.find(f"./{_q(WP, 'positionV')}/{_q(WP, 'posOffset')}").text,
+            "5080",
+        )
+        self.assertEqual(
+            anchor.find(f"./{_q(WP, 'wrapSquare')}").attrib,
+            {"wrapText": "bothSides"},
+        )
+
+        reopened = Document.from_docx(result.document.to_bytes("docx"))
+        reopened_image = reopened.to_spec()["content"][0]
+        self.assertEqual(reopened_image["floating"], expected_layout)
+        self.assertEqual(reopened_image["crop"]["left"], 12.5)
+
+        replaced = result.document.replace_image(image["id"], JPEG)
+        self.assertTrue(replaced.success, replaced.diagnostics)
+        assert replaced.document is not None
+        replaced_image = replaced.document.to_spec()["content"][0]
+        self.assertEqual(replaced_image["floating"], expected_layout)
+        self.assertEqual(replaced_image["crop"], updated["crop"])
+        self.assertEqual(replaced.document.image_bytes(image["id"]), JPEG)
+
+    def test_unsupported_floating_anchor_variants_remain_opaque(self) -> None:
+        cases = (
+            "alignment_position",
+            "simple_position",
+            "non_square_wrap",
+            "negative_distance",
+            "malformed_extension_id",
+            "missing_required_attribute",
+        )
+        for case in cases:
+            source = _image_document(anchored=True)
+            with ZipFile(io.BytesIO(source)) as archive:
+                root = parse_xml(archive.read("word/document.xml"))
+            anchor = root.find(f".//{_q(WP, 'anchor')}")
+            assert anchor is not None
+            if case == "alignment_position":
+                position = anchor.find(f"./{_q(WP, 'positionH')}")
+                assert position is not None
+                position.clear()
+                position.attrib["relativeFrom"] = "margin"
+                ET.SubElement(position, _q(WP, "align")).text = "center"
+            elif case == "simple_position":
+                anchor.attrib["simplePos"] = "1"
+            elif case == "non_square_wrap":
+                wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
+                assert wrap is not None
+                wrap.tag = _q(WP, "wrapNone")
+                wrap.attrib.clear()
+            elif case == "negative_distance":
+                anchor.attrib["distL"] = "-1"
+            elif case == "malformed_extension_id":
+                anchor.attrib[_q(WP14, "anchorId")] = "not-hex"
+            else:
+                anchor.attrib.pop("allowOverlap")
+            mutated = _rewrite_package(
+                source,
+                replacements={
+                    "word/document.xml": serialize_xml(root),
+                },
+                additions={},
+            )
+            with self.subTest(case=case):
+                document = Document.from_docx(mutated)
+                spec = document.to_spec()
+                self.assertEqual(spec["content"][0]["type"], "opaque")
+                self.assertEqual(spec["assets"], [])
+                self.assertEqual(document.to_bytes("docx"), mutated)
 
     def test_rectangular_source_crop_projects_updates_and_clears(
         self,
@@ -1590,7 +1814,7 @@ class DocxImageTests(unittest.TestCase):
             "header_footer_contract"
         ]
         self.assertIn(
-            "simple_inline_image",
+            "simple_native_image",
             header_footer_contract["editable_blocks"],
         )
         self.assertEqual(
@@ -1803,10 +2027,71 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(reopened.image_bytes(image["id"]), PNG)
         self.assertEqual(reopened.to_bytes("docx"), output)
 
+    def test_floating_header_image_update_is_story_local(self) -> None:
+        source = _header_image_document(anchored=True, cropped=True)
+        document = Document.from_docx(source)
+        image = document.to_spec()["header_footers"][0]["content"][0]
+        self.assertEqual(image["placement"], "floating")
+        floating = image["floating"]
+        self.assertEqual(floating["horizontal"]["relative_to"], "column")
+        self.assertEqual(floating["vertical"]["relative_to"], "paragraph")
+        self.assertEqual(floating["wrap"]["mode"], "square")
+
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": f"#{image['id']}",
+                    "set": {
+                        "crop": {
+                            "left": 15,
+                            "top": 7.5,
+                            "right": 15,
+                            "bottom": 7.5,
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.diagnostics)
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            self.assertEqual(
+                before.read("word/document.xml"),
+                after.read("word/document.xml"),
+            )
+            self.assertEqual(
+                before.read("word/_rels/header1.xml.rels"),
+                after.read("word/_rels/header1.xml.rels"),
+            )
+            self.assertEqual(
+                before.read("word/media/image1.png"),
+                after.read("word/media/image1.png"),
+            )
+        reopened = Document.from_docx(output)
+        reopened_image = reopened.to_spec()["header_footers"][0][
+            "content"
+        ][0]
+        self.assertEqual(reopened_image["placement"], "floating")
+        self.assertEqual(reopened_image["floating"], floating)
+        self.assertEqual(
+            reopened_image["crop"],
+            {
+                "left": 15.0,
+                "top": 7.5,
+                "right": 15.0,
+                "bottom": 7.5,
+            },
+        )
+
     def test_cloned_header_image_can_be_replaced_copy_on_write(
         self,
     ) -> None:
-        source = _header_image_document(cropped=True)
+        source = _header_image_document(cropped=True, anchored=True)
         document = Document.from_docx(source)
         spec = document.to_spec()
         source_part = spec["header_footers"][0]
@@ -1837,6 +2122,11 @@ class DocxImageTests(unittest.TestCase):
         )
         cloned_image = cloned_part["content"][0]
         self.assertEqual(cloned_image["type"], "image")
+        self.assertEqual(cloned_image["placement"], "floating")
+        self.assertEqual(
+            cloned_image["floating"],
+            source_image["floating"],
+        )
         self.assertNotEqual(cloned_image["id"], source_image["id"])
         self.assertEqual(
             cloned_image["asset_id"],
@@ -1862,6 +2152,9 @@ class DocxImageTests(unittest.TestCase):
             clone_root = parse_xml(
                 package.read("word/header2.xml")
             )
+            source_root = parse_xml(
+                package.read("word/header1.xml")
+            )
             source_target = source_relationships.find(
                 _q(REL, "Relationship")
             )
@@ -1870,6 +2163,17 @@ class DocxImageTests(unittest.TestCase):
             )
             assert source_target is not None
             assert clone_blip is not None
+            source_anchor = source_root.find(f".//{_q(WP, 'anchor')}")
+            clone_anchor = clone_root.find(f".//{_q(WP, 'anchor')}")
+            assert source_anchor is not None
+            assert clone_anchor is not None
+            for identity_name in ("anchorId", "editId"):
+                attribute = _q(WP14, identity_name)
+                self.assertNotEqual(
+                    source_anchor.get(attribute),
+                    clone_anchor.get(attribute),
+                )
+                self.assertEqual(len(clone_anchor.get(attribute, "")), 8)
             clone_relationship_id = clone_blip.get(_q(R, "embed"))
             clone_target = next(
                 relationship

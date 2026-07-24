@@ -13,8 +13,9 @@ drawing.
 
 ## Projected semantic shape
 
-The supported vertical slice is one embedded, inline DrawingML picture in an
-otherwise empty body, header, or footer paragraph. A body occurrence lives in
+The supported vertical slice is one embedded DrawingML picture in an otherwise
+empty body, header, or footer paragraph. Placement may be inline or one conservative
+floating offset anchor with square text wrapping. A body occurrence lives in
 `content`; a reusable story occurrence lives in its `header_footers[].content`:
 
 ```json
@@ -52,6 +53,37 @@ otherwise empty body, header, or footer paragraph. A body occurrence lives in
 }
 ```
 
+A floating occurrence changes `placement` and adds explicit native layout evidence:
+
+```json
+{
+  "placement": "floating",
+  "floating": {
+    "horizontal": {
+      "relative_to": "column",
+      "offset": {"value": 36, "unit": "pt"}
+    },
+    "vertical": {
+      "relative_to": "paragraph",
+      "offset": {"value": 0.4, "unit": "pt"}
+    },
+    "wrap": {
+      "mode": "square",
+      "side": "both_sides",
+      "distance_top": {"value": 0, "unit": "pt"},
+      "distance_right": {"value": 4, "unit": "pt"},
+      "distance_bottom": {"value": 0, "unit": "pt"},
+      "distance_left": {"value": 4, "unit": "pt"}
+    },
+    "relative_height": 1026,
+    "behind_text": false,
+    "locked": false,
+    "layout_in_cell": true,
+    "allow_overlap": true
+  }
+}
+```
+
 `asset_id` is derived from the full lowercase SHA-256 digest. Repeated occurrences
 of identical bytes can therefore share one asset record while retaining separate,
 stable image node IDs and native paragraph references.
@@ -70,7 +102,7 @@ explicit while still exposing the small set of native mutations AiOffice can pro
 
 `capabilities()["assets"]["projected_story_scopes"]` reports
 `["document_body", "header_footer"]`. The header/footer contract independently
-reports `simple_inline_image`, the three safe operations, and
+reports `simple_native_image`, the three safe operations, and
 `occurrence_copy_on_write` replacement so an AI does not have to infer scope from
 examples. `aioffice schema --kind image-block` describes the body occurrence;
 `aioffice schema --kind header-footer-image-block` describes the story-scoped
@@ -82,7 +114,7 @@ An image becomes an `image` block only when all of these conditions hold:
 
 1. the paragraph contains only paragraph properties and runs;
 2. the runs contain only run properties and exactly one `w:drawing`;
-3. the drawing contains one `wp:inline`, not `wp:anchor`;
+3. the drawing contains one supported `wp:inline` or `wp:anchor`;
 4. `wp:extent` has positive `cx` and `cy` values;
 5. the graphic data contains one DrawingML picture;
 6. one `a:blip` uses `r:embed`, with no `r:link`;
@@ -93,6 +125,12 @@ An image becomes an `image` block only when all of these conditions hold:
    non-negative, non-overconstrained `a:srcRect`;
 10. the picture has no rotation, flip, visible outline, non-zero effect extent, or
     recognized visual effect.
+
+For `wp:anchor`, the proof additionally requires `simplePos="0"` with zero simple
+coordinates, one horizontal and vertical `wp:posOffset`, recognized `relativeFrom`
+values, four non-negative text distances, one `wp:wrapSquare` and recognized wrap
+side, bounded `relativeHeight`, and strict boolean values for `behindDoc`, `locked`,
+`layoutInCell`, and `allowOverlap`. Child order must match the native anchor schema.
 
 Microsoft's Open XML contracts distinguish
 [`wp:inline`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.inline?view=openxml-3.0.1)
@@ -106,6 +144,37 @@ package relationship; see Microsoft's
 
 AiOffice converts EMUs to points using 12,700 EMUs per point. It does not infer DPI,
 resample bytes, decode the bitmap, or guess missing dimensions.
+
+## Floating anchor evidence
+
+`FloatingImageLayout` is a normalized, AI-readable view of the supported native
+anchor. Horizontal and vertical positions deliberately keep both the reference frame
+and signed physical offset; an offset without its frame is not meaningful. Square
+wrapping keeps its side and all four distances from text. Native flags remain
+separate rather than being collapsed into a vague “floating” boolean.
+
+The accepted horizontal frames are `character`, `column`, `inside_margin`,
+`left_margin`, `margin`, `outside_margin`, `page`, and `right_margin`. The accepted
+vertical frames are `bottom_margin`, `inside_margin`, `line`, `margin`,
+`outside_margin`, `page`, `paragraph`, and `top_margin`. Every offset and distance
+has an explicit unit. `relative_height` preserves Word's unsigned relative stacking
+value; `behind_text` is kept independently because it materially changes the layer
+group.
+
+This model follows Wordprocessing Drawing's
+[`wp:anchor`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.anchor?view=openxml-3.0.1)
+container and its distinct position and wrap children. In dev34 the `floating`
+object is read-only evidence: AiOffice does not yet offer an operation that changes
+anchor position, wrapping, layer, or compatibility flags. Existing verified image
+operations may extract, resize, crop, change accessibility metadata, format the host
+paragraph, or replace the binary; native lowering proves that the complete anchor
+layout remains identical afterward.
+
+Alignment-based positioning, active simple positioning, `wrapNone`,
+`wrapTopAndBottom`, tight/through polygons, relative-size extensions, missing or
+unknown compatibility values, extra children, and mixed text plus drawing paragraphs
+stay opaque. This is a deliberate protocol boundary, not an indication that their
+native XML is discarded.
 
 ## Verified binary access
 
@@ -128,7 +197,8 @@ document.extract_image(
 3. rechecks the conservative DrawingML shape;
 4. resolves the embedded relationship from the correct source part;
 5. confirms the image target and OPC media type;
-6. compares native identity, asset ID, declared size, and SHA-256;
+6. compares native identity, asset ID, placement, floating layout, displayed extent,
+   crop, accessibility metadata, declared size, and SHA-256;
 7. hashes the returned bytes again.
 
 Any stale, forged, missing, external, or structurally changed reference fails closed.
@@ -146,7 +216,7 @@ filename, size, SHA-256, and output path as JSON.
 
 ## Selective native updates
 
-`image.update` changes only the supported inline picture's accessibility metadata,
+`image.update` changes only the supported native picture's accessibility metadata,
 displayed extent, and/or rectangular source crop:
 
 ```python
@@ -184,7 +254,8 @@ The operation accepts `width`, `height`, `crop`, `alt_text`, and `title` in `set
 Widths and heights must convert to a positive signed 64-bit EMU value. Setting one
 dimension preserves the current aspect ratio; setting both dimensions uses the exact
 requested size. AiOffice writes the final EMU values to both
-`wp:inline/wp:extent` and `pic:spPr/a:xfrm/a:ext`. The latter uses DrawingML's
+the active `wp:inline` or `wp:anchor` extent and `pic:spPr/a:xfrm/a:ext`. The latter
+uses DrawingML's
 [`PositiveSize2DType`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.positivesize2dtype?view=openxml-2.20.0);
 the former follows the Wordprocessing Drawing
 [`Extent`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.extent?view=openxml-3.0.1)
@@ -276,6 +347,12 @@ It does not alter `w:drawing`,
 part. Clearing a field removes only its supported direct native value so normal Word
 style inheritance can apply again. Unknown paragraph-property XML is retained.
 
+For a floating image whose position is relative to its host paragraph, changing that
+paragraph's spacing, indentation, or pagination can still move the rendered anchor
+indirectly according to Word's layout rules. The anchor XML and projected
+`FloatingImageLayout` remain unchanged; use native rendering to verify the resulting
+page composition.
+
 `text.format` remains invalid for an image because the conservative image paragraph
 has no model-editable text. Complex or opaque drawings do not gain this capability.
 Invalid styles, detached packages, stale identities, or non-paragraph native targets
@@ -347,11 +424,11 @@ unchanged. This is the intended copy-on-write workflow:
 3. call `replace_image()` for that ID in a subsequent transaction;
 4. reopen and render affected pages through the native provider.
 
-The image occurrence ID, displayed width/height, source crop, alternative text,
-title, paragraph formatting, and surrounding layout remain stable. The asset ID,
-media type, native filename, byte count, and SHA-256 change to describe the
-replacement. No decode, resample, recompression, automatic resizing, or orphan
-cleanup occurs.
+The image occurrence ID, placement, complete floating anchor layout, displayed
+width/height, source crop, alternative text, title, paragraph formatting, and
+surrounding layout remain stable. The asset ID, media type, native filename, byte
+count, and SHA-256 change to describe the replacement. No decode, resample,
+recompression, automatic resizing, or orphan cleanup occurs.
 
 The CLI uses the same binary channel and refuses output overwrite by default:
 
@@ -487,7 +564,8 @@ transaction while leaving the operation metadata explainable to an AI.
 These cases remain native and explicit `opaque`/read-only projections:
 
 - text plus a drawing in one paragraph;
-- floating or anchored drawings;
+- alignment-based, active-simple-position, non-square-wrap, relative-size,
+  malformed, or otherwise unsupported floating anchors;
 - multiple pictures or alternate representations;
 - linked or external images;
 - negative, overconstrained, malformed, or otherwise unsupported crop rectangles;
@@ -501,16 +579,16 @@ The boundary is intentionally based on what the semantic layer can prove, not wh
 can approximately display. Unrelated edits preserve every original package part and
 unknown XML. Deleting a top-level body image deletes its mapped paragraph only;
 header/footer image deletion, orphan cleanup, insertion outside the proven top-level
-body subset, and replacement outside the proven inline subset are not claimed in this
-release.
+body subset, and replacement outside the proven inline-or-conservative-floating
+subset are not claimed in this release.
 
 ## Preview and visual authority
 
 Semantic HTML emits an accessible, dimensioned placeholder with the asset ID, media
-type, and normalized crop evidence. Markdown emits an `aioffice-asset:` reference.
-Neither exporter embeds binary data or claims to reproduce the native crop or
-picture.
+type, placement, and normalized crop evidence. Markdown emits an `aioffice-asset:`
+reference. Neither exporter embeds binary data or claims to reproduce native
+floating placement, wrapping, crop, or picture content.
 
 Use the native LibreOffice PDF/PNG provider to judge the actual picture, cropping,
 position, pagination, and surrounding layout. Native rendering remains the visual
-authority even for the supported inline subset.
+authority even for the supported inline and floating subsets.

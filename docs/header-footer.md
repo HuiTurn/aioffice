@@ -147,10 +147,11 @@ PAGE, NUMPAGES, SECTION, and SECTIONPAGES fields are projected as structured inl
 objects. Their cached display result is kept separate from the semantic instruction
 and never treated as authoritative text. Unknown field instructions are visible as
 read-only native fields. A paragraph containing exactly one conservative embedded
-inline DrawingML picture is projected as a stable `ImageBlock`: its bytes can be
-verified or extracted, and its accessibility metadata, extent, bounded rectangular
-source crop, paragraph layout, or binary can be changed through the same native
-image APIs as a body picture.
+inline picture or offset-positioned, square-wrapped floating picture is projected as
+a stable `ImageBlock`: its bytes can be verified or extracted, and its accessibility
+metadata, extent, bounded rectangular source crop, paragraph layout, or binary can
+be changed through the same native image APIs as a body picture. Floating anchor
+layout is explicit read-only evidence and remains native-authoritative.
 
 Image replacement is occurrence-scoped copy-on-write and allocates the new
 relationship in the containing header/footer part. This makes the expert workflow
@@ -167,10 +168,10 @@ header/footer elements remain non-editable opaque blocks.
 
 Semantic creation currently supports ordinary paragraph blocks, including rich
 text, hyperlinks, and normalized dynamic fields. Native cloning can preserve
-supported drawings and images; simple inline images become editable native
-occurrences after import. Direct image insertion/deletion within a reusable story,
-tables, deleting parts, and direct editing of opaque region content remain planned
-behind explicit capabilities.
+supported drawings and images; supported inline and conservative floating images
+become addressable native occurrences after import. Direct image
+insertion/deletion within a reusable story, tables, deleting parts, and direct
+editing of opaque region content remain planned behind explicit capabilities.
 See [the dynamic field contract](dynamic-fields.md).
 
 ## Preview boundary

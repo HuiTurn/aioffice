@@ -41,6 +41,14 @@ crop on the clone. The crop changes only the cloned story's `a:srcRect`; its
 relationship and shared source media remain unchanged, and the source story stays
 byte-exact.
 
+In `0.2.0.dev34`, the same clone workflow projects the conservative floating
+offset-and-square-wrap subset. The cloned occurrence receives its own image ID while
+retaining identical anchor reference frames, offsets, wrap distances, relative
+height, and compatibility flags. Its `wp14:anchorId` and `wp14:editId` identities
+are collision-safely rebased along with the existing DrawingML IDs. Subsequent crop,
+resize, metadata, paragraph, or binary edits re-prove that layout rather than
+reconstructing it.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:
@@ -77,7 +85,8 @@ For each clone, AiOffice:
 2. allocates a collision-free `/word/headerN.xml` or `/word/footerN.xml`;
 3. deep-copies the complete supported native story;
 4. assigns new `w14:paraId` values to every paragraph;
-5. assigns collision-free IDs to `wp:docPr`, `a:cNvPr`, and `pic:cNvPr`;
+5. assigns collision-free IDs to `wp:docPr`, `a:cNvPr`, `pic:cNvPr`, and present
+   `wp14:anchorId` / `wp14:editId` identities;
 6. copies the source part-local `.rels` payload exactly;
 7. keeps each local relationship target unchanged, so images and other package
    resources are shared rather than duplicated;

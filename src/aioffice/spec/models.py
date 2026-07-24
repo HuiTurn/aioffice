@@ -17,7 +17,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.33"
+SPEC_VERSION = "0.2-draft.34"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1038,16 +1038,108 @@ class ImageCrop(StrictModel):
         return self
 
 
+class FloatingImageHorizontalPosition(StrictModel):
+    """Horizontal position of a floating image relative to a Word layout frame."""
+
+    relative_to: Literal[
+        "character",
+        "column",
+        "inside_margin",
+        "left_margin",
+        "margin",
+        "outside_margin",
+        "page",
+        "right_margin",
+    ]
+    offset: Length
+
+    @model_validator(mode="after")
+    def validate_offset(self) -> "FloatingImageHorizontalPosition":
+        emu = round(self.offset.to_points() * 12_700)
+        if emu < -(2**63) or emu > 2**63 - 1:
+            raise ValueError(
+                "Floating image horizontal offset must fit an OOXML Int64 EMU."
+            )
+        return self
+
+
+class FloatingImageVerticalPosition(StrictModel):
+    """Vertical position of a floating image relative to a Word layout frame."""
+
+    relative_to: Literal[
+        "bottom_margin",
+        "inside_margin",
+        "line",
+        "margin",
+        "outside_margin",
+        "page",
+        "paragraph",
+        "top_margin",
+    ]
+    offset: Length
+
+    @model_validator(mode="after")
+    def validate_offset(self) -> "FloatingImageVerticalPosition":
+        emu = round(self.offset.to_points() * 12_700)
+        if emu < -(2**63) or emu > 2**63 - 1:
+            raise ValueError(
+                "Floating image vertical offset must fit an OOXML Int64 EMU."
+            )
+        return self
+
+
+class FloatingImageTextWrap(StrictModel):
+    """Conservative rectangular text wrapping around a floating image."""
+
+    mode: Literal["square"] = "square"
+    side: Literal["both_sides", "largest", "left", "right"]
+    distance_top: Length
+    distance_right: Length
+    distance_bottom: Length
+    distance_left: Length
+
+    @model_validator(mode="after")
+    def validate_distances(self) -> "FloatingImageTextWrap":
+        for field_name in (
+            "distance_top",
+            "distance_right",
+            "distance_bottom",
+            "distance_left",
+        ):
+            value = getattr(self, field_name)
+            emu = round(value.to_points() * 12_700)
+            if emu < 0 or emu > 2**32 - 1:
+                raise ValueError(
+                    f"Floating image {field_name} must fit a non-negative "
+                    "OOXML UInt32 EMU."
+                )
+        return self
+
+
+class FloatingImageLayout(StrictModel):
+    """Read-only, lossless evidence for one conservative Word floating anchor."""
+
+    horizontal: FloatingImageHorizontalPosition
+    vertical: FloatingImageVerticalPosition
+    wrap: FloatingImageTextWrap
+    relative_height: int = Field(ge=0, le=2**32 - 1)
+    behind_text: bool
+    locked: bool
+    layout_in_cell: bool
+    allow_overlap: bool
+
+
 class ImageBlock(NodeBase):
     """One AI-addressable image occurrence backed by a native binary asset."""
 
     id: NodeId = Field(default_factory=lambda: new_id("image"))
     type: Literal["image"] = "image"
     asset_id: NodeId
-    placement: Literal["inline"] = "inline"
+    placement: Literal["inline", "floating"] = "inline"
     width: Length
     height: Length
     crop: ImageCrop | None = None
+    floating: FloatingImageLayout | None = None
     name: str | None = None
     alt_text: str | None = None
     title: str | None = None
@@ -1069,6 +1161,11 @@ class ImageBlock(NodeBase):
     def validate_size(self) -> "ImageBlock":
         if self.width.to_points() <= 0 or self.height.to_points() <= 0:
             raise ValueError("Image width and height must be greater than zero.")
+        if (self.placement == "floating") != (self.floating is not None):
+            raise ValueError(
+                "Floating image placement requires floating layout evidence, "
+                "and inline placement forbids it."
+            )
         if self.capabilities != [
             "inspect",
             "extract",
@@ -1108,6 +1205,11 @@ class HeaderFooterImageBlock(ImageBlock):
     def validate_size(self) -> "HeaderFooterImageBlock":
         if self.width.to_points() <= 0 or self.height.to_points() <= 0:
             raise ValueError("Image width and height must be greater than zero.")
+        if (self.placement == "floating") != (self.floating is not None):
+            raise ValueError(
+                "Floating image placement requires floating layout evidence, "
+                "and inline placement forbids it."
+            )
         if self.capabilities != [
             "inspect",
             "extract",
@@ -1277,6 +1379,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.31",
         "0.2-draft.32",
         "0.2-draft.33",
+        "0.2-draft.34",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

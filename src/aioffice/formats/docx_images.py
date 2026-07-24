@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import posixpath
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import Literal, TypeAlias, cast
 from xml.etree import ElementTree as ET
 
 from aioffice.core.errors import NativePackageError
@@ -15,6 +17,10 @@ from aioffice.native import NativePackage
 from aioffice.native.xml import parse_xml, serialize_xml
 from aioffice.spec.models import (
     AssetRef,
+    FloatingImageHorizontalPosition,
+    FloatingImageLayout,
+    FloatingImageTextWrap,
+    FloatingImageVerticalPosition,
     ImageBlock,
     ImageCrop,
     ImageInsert,
@@ -30,6 +36,7 @@ PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+WP14 = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
 _REPLACEMENT_EXTENSIONS = {
     "image/png": "png",
     "image/jpeg": "jpg",
@@ -90,7 +97,7 @@ def _enabled(value: str | None) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
-class SimpleInlineImage:
+class SimpleNativeImage:
     """Trusted metadata for the deliberately small image projection subset."""
 
     relationship_id: str
@@ -102,6 +109,8 @@ class SimpleInlineImage:
     width: Length
     height: Length
     crop: ImageCrop | None
+    placement: Literal["inline", "floating"]
+    floating: FloatingImageLayout | None
     name: str | None
     alt_text: str | None
     title: str | None
@@ -112,13 +121,274 @@ class SimpleInlineImage:
         return f"asset_{self.sha256.lower()}"
 
 
-def simple_inline_image(
+HorizontalRelativeTo: TypeAlias = Literal[
+    "character",
+    "column",
+    "inside_margin",
+    "left_margin",
+    "margin",
+    "outside_margin",
+    "page",
+    "right_margin",
+]
+VerticalRelativeTo: TypeAlias = Literal[
+    "bottom_margin",
+    "inside_margin",
+    "line",
+    "margin",
+    "outside_margin",
+    "page",
+    "paragraph",
+    "top_margin",
+]
+WrapSide: TypeAlias = Literal["both_sides", "largest", "left", "right"]
+
+_HORIZONTAL_RELATIVE_FROM: dict[str, HorizontalRelativeTo] = {
+    "character": "character",
+    "column": "column",
+    "insideMargin": "inside_margin",
+    "leftMargin": "left_margin",
+    "margin": "margin",
+    "outsideMargin": "outside_margin",
+    "page": "page",
+    "rightMargin": "right_margin",
+}
+_VERTICAL_RELATIVE_FROM: dict[str, VerticalRelativeTo] = {
+    "bottomMargin": "bottom_margin",
+    "insideMargin": "inside_margin",
+    "line": "line",
+    "margin": "margin",
+    "outsideMargin": "outside_margin",
+    "page": "page",
+    "paragraph": "paragraph",
+    "topMargin": "top_margin",
+}
+_WRAP_SIDES: dict[str, WrapSide] = {
+    "bothSides": "both_sides",
+    "largest": "largest",
+    "left": "left",
+    "right": "right",
+}
+
+
+def _strict_boolean(value: str | None) -> bool | None:
+    if value in {"1", "true"}:
+        return True
+    if value in {"0", "false"}:
+        return False
+    return None
+
+
+def _emu_length(value: int) -> Length:
+    return Length(
+        value=round(value / EMU_PER_POINT, 6),
+        unit="pt",
+    )
+
+
+def _floating_image_layout(
+    anchor: ET.Element,
+) -> FloatingImageLayout | None:
+    allowed_attributes = {
+        "distT",
+        "distB",
+        "distL",
+        "distR",
+        "simplePos",
+        "relativeHeight",
+        "behindDoc",
+        "locked",
+        "layoutInCell",
+        "allowOverlap",
+        _q(WP14, "anchorId"),
+        _q(WP14, "editId"),
+    }
+    required_attributes = {
+        "distT",
+        "distB",
+        "distL",
+        "distR",
+        "simplePos",
+        "relativeHeight",
+        "behindDoc",
+        "locked",
+        "layoutInCell",
+        "allowOverlap",
+    }
+    if (
+        any(attribute not in allowed_attributes for attribute in anchor.attrib)
+        or not required_attributes.issubset(anchor.attrib)
+    ):
+        return None
+    for identity_attribute in (
+        _q(WP14, "anchorId"),
+        _q(WP14, "editId"),
+    ):
+        identity = anchor.get(identity_attribute)
+        if identity is None:
+            continue
+        try:
+            int(identity, 16)
+        except ValueError:
+            return None
+        if len(identity) != 8 or not identity.isascii():
+            return None
+
+    simple_position = anchor.find(f"./{_q(WP, 'simplePos')}")
+    horizontal = anchor.find(f"./{_q(WP, 'positionH')}")
+    vertical = anchor.find(f"./{_q(WP, 'positionV')}")
+    wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
+    if (
+        simple_position is None
+        or horizontal is None
+        or vertical is None
+        or wrap is None
+    ):
+        return None
+    optional_effect_extent = anchor.find(f"./{_q(WP, 'effectExtent')}")
+    optional_frame_properties = anchor.find(
+        f"./{_q(WP, 'cNvGraphicFramePr')}"
+    )
+    expected_children = [
+        _q(WP, "simplePos"),
+        _q(WP, "positionH"),
+        _q(WP, "positionV"),
+        _q(WP, "extent"),
+        *(
+            [_q(WP, "effectExtent")]
+            if optional_effect_extent is not None
+            else []
+        ),
+        _q(WP, "wrapSquare"),
+        _q(WP, "docPr"),
+        *(
+            [_q(WP, "cNvGraphicFramePr")]
+            if optional_frame_properties is not None
+            else []
+        ),
+        _q(A, "graphic"),
+    ]
+    if [child.tag for child in anchor] != expected_children:
+        return None
+
+    if (
+        _strict_boolean(anchor.attrib.get("simplePos")) is not False
+        or len(simple_position)
+        or set(simple_position.attrib) != {"x", "y"}
+    ):
+        return None
+    try:
+        simple_x = int(simple_position.attrib["x"])
+        simple_y = int(simple_position.attrib["y"])
+    except ValueError:
+        return None
+    if simple_x != 0 or simple_y != 0:
+        return None
+
+    def position(
+        element: ET.Element,
+        relative_values: Mapping[str, str],
+    ) -> tuple[str, Length] | None:
+        if set(element.attrib) != {"relativeFrom"}:
+            return None
+        relative_to = relative_values.get(element.attrib["relativeFrom"])
+        children = list(element)
+        if (
+            relative_to is None
+            or len(children) != 1
+            or children[0].tag != _q(WP, "posOffset")
+            or children[0].attrib
+            or len(children[0])
+        ):
+            return None
+        try:
+            offset = int(children[0].text or "")
+        except ValueError:
+            return None
+        if offset < -(2**63) or offset > 2**63 - 1:
+            return None
+        return relative_to, _emu_length(offset)
+
+    horizontal_position = position(horizontal, _HORIZONTAL_RELATIVE_FROM)
+    vertical_position = position(vertical, _VERTICAL_RELATIVE_FROM)
+    if horizontal_position is None or vertical_position is None:
+        return None
+
+    if set(wrap.attrib) != {"wrapText"} or len(wrap):
+        return None
+    wrap_side = _WRAP_SIDES.get(wrap.attrib["wrapText"])
+    if wrap_side is None:
+        return None
+
+    try:
+        distances = {
+            edge: int(anchor.attrib[attribute])
+            for edge, attribute in (
+                ("top", "distT"),
+                ("right", "distR"),
+                ("bottom", "distB"),
+                ("left", "distL"),
+            )
+        }
+        relative_height = int(anchor.attrib["relativeHeight"])
+    except ValueError:
+        return None
+    if (
+        any(value < 0 or value > 2**32 - 1 for value in distances.values())
+        or relative_height < 0
+        or relative_height > 2**32 - 1
+    ):
+        return None
+
+    booleans = {
+        field_name: _strict_boolean(anchor.attrib[attribute])
+        for field_name, attribute in (
+            ("behind_text", "behindDoc"),
+            ("locked", "locked"),
+            ("layout_in_cell", "layoutInCell"),
+            ("allow_overlap", "allowOverlap"),
+        )
+    }
+    if any(value is None for value in booleans.values()):
+        return None
+
+    return FloatingImageLayout(
+        horizontal=FloatingImageHorizontalPosition(
+            relative_to=cast(
+                HorizontalRelativeTo,
+                horizontal_position[0],
+            ),
+            offset=horizontal_position[1],
+        ),
+        vertical=FloatingImageVerticalPosition(
+            relative_to=cast(
+                VerticalRelativeTo,
+                vertical_position[0],
+            ),
+            offset=vertical_position[1],
+        ),
+        wrap=FloatingImageTextWrap(
+            side=cast(WrapSide, wrap_side),
+            distance_top=_emu_length(distances["top"]),
+            distance_right=_emu_length(distances["right"]),
+            distance_bottom=_emu_length(distances["bottom"]),
+            distance_left=_emu_length(distances["left"]),
+        ),
+        relative_height=relative_height,
+        behind_text=bool(booleans["behind_text"]),
+        locked=bool(booleans["locked"]),
+        layout_in_cell=bool(booleans["layout_in_cell"]),
+        allow_overlap=bool(booleans["allow_overlap"]),
+    )
+
+
+def simple_native_image(
     package: NativePackage,
     paragraph: ET.Element,
     *,
     source_part: str,
-) -> SimpleInlineImage | None:
-    """Return metadata only for one unambiguous, embedded inline picture.
+) -> SimpleNativeImage | None:
+    """Return metadata only for one unambiguous embedded native picture.
 
     Anything that could conceal additional visible content or materially alter
     the picture geometry remains opaque. The original package is never changed.
@@ -138,40 +408,63 @@ def simple_inline_image(
         return None
 
     drawing = drawings[0]
-    if list(child.tag for child in drawing) != [_q(WP, "inline")]:
+    if len(drawing) != 1:
         return None
-    inline = drawing[0]
-    if any(
-        attribute not in {"distT", "distB", "distL", "distR"}
-        for attribute in inline.attrib
-    ):
-        return None
-    allowed_inline_children = {
-        _q(WP, "extent"),
-        _q(WP, "effectExtent"),
-        _q(WP, "docPr"),
-        _q(WP, "cNvGraphicFramePr"),
-        _q(A, "graphic"),
-    }
-    if any(
-        child.tag not in allowed_inline_children
-        for child in inline
-    ):
+    drawing_container = drawing[0]
+    placement: Literal["inline", "floating"]
+    floating: FloatingImageLayout | None
+    if drawing_container.tag == _q(WP, "inline"):
+        placement = "inline"
+        floating = None
+        if any(
+            attribute not in {"distT", "distB", "distL", "distR"}
+            for attribute in drawing_container.attrib
+        ):
+            return None
+        allowed_inline_children = {
+            _q(WP, "extent"),
+            _q(WP, "effectExtent"),
+            _q(WP, "docPr"),
+            _q(WP, "cNvGraphicFramePr"),
+            _q(A, "graphic"),
+        }
+        if any(
+            child.tag not in allowed_inline_children
+            for child in drawing_container
+        ):
+            return None
+    elif drawing_container.tag == _q(WP, "anchor"):
+        placement = "floating"
+        floating = _floating_image_layout(drawing_container)
+        if floating is None:
+            return None
+    else:
         return None
 
-    extent = inline.find(f"./{_q(WP, 'extent')}")
-    document_properties = inline.find(f"./{_q(WP, 'docPr')}")
-    graphic = inline.find(f"./{_q(A, 'graphic')}")
+    extent = drawing_container.find(f"./{_q(WP, 'extent')}")
+    document_properties = drawing_container.find(f"./{_q(WP, 'docPr')}")
+    graphic = drawing_container.find(f"./{_q(A, 'graphic')}")
     if (
         extent is None
         or document_properties is None
         or graphic is None
-        or len(inline.findall(f"./{_q(WP, 'extent')}")) != 1
-        or len(inline.findall(f"./{_q(WP, 'docPr')}")) != 1
-        or len(inline.findall(f"./{_q(A, 'graphic')}")) != 1
-        or len(inline.findall(f"./{_q(WP, 'effectExtent')}")) > 1
         or len(
-            inline.findall(f"./{_q(WP, 'cNvGraphicFramePr')}")
+            drawing_container.findall(f"./{_q(WP, 'extent')}")
+        )
+        != 1
+        or len(
+            drawing_container.findall(f"./{_q(WP, 'docPr')}")
+        )
+        != 1
+        or len(drawing_container.findall(f"./{_q(A, 'graphic')}")) != 1
+        or len(
+            drawing_container.findall(f"./{_q(WP, 'effectExtent')}")
+        )
+        > 1
+        or len(
+            drawing_container.findall(
+                f"./{_q(WP, 'cNvGraphicFramePr')}"
+            )
         )
         > 1
     ):
@@ -186,7 +479,9 @@ def simple_inline_image(
     if width_emu <= 0 or height_emu <= 0:
         return None
 
-    effect_extent = inline.find(f"./{_q(WP, 'effectExtent')}")
+    effect_extent = drawing_container.find(
+        f"./{_q(WP, 'effectExtent')}"
+    )
     if effect_extent is not None:
         try:
             effect_values = [
@@ -389,7 +684,7 @@ def simple_inline_image(
         value = document_properties.attrib.get(name)
         return value if value else None
 
-    return SimpleInlineImage(
+    return SimpleNativeImage(
         relationship_id=relationship_id,
         part_uri=part_uri,
         media_type=part.content_type,
@@ -405,6 +700,8 @@ def simple_inline_image(
             unit="pt",
         ),
         crop=crop,
+        placement=placement,
+        floating=floating,
         name=optional_attribute("name"),
         alt_text=optional_attribute("descr"),
         title=optional_attribute("title"),
@@ -412,10 +709,10 @@ def simple_inline_image(
     )
 
 
-def simple_inline_image_from_ref(
+def simple_native_image_from_ref(
     package: NativePackage,
     source_ref: NativeRef,
-) -> SimpleInlineImage:
+) -> SimpleNativeImage:
     """Resolve and re-verify one image through its trusted native paragraph."""
 
     if (
@@ -449,7 +746,7 @@ def simple_inline_image_from_ref(
             "Image source reference points outside its DOCX container."
         )
     paragraph = elements[source_ref.element_index]
-    image = simple_inline_image(
+    image = simple_native_image(
         package,
         paragraph,
         source_part=source_ref.part_uri,
@@ -461,7 +758,7 @@ def simple_inline_image_from_ref(
     return image
 
 
-def patch_simple_inline_image(
+def patch_simple_native_image(
     package: NativePackage,
     paragraph: ET.Element,
     *,
@@ -469,24 +766,28 @@ def patch_simple_inline_image(
     result: ImageBlock,
     fields: set[str],
 ) -> None:
-    """Selectively update one already-proven inline image occurrence."""
+    """Selectively update one already-proven native image occurrence."""
 
-    if simple_inline_image(
+    original = simple_native_image(
         package,
         paragraph,
         source_part=source_part,
-    ) is None:
-        raise NativePackageError(
-            "image.update requires one supported native inline picture."
-        )
-    inline = paragraph.find(
-        f"./{_q(W, 'r')}/{_q(W, 'drawing')}/{_q(WP, 'inline')}"
     )
-    if inline is None:
+    if original is None:
         raise NativePackageError(
-            "Supported native image has no wp:inline element."
+            "image.update requires one supported native picture."
         )
-    document_properties = inline.find(f"./{_q(WP, 'docPr')}")
+    drawing_container = paragraph.find(
+        f"./{_q(W, 'r')}/{_q(W, 'drawing')}/*"
+    )
+    if drawing_container is None or drawing_container.tag not in {
+        _q(WP, "inline"),
+        _q(WP, "anchor"),
+    }:
+        raise NativePackageError(
+            "Supported native image has no DrawingML placement container."
+        )
+    document_properties = drawing_container.find(f"./{_q(WP, 'docPr')}")
     if document_properties is None:
         raise NativePackageError(
             "Supported native image has no wp:docPr element."
@@ -504,8 +805,8 @@ def patch_simple_inline_image(
             raise NativePackageError(
                 "image.update dimensions do not fit positive OOXML Int64 EMUs."
             )
-        outer_extent = inline.find(f"./{_q(WP, 'extent')}")
-        inner_extent = inline.find(
+        outer_extent = drawing_container.find(f"./{_q(WP, 'extent')}")
+        inner_extent = drawing_container.find(
             f"./{_q(A, 'graphic')}/{_q(A, 'graphicData')}/"
             f"{_q(PIC, 'pic')}/{_q(PIC, 'spPr')}/"
             f"{_q(A, 'xfrm')}/{_q(A, 'ext')}"
@@ -531,7 +832,7 @@ def patch_simple_inline_image(
             document_properties.set(attribute_name, value)
 
     if "crop" in fields:
-        blip_fill = inline.find(
+        blip_fill = drawing_container.find(
             f"./{_q(A, 'graphic')}/{_q(A, 'graphicData')}/"
             f"{_q(PIC, 'pic')}/{_q(PIC, 'blipFill')}"
         )
@@ -576,12 +877,17 @@ def patch_simple_inline_image(
                 if value:
                     source_rectangle.set(attribute_name, str(value))
 
-    verified = simple_inline_image(
+    verified = simple_native_image(
         package,
         paragraph,
         source_part=source_part,
     )
-    if verified is None or verified.crop != result.crop:
+    if (
+        verified is None
+        or verified.crop != result.crop
+        or verified.placement != original.placement
+        or verified.floating != original.floating
+    ):
         raise NativePackageError(
             "image.update would leave the picture outside the supported subset."
         )
@@ -724,7 +1030,7 @@ def _attach_image_asset(
     return relationship_id, media_part_uri
 
 
-def replace_simple_inline_image(
+def replace_simple_native_image(
     package: NativePackage,
     paragraph: ET.Element,
     *,
@@ -734,14 +1040,14 @@ def replace_simple_inline_image(
 ) -> None:
     """Replace one image occurrence through a new part and relationship."""
 
-    original = simple_inline_image(
+    original = simple_native_image(
         package,
         paragraph,
         source_part=source_part,
     )
     if original is None:
         raise NativePackageError(
-            "image.replace requires one supported native inline picture."
+            "image.replace requires one supported native picture."
         )
     relationship_id, media_part_uri = _attach_image_asset(
         package,
@@ -757,7 +1063,7 @@ def replace_simple_inline_image(
         )
     blips[0].set(_q(R, "embed"), relationship_id)
 
-    replaced = simple_inline_image(
+    replaced = simple_native_image(
         package,
         paragraph,
         source_part=source_part,
@@ -770,6 +1076,8 @@ def replace_simple_inline_image(
         or replaced.sha256 != asset.sha256
         or replaced.size_bytes != asset.size_bytes
         or replaced.crop != original.crop
+        or replaced.placement != original.placement
+        or replaced.floating != original.floating
     ):
         raise NativePackageError(
             "image.replace would leave the picture outside the supported subset."
@@ -961,7 +1269,7 @@ def insert_simple_inline_image_after(
         for element in after_elements
     ) + 1
     container.insert(insert_index, paragraph)
-    projected = simple_inline_image(
+    projected = simple_native_image(
         package,
         paragraph,
         source_part=source_part,
@@ -985,10 +1293,10 @@ def insert_simple_inline_image_after(
 __all__ = [
     "EMU_PER_POINT",
     "IMAGE_RELATIONSHIP_TYPE",
-    "SimpleInlineImage",
+    "SimpleNativeImage",
     "insert_simple_inline_image_after",
-    "patch_simple_inline_image",
-    "replace_simple_inline_image",
-    "simple_inline_image",
-    "simple_inline_image_from_ref",
+    "patch_simple_native_image",
+    "replace_simple_native_image",
+    "simple_native_image",
+    "simple_native_image_from_ref",
 ]

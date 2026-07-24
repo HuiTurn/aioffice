@@ -21,7 +21,7 @@ from aioffice.core.errors import (
     UnsupportedFormatError,
 )
 from aioffice.formats.docx import compile_docx, export_docx
-from aioffice.formats.docx_images import simple_inline_image_from_ref
+from aioffice.formats.docx_images import simple_native_image_from_ref
 from aioffice.formats.docx_import import import_docx
 from aioffice.formats.docx_native import apply_docx_operations
 from aioffice.formats.html import export_html
@@ -337,7 +337,7 @@ class Document:
             raise NativePackageError(
                 f"Image {image.id!r} has no trusted native source reference."
             )
-        native_image = simple_inline_image_from_ref(
+        native_image = simple_native_image_from_ref(
             self._native,
             image.source_ref,
         )
@@ -355,6 +355,16 @@ class Document:
             image.asset_id != native_image.asset_id
             or asset.sha256 != native_image.sha256
             or asset.media_type != native_image.media_type
+            or image.placement != native_image.placement
+            or image.floating != native_image.floating
+            or image.crop != native_image.crop
+            or round(image.width.to_points() * 12_700)
+            != round(native_image.width.to_points() * 12_700)
+            or round(image.height.to_points() * 12_700)
+            != round(native_image.height.to_points() * 12_700)
+            or image.name != native_image.name
+            or image.alt_text != native_image.alt_text
+            or image.title != native_image.title
             or (
                 asset.size_bytes is not None
                 and asset.size_bytes != native_image.size_bytes
@@ -753,6 +763,11 @@ class Document:
                             if node.crop is not None
                             else None
                         ),
+                        floating=(
+                            node.floating.model_dump(mode="json")
+                            if node.floating is not None
+                            else None
+                        ),
                         name=node.name,
                         alt_text=node.alt_text,
                         title=node.title,
@@ -881,6 +896,14 @@ class Document:
                                                 mode="json"
                                             )
                                             if block.crop is not None
+                                            else None
+                                        ),
+                                        "placement": block.placement,
+                                        "floating": (
+                                            block.floating.model_dump(
+                                                mode="json"
+                                            )
+                                            if block.floating is not None
                                             else None
                                         ),
                                         "name": block.name,
@@ -1144,10 +1167,16 @@ class Document:
                 "single_dimension_resize": "preserve_aspect_ratio",
                 "two_dimension_resize": "exact",
                 "native_geometry_patch": [
-                    "wp:inline/wp:extent",
+                    "wp:inline|wp:anchor/wp:extent",
                     "pic:spPr/a:xfrm/a:ext",
                     "pic:blipFill/a:srcRect",
                 ],
+                "projected_placements": [
+                    "inline",
+                    "floating_offset_square_wrap",
+                ],
+                "floating_layout_editable": False,
+                "floating_layout_authority": "native_docx_and_render",
                 "crop_unit": "percentage_points",
                 "crop_precision": 0.001,
                 "crop_visible_area_required": True,
@@ -1169,6 +1198,7 @@ class Document:
                     "image_occurrence_id",
                     "display_extent",
                     "source_crop",
+                    "native_placement_and_anchor_layout",
                     "alternative_text",
                     "title",
                     "unrelated_occurrences",
@@ -1202,7 +1232,10 @@ class Document:
                 ),
                 "supported_native_subset": [
                     "one embedded DrawingML picture",
-                    "inline placement",
+                    (
+                        "inline placement or conservative floating offset "
+                        "placement with square text wrap"
+                    ),
                     "explicit positive extent",
                     "rectangular stretch fill",
                     (
@@ -1216,7 +1249,10 @@ class Document:
                     ),
                 ],
                 "opaque_native_cases": [
-                    "floating or anchored drawing",
+                    (
+                        "floating alignment, simple-position, non-square wrap, "
+                        "relative-size, or malformed anchor"
+                    ),
                     "text and drawing in one paragraph",
                     "multiple pictures",
                     "linked or external image",
@@ -1330,7 +1366,7 @@ class Document:
                     "missing_binding": "inherit_previous_section",
                     "editable_blocks": [
                         "paragraph",
-                        "simple_inline_image",
+                        "simple_native_image",
                     ],
                     "image_operations": [
                         "image.update",

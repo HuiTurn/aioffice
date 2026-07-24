@@ -67,6 +67,18 @@
 - Kept crop edits story-local for body and header/footer images, preserved crop
   through occurrence-scoped binary replacement and native part cloning, and retained
   image bytes and OPC relationships byte-for-byte.
+- Projected conservative `wp:anchor` pictures with explicit offset positioning and
+  square text wrapping as stable image occurrences in body, header, and footer
+  stories instead of treating every floating picture as opaque.
+- Added strict AI-readable floating layout evidence for horizontal and vertical
+  reference frames and offsets, wrap side and text distances, relative height,
+  behind-text, locked, layout-in-cell, and overlap behavior.
+- Extended verified extraction, resizing, crop, accessibility metadata,
+  paragraph-layout, copy-on-write replacement, native cloning, compact inspection,
+  HTML evidence, and integrity rechecks to the supported floating subset while
+  preserving the complete anchor layout.
+- Rebased present Office 2010 `wp14:anchorId` and `wp14:editId` identities while
+  cloning floating header/footer stories, preventing cross-story identity reuse.
 - Preserved story-local relationship semantics while replacing a cloned header or
   footer logo copy-on-write, leaving the source story, relationship, media, body, and
   unrelated pages untouched.
@@ -419,6 +431,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.31`.
 - Advanced the AiOffice Document Spec to `0.2-draft.32`.
 - Advanced the AiOffice Document Spec to `0.2-draft.33`.
+- Advanced the AiOffice Document Spec to `0.2-draft.34`.
 
 ## 0.1.0
 

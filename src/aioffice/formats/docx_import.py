@@ -36,7 +36,7 @@ from aioffice.formats.docx_fields import (
     field_payload,
     parse_paragraph_fields,
 )
-from aioffice.formats.docx_images import simple_inline_image
+from aioffice.formats.docx_images import simple_native_image
 from aioffice.formats.docx_section import (
     native_ref_for_section,
     read_section_layout,
@@ -384,7 +384,7 @@ def _paragraph_projection(
     allow_heading: bool = True,
 ) -> dict[str, Any]:
     native_image = (
-        simple_inline_image(
+        simple_native_image(
             package,
             element,
             source_part=part_uri,
@@ -431,12 +431,17 @@ def _paragraph_projection(
             "id": _unique_id("image", para_id, index, seen_ids),
             "type": "image",
             "asset_id": native_image.asset_id,
-            "placement": "inline",
+            "placement": native_image.placement,
             "width": native_image.width.model_dump(mode="json"),
             "height": native_image.height.model_dump(mode="json"),
             "crop": (
                 native_image.crop.model_dump(mode="json")
                 if native_image.crop is not None
+                else None
+            ),
+            "floating": (
+                native_image.floating.model_dump(mode="json")
+                if native_image.floating is not None
                 else None
             ),
             "name": native_image.name,
@@ -457,7 +462,9 @@ def _paragraph_projection(
             ),
             "editable": False,
             "metadata": {
-                "projection": "native_inline_image_metadata",
+                "projection": (
+                    f"native_{native_image.placement}_image_metadata"
+                ),
                 "native_features": ["drawing"],
                 "native_relationship_id": native_image.relationship_id,
                 "native_part_uri": native_image.part_uri,

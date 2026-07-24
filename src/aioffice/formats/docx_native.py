@@ -56,9 +56,9 @@ from aioffice.formats.docx_fields import (
 )
 from aioffice.formats.docx_images import (
     insert_simple_inline_image_after,
-    patch_simple_inline_image,
-    replace_simple_inline_image,
-    simple_inline_image,
+    patch_simple_native_image,
+    replace_simple_native_image,
+    simple_native_image,
 )
 from aioffice.formats.docx_section import (
     native_ref_for_section,
@@ -113,6 +113,7 @@ from aioffice.spec.models import (
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+WP14 = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WP = (
     "http://schemas.openxmlformats.org/drawingml/2006/"
@@ -526,6 +527,34 @@ def _native_drawing_ids(
     return identifiers
 
 
+def _native_wp14_drawing_ids(
+    package: NativePackage,
+) -> set[str]:
+    identifiers: set[str] = set()
+    attributes = (
+        _q(WP14, "anchorId"),
+        _q(WP14, "editId"),
+    )
+    for part in package.parts:
+        if (
+            part.state == "deleted"
+            or not part.uri.casefold().endswith(".xml")
+            or not part.uri.startswith("/word/")
+        ):
+            continue
+        payload = package.get_part(part.uri)
+        if b"anchorId" not in payload and b"editId" not in payload:
+            continue
+        root = parse_xml(payload)
+        for anchor in root.iter(_q(WP, "anchor")):
+            identifiers.update(
+                value
+                for attribute in attributes
+                if (value := anchor.get(attribute)) is not None
+            )
+    return identifiers
+
+
 def _clone_native_story_signature(
     root: ET.Element,
 ) -> tuple[Any, ...]:
@@ -539,6 +568,13 @@ def _clone_native_story_signature(
         ignored_attributes = {
             _q(W14, "paraId"),
         }
+        if element.tag == _q(WP, "anchor"):
+            ignored_attributes.update(
+                {
+                    _q(WP14, "anchorId"),
+                    _q(WP14, "editId"),
+                }
+            )
         if element.tag in drawing_tags:
             ignored_attributes.add("id")
         return (
@@ -675,6 +711,22 @@ def _clone_header_footer_native_part(
         )
         element.set("id", str(identifier))
         reserved_drawing_ids.add(identifier)
+    for anchor_index, anchor in enumerate(
+        clone_root.iter(_q(WP, "anchor"))
+    ):
+        for identity_name in ("anchorId", "editId"):
+            attribute = _q(WP14, identity_name)
+            if anchor.get(attribute) is None:
+                continue
+            identifier = _fresh_native_paragraph_anchor(
+                reserved_paragraph_ids,
+                (
+                    f"{clone_part_id}:floating:{anchor_index}:"
+                    f"{identity_name}"
+                ),
+            )
+            anchor.set(attribute, identifier)
+            reserved_paragraph_ids.add(identifier)
     if (
         _clone_native_story_signature(source_root)
         != _clone_native_story_signature(clone_root)
@@ -2392,6 +2444,13 @@ def apply_docx_operations(
         )
         is not None
     )
+    if any(
+        operation.get("op") == "header_footer.clone"
+        for operation in operations
+    ):
+        reserved_native_paragraph_ids.update(
+            _native_wp14_drawing_ids(updated)
+        )
     reserved_native_drawing_ids = (
         _native_drawing_ids(updated)
         if any(
@@ -3599,7 +3658,7 @@ def apply_docx_operations(
             fields = set(operation.get("set", {})) | set(
                 operation.get("clear", [])
             )
-            patch_simple_inline_image(
+            patch_simple_native_image(
                 updated,
                 mapped_elements[0],
                 source_part=source_ref.part_uri,
@@ -3705,7 +3764,7 @@ def apply_docx_operations(
                 raise NativePackageError(
                     "image.replace result does not reference its replacement asset."
                 )
-            replace_simple_inline_image(
+            replace_simple_native_image(
                 updated,
                 mapped_elements[0],
                 source_part=source_ref.part_uri,
@@ -4360,7 +4419,7 @@ def apply_docx_operations(
                 for node in _images(spec)
             )
             original_image = (
-                simple_inline_image(
+                simple_native_image(
                     updated,
                     elements[0],
                     source_part=source_ref.part_uri,
@@ -4381,7 +4440,7 @@ def apply_docx_operations(
                     f"Could not lower paragraph.format values: {error}"
                 ) from error
             patch_paragraph_style(elements[0], style, fields)
-            if target_is_image and simple_inline_image(
+            if target_is_image and simple_native_image(
                 updated,
                 elements[0],
                 source_part=source_ref.part_uri,

@@ -386,6 +386,10 @@ def _image_crop_attributes(image: ImageBlock) -> str:
     )
 
 
+def _image_placement_attributes(image: ImageBlock) -> str:
+    return f' data-aioffice-placement="{image.placement}"'
+
+
 def _header_footer_html(
     spec: AiOfficeDocumentSpec,
     part: HeaderFooterPart | None,
@@ -465,6 +469,7 @@ def _header_footer_html(
                 f'{escape(block.asset_id, quote=True)}" '
                 f'data-aioffice-media-type="'
                 f'{escape(media_type, quote=True)}" '
+                f"{_image_placement_attributes(block)}"
                 f"{_image_crop_attributes(block)}"
                 f"{figure_style}>"
                 '<div class="native-image-placeholder" role="img" '
@@ -945,6 +950,7 @@ def export_html(
                 f'{escape(block.asset_id, quote=True)}" '
                 f'data-aioffice-media-type="'
                 f'{escape(media_type, quote=True)}"'
+                f"{_image_placement_attributes(block)}"
                 f"{_image_crop_attributes(block)}"
                 f"{_style_attribute(figure_css)}>"
             )
