@@ -239,6 +239,18 @@
 - Attached persistent identity manifests on the first text insertion into third-party
   DOCX packages, refreshed shifted content/field/section/table references, and exposed
   the operation through capabilities, CLI apply, and Workspace persistence.
+- Added symmetric native `node.insert_before` so AI callers can prepend content to
+  the document or place a new paragraph/heading before any complete mapped range,
+  including multi-paragraph list anchors.
+- Added ordered section-start state tracking across mixed insert and move operations.
+  Inserting before a later section's first semantic node now rebinds `section.start_at`
+  to the created node while proving it remains after the preceding native `w:sectPr`.
+- Allowed safe insertion before a text-bearing paragraph that carries `w:sectPr`
+  because the boundary remains after the unchanged anchor; insertion after that same
+  anchor remains fail-closed.
+- Added semantic/native cross-checks for section rebind evidence, sequential section
+  prepends, document-head insertion, exact preservation of existing multi-element
+  ranges, detached projections, CLI application, and Workspace persistence.
 - Changed mixed text/drawing paragraphs and complex image cases to explicit opaque
   projections so the semantic layer can no longer hide a picture inside an ordinary
   text node.
@@ -251,7 +263,7 @@
   namespaces for LibreOffice interoperability.
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
-- Advanced the AiOffice Document Spec to `0.2-draft.22`.
+- Advanced the AiOffice Document Spec to `0.2-draft.23`.
 
 ## 0.1.0
 

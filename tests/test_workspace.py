@@ -383,6 +383,12 @@ class WorkspaceTests(unittest.TestCase):
                 ],
             )
             self.assertIn(
+                "node.insert_before",
+                workspace.capabilities(document.id)[
+                    "patch_operations"
+                ],
+            )
+            self.assertIn(
                 "node.move_before",
                 workspace.capabilities(document.id)[
                     "patch_operations"
@@ -427,8 +433,8 @@ class WorkspaceTests(unittest.TestCase):
                 document.id,
                 [
                     {
-                        "op": "node.insert_after",
-                        "target": "#a",
+                        "op": "node.insert_before",
+                        "target": "#c",
                         "content": {
                             "id": "inserted",
                             "type": "paragraph",
@@ -445,7 +451,7 @@ class WorkspaceTests(unittest.TestCase):
                     node["id"]
                     for node in after_insert.to_spec()["content"]
                 ],
-                ["c", "a", "inserted"],
+                ["inserted", "c", "a"],
             )
 
 

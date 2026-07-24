@@ -1,6 +1,6 @@
 # Stable-ID structural editing
 
-AiOffice structural edits address semantic nodes, not array positions. The dev22
+AiOffice structural edits address semantic nodes, not array positions. The dev23
 contract exposes insertion, a deliberately narrow pair of relative moves, and
 removal:
 
@@ -43,11 +43,12 @@ because another unknown native consumer may still depend on them.
 
 ## Native insertion versus movement
 
-`node.insert_after` creates a new semantic node. For an imported DOCX, dev22 accepts
-new `paragraph` and `heading` blocks and compiles exactly one new `w:p`. It never
-reconstructs the anchor or any other existing block. Rich text, direct
-paragraph/text formatting, internal and external hyperlinks, and normalized
-document fields are supported. See [native text insertion](native-text-insertion.md).
+`node.insert_after` and `node.insert_before` create a new semantic node. For an
+imported DOCX, dev23 accepts new `paragraph` and `heading` blocks and compiles
+exactly one new `w:p`. It never reconstructs the anchor or any other existing block.
+Rich text, direct paragraph/text formatting, internal and external hyperlinks, and
+normalized document fields are supported. See
+[native text insertion](native-text-insertion.md).
 
 Reconstructing an *existing* imported DOCX block from its JSON projection would
 still lose unsupported native detail. The move operations therefore relocate the
@@ -77,7 +78,7 @@ returned in `changes[].created_nodes` for a later Patch.
 
 Word section semantics depend on the position of `w:sectPr`. A move that casually
 crosses one of those boundaries can silently change page size, margins, columns,
-headers, footers, numbering, or vertical alignment. Dev22 therefore requires:
+headers, footers, numbering, or vertical alignment. Dev23 therefore requires:
 
 - target and anchor belong to the same semantic section;
 - the target is not the `start_at` node of a later section;
@@ -89,11 +90,14 @@ carrier remains in place and the semantic section's `start_at` is rebound to the
 moved node. The change evidence records the section ID and old/new anchors. A
 text-bearing paragraph that itself carries `w:sectPr` is refused. Cross-section
 movement will require an explicit future operation that updates section ownership
-and proves header/footer semantics together; dev22 does not approximate it.
+and proves header/footer semantics together; dev23 does not approximate it.
 
-Insertion is placed after the anchor's complete contiguous range. An anchor that
-itself carries `w:sectPr` is refused because inserting after that paragraph would
-place the native block in a different section than the semantic array implies.
+Insertion is placed before or after the anchor's complete contiguous range. An
+after-insertion anchor that carries `w:sectPr` is refused because placement after
+that paragraph would change the native section. Before-insertion is safe because the
+boundary remains after the unchanged anchor. If the anchor is the first node of a
+later semantic section, its created predecessor becomes the new `section.start_at`;
+native lowering proves that both remain after the preceding section boundary.
 
 ## Identity and third-party packages
 
@@ -174,6 +178,6 @@ For a document whose JSON extension declares native authority, keep the native D
 package attached while applying any structural operation. AiOffice refuses
 insertion, movement, or removal against a detached native projection because JSON
 alone cannot prove the complete XML range or native placement. Its capability
-response reports structural editing as unavailable and omits all four operations
+response reports structural editing as unavailable and omits all five operations
 from the executable operation list. Documents created as semantic AiOffice specs do
 not have this restriction.

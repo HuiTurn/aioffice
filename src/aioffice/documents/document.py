@@ -968,6 +968,7 @@ class Document:
             "text.format",
             "node.append",
             "node.insert_after",
+            "node.insert_before",
             "node.move_after",
             "node.move_before",
             "node.remove",
@@ -987,6 +988,7 @@ class Document:
                 "paragraph.format",
                 "text.format",
                 "node.insert_after",
+                "node.insert_before",
                 "node.move_after",
                 "node.move_before",
                 "node.remove",
@@ -1008,6 +1010,7 @@ class Document:
                 operations.append("image.update")
         elif detached_native_projection:
             operations.remove("node.insert_after")
+            operations.remove("node.insert_before")
             operations.remove("node.move_after")
             operations.remove("node.move_before")
             operations.remove("node.remove")
@@ -1335,6 +1338,10 @@ class Document:
             "structural_editing": {
                 "available": not detached_native_projection,
                 "insert_operation": "node.insert_after",
+                "insert_operations": {
+                    "after": "node.insert_after",
+                    "before": "node.insert_before",
+                },
                 "insertable_native_blocks": [
                     "paragraph",
                     "heading",
@@ -1368,6 +1375,9 @@ class Document:
                 "section_policy": "same_section_only",
                 "section_start_anchor_movable": False,
                 "prepend_to_section": "rebind_section_start_at",
+                "insert_before_section_start": (
+                    "rebind_section_start_at_to_created_node"
+                ),
                 "native_section_carrier_movable": False,
                 "native_section_carrier_removable": False,
                 "native_remove_identity_manifest": (
@@ -2806,6 +2816,7 @@ class Document:
                 operation.get("op")
                 in {
                     "node.insert_after",
+                    "node.insert_before",
                     "node.move_after",
                     "node.move_before",
                     "node.remove",
@@ -2818,8 +2829,8 @@ class Document:
                 severity=Severity.ERROR,
                 code="UNSUPPORTED_FEATURE",
                 message=(
-                    "node.insert_after, node.move_after, node.move_before, "
-                    "and node.remove "
+                    "node.insert_after, node.insert_before, "
+                    "node.move_after, node.move_before, and node.remove "
                     "require the attached native DOCX package for a "
                     "native-authority projection; detached JSON cannot prove "
                     "or mutate the complete XML element range."
@@ -5269,27 +5280,92 @@ class Document:
                 "created_nodes": [candidate["id"]],
             }
 
-        if operation_name == "node.insert_after":
+        if operation_name in {
+            "node.insert_after",
+            "node.insert_before",
+        }:
             index, node = Document._find_content_node(
                 payload,
                 operation.get("target"),
             )
+            unexpected = sorted(
+                set(operation) - {"op", "target", "content"}
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"{operation_name} received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                        node_ids=[node["id"]],
+                    )
+                )
             content = operation.get("content")
             if not isinstance(content, dict):
                 raise _PatchFailure(
                     Diagnostic(
                         severity=Severity.ERROR,
                         code="INVALID_SPEC",
-                        message="node.insert_after requires an object in content.",
+                        message=(
+                            f"{operation_name} requires an object in content."
+                        ),
                     )
                 )
             candidate = Document._normalize_new_block(content, next_revision)
-            payload["content"].insert(index + 1, candidate)
-            return {
-                "operation": "node.insert_after",
-                "after": node["id"],
+            insert_index = (
+                index + 1
+                if operation_name == "node.insert_after"
+                else index
+            )
+            payload["content"].insert(insert_index, candidate)
+            change: dict[str, Any] = {
+                "operation": operation_name,
                 "created_nodes": [candidate["id"]],
             }
+            anchor_field = (
+                "after"
+                if operation_name == "node.insert_after"
+                else "before"
+            )
+            change[anchor_field] = node["id"]
+            if operation_name == "node.insert_before":
+                section_matches = [
+                    (section_index, section)
+                    for section_index, section in enumerate(
+                        payload.get("sections", [])[1:],
+                        start=1,
+                    )
+                    if section.get("start_at") == node["id"]
+                ]
+                if len(section_matches) > 1:
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=(
+                                f"Multiple document sections start at "
+                                f"{node['id']!r}."
+                            ),
+                            node_ids=[node["id"]],
+                            suggested_actions=[
+                                {"action": "repair_section_anchors"}
+                            ],
+                        )
+                )
+                if section_matches:
+                    section_index, section = section_matches[0]
+                    section["start_at"] = candidate["id"]
+                    section["revision_updated"] = next_revision
+                    change["section_index"] = section_index
+                    change["section_start_updated"] = {
+                        "section_id": section["id"],
+                        "from": node["id"],
+                        "to": candidate["id"],
+                    }
+            return change
 
         if operation_name in {"node.move_after", "node.move_before"}:
             anchor_field = (
@@ -5517,7 +5593,8 @@ class Document:
                 message=(
                     f"Unsupported operation {operation_name!r}; AiOffice supports "
                     "text.replace, paragraph.format, text.format, node.append, "
-                    "node.insert_after, node.move_after, node.move_before, "
+                    "node.insert_after, node.insert_before, "
+                    "node.move_after, node.move_before, "
                     "node.remove, "
                     "node.update, style.apply, "
                     "style.define, style.format, section.format, field.update, "

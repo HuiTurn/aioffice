@@ -1,11 +1,11 @@
 # Incremental native paragraph and heading insertion
 
-AiOffice `0.2.0.dev22` can insert a new paragraph or heading into an imported DOCX
+AiOffice `0.2.0.dev23` can insert a new paragraph or heading into an imported DOCX
 without rebuilding the document from its JSON projection. JSON remains the
 AI-facing intent and evidence layer; the attached OPC package remains the native
 authority.
 
-## Operation
+## Operations
 
 ```json
 {
@@ -20,10 +20,25 @@ authority.
 }
 ```
 
+Use the symmetric operation to place content before an anchor:
+
+```json
+{
+  "op": "node.insert_before",
+  "target": "#summary",
+  "content": {
+    "id": "context",
+    "type": "paragraph",
+    "text": "Context for the summary."
+  }
+}
+```
+
 The target must be a mapped top-level body node. AiOffice resolves its complete
-native range and inserts one freshly compiled `w:p` after the range's last element.
-This makes a multi-paragraph list a valid anchor without placing the new paragraph
-inside the list.
+native range and inserts one freshly compiled `w:p` after its last element or before
+its first element. This makes a multi-paragraph list a valid anchor without placing
+the new paragraph inside the list. `node.insert_before` also reaches the beginning
+of the document without a synthetic root or array index.
 
 The `id` is optional. When omitted, the semantic transaction generates one and
 passes that exact identity to native lowering. Supplying IDs is recommended for
@@ -81,13 +96,39 @@ new ID to the actual inserted XML object. The following is one atomic Patch:
 The same live object can anchor another insertion or be moved or removed later in
 the batch. Native indices are computed only after all operations finish.
 
+## Section starts
+
+For a later document section, `start_at` names its first semantic content node. When
+`node.insert_before` targets that node, the created node becomes the section's new
+`start_at`. Native lowering proves that the new paragraph is placed after the
+preceding section's existing `w:sectPr` and before the old first node.
+
+Repeated prepends in one Patch update this state in order. Each change record reports
+the section ID and the old and new anchors:
+
+```json
+{
+  "section_start_updated": {
+    "section_id": "analysis_section",
+    "from": "analysis_heading",
+    "to": "analysis_context"
+  }
+}
+```
+
+Insertion before a text-bearing paragraph that itself carries `w:sectPr` is safe:
+the unchanged boundary still follows that paragraph. Insertion *after* the same
+paragraph remains refused because it would silently change the inserted block's
+section ownership.
+
 ## Fidelity and safety
 
 Before mutation AiOffice proves that:
 
 1. the anchor belongs directly to `/word/document.xml`'s `w:body`;
 2. every mapped anchor element is present and contiguous;
-3. the anchor does not carry a `w:sectPr` section boundary;
+3. after-insertion anchors do not carry a `w:sectPr`; before-insertion preserves
+   any boundary inside the unchanged anchor;
 4. the new block has no forged `source_ref`;
 5. the required named style exists in the native style catalog;
 6. generated text and attributes form safe, valid XML;
@@ -112,5 +153,5 @@ aioffice workspace apply ARTIFACT_ID insert.json --root project
 ```
 
 Inspect `Document.capabilities()["structural_editing"]` before planning. A detached
-JSON projection whose extension declares native authority omits `node.insert_after`
-and rejects it until the original DOCX package is attached again.
+JSON projection whose extension declares native authority omits both insertion
+operations and rejects them until the original DOCX package is attached again.

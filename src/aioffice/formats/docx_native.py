@@ -308,7 +308,7 @@ def _compile_inserted_text_block(
 ) -> tuple[ET.Element, list[DocumentField]]:
     if block.source_ref is not None:
         raise NativePackageError(
-            "node.insert_after content cannot claim an existing native "
+            "Inserted content cannot claim an existing native "
             "source reference."
         )
     native_style_ref = (
@@ -360,7 +360,7 @@ def _compile_inserted_text_block(
             continue
         if inline.kind == "native":
             raise NativePackageError(
-                "node.insert_after cannot reconstruct a native-only field "
+                "Native text insertion cannot reconstruct a native-only field "
                 "instruction from its semantic projection."
             )
         append_complex_field(
@@ -381,7 +381,7 @@ def _compile_inserted_text_block(
         parse_xml(serialize_xml(paragraph))
     except (NativePackageError, UnicodeError, ValueError) as error:
         raise NativePackageError(
-            "node.insert_after generated text or attributes that are not "
+            "Native text insertion generated text or attributes that are not "
             "valid, safe XML."
         ) from error
     return paragraph, inserted_fields
@@ -951,6 +951,7 @@ def apply_docx_operations(
         "paragraph.format",
         "text.format",
         "node.insert_after",
+        "node.insert_before",
         "node.remove",
         "style.apply",
         "style.define",
@@ -971,7 +972,7 @@ def apply_docx_operations(
         raise NativePackageError(
             "Imported DOCX V0.2 currently supports native lowering for "
             "text.replace, paragraph.format, text.format, "
-            "node.insert_after, node.move_after, "
+            "node.insert_after, node.insert_before, node.move_after, "
             "node.move_before, node.remove, "
             "style.apply, style.define, style.format, section.format, and "
             "field.update, image.insert_after, image.replace, image.update, "
@@ -997,7 +998,8 @@ def apply_docx_operations(
         "style.format",
     }.intersection(str(operation.get("op")) for operation in operations)
     has_text_insert = any(
-        operation.get("op") == "node.insert_after"
+        operation.get("op")
+        in {"node.insert_after", "node.insert_before"}
         for operation in operations
     )
     styles_root: ET.Element | None = None
@@ -1143,6 +1145,100 @@ def apply_docx_operations(
                 original_elements,
                 source_ref,
             )
+    section_indices = {
+        section.id: index
+        for index, section in enumerate(spec.sections)
+    }
+    native_section_starts = {
+        section.id: section.start_at
+        for section in spec.sections
+    }
+
+    def synchronize_section_start(
+        change: Mapping[str, Any],
+        *,
+        operation_name: str,
+        anchor_id: str,
+        new_start_id: str,
+        new_start_elements: Sequence[ET.Element],
+        can_rebind: bool,
+    ) -> None:
+        section_start_update = change.get(
+            "section_start_updated"
+        )
+        if not can_rebind:
+            if section_start_update is not None:
+                raise NativePackageError(
+                    f"{operation_name} cannot carry section-start "
+                    "rebind evidence."
+                )
+            return
+        matching_section_ids = [
+            section_id
+            for section_id, start_at in native_section_starts.items()
+            if start_at == anchor_id
+        ]
+        if section_start_update is None:
+            if matching_section_ids:
+                raise NativePackageError(
+                    f"{operation_name} is missing the semantic "
+                    "section-start rebind required by its anchor."
+                )
+            return
+        if (
+            not isinstance(section_start_update, Mapping)
+            or len(matching_section_ids) != 1
+        ):
+            raise NativePackageError(
+                f"{operation_name} has invalid or ambiguous "
+                "section-start evidence."
+            )
+        section_id = matching_section_ids[0]
+        section_index = section_indices.get(section_id)
+        if (
+            section_start_update.get("section_id") != section_id
+            or section_start_update.get("from") != anchor_id
+            or section_start_update.get("to") != new_start_id
+            or change.get("section_index") != section_index
+            or section_index is None
+            or section_index <= 0
+        ):
+            raise NativePackageError(
+                f"{operation_name} section-start evidence does not "
+                "match the semantic section model."
+            )
+        previous_section_id = spec.sections[
+            section_index - 1
+        ].id
+        previous_boundary = source_sections.get(
+            previous_section_id
+        )
+        if previous_boundary is None:
+            raise NativePackageError(
+                f"{operation_name} cannot prove the native boundary "
+                "preceding the target section."
+            )
+        _, boundary_container, _ = previous_boundary
+        current_body_elements = list(body)
+        if (
+            boundary_container not in current_body_elements
+            or not new_start_elements
+            or any(
+                element not in current_body_elements
+                for element in new_start_elements
+            )
+            or current_body_elements.index(boundary_container)
+            >= min(
+                current_body_elements.index(element)
+                for element in new_start_elements
+            )
+        ):
+            raise NativePackageError(
+                f"{operation_name} result is not positioned after "
+                "its proven native section boundary."
+            )
+        native_section_starts[section_id] = new_start_id
+
     inserted_images: dict[str, ET.Element] = {}
     inserted_nodes: set[str] = set()
     inserted_fields: dict[str, tuple[ET.Element, int]] = {}
@@ -1415,7 +1511,10 @@ def apply_docx_operations(
             )
             changed_xml_parts.add(source_ref.part_uri)
             continue
-        if operation_name == "node.insert_after":
+        if operation_name in {
+            "node.insert_after",
+            "node.insert_before",
+        }:
             target_id = _target_id(operation.get("target"))
             mapped_source = source_elements.get(target_id)
             if mapped_source is None:
@@ -1435,7 +1534,7 @@ def apply_docx_operations(
                 or not mapped_elements
             ):
                 raise NativePackageError(
-                    "node.insert_after requires a mapped top-level "
+                    f"{operation_name} requires a mapped top-level "
                     "document body anchor."
                 )
             current_elements = list(body)
@@ -1444,7 +1543,7 @@ def apply_docx_operations(
                 for element in mapped_elements
             ):
                 raise NativePackageError(
-                    "node.insert_after anchor is no longer in the "
+                    f"{operation_name} anchor is no longer in the "
                     "document body."
                 )
             anchor_indices = [
@@ -1458,13 +1557,19 @@ def apply_docx_operations(
                 )
             ):
                 raise NativePackageError(
-                    "node.insert_after requires the anchor's complete "
+                    f"{operation_name} requires the anchor's complete "
                     "native range to remain contiguous."
                 )
-            if any(
-                element.tag == _q(W, "sectPr")
-                or element.find(f".//{_q(W, 'sectPr')}") is not None
-                for element in mapped_elements
+            if (
+                operation_name == "node.insert_after"
+                and any(
+                    element.tag == _q(W, "sectPr")
+                    or element.find(
+                        f".//{_q(W, 'sectPr')}"
+                    )
+                    is not None
+                    for element in mapped_elements
+                )
             ):
                 raise NativePackageError(
                     "node.insert_after refuses an anchor that carries a "
@@ -1472,26 +1577,26 @@ def apply_docx_operations(
                 )
             created_nodes = change.get("created_nodes")
             if (
-                change.get("operation") != "node.insert_after"
+                change.get("operation") != operation_name
                 or not isinstance(created_nodes, list)
                 or len(created_nodes) != 1
                 or not isinstance(created_nodes[0], str)
             ):
                 raise NativePackageError(
-                    "node.insert_after requires one trusted semantic "
+                    f"{operation_name} requires one trusted semantic "
                     "created-node record."
                 )
             created_id = created_nodes[0]
             content = operation.get("content")
             if not isinstance(content, Mapping):
                 raise NativePackageError(
-                    "node.insert_after content must be an object."
+                    f"{operation_name} content must be an object."
                 )
             candidate_payload = deepcopy(dict(content))
             supplied_id = candidate_payload.get("id")
             if supplied_id is not None and supplied_id != created_id:
                 raise NativePackageError(
-                    "node.insert_after semantic and native created IDs "
+                    f"{operation_name} semantic and native created IDs "
                     "do not match."
                 )
             candidate_payload["id"] = created_id
@@ -1504,12 +1609,12 @@ def apply_docx_operations(
                     candidate = Heading.model_validate(candidate_payload)
                 else:
                     raise NativePackageError(
-                        "Imported DOCX node.insert_after currently "
+                        f"Imported DOCX {operation_name} currently "
                         "supports only paragraph and heading content."
                     )
             except ValidationError as error:
                 raise NativePackageError(
-                    f"Could not lower node.insert_after content: {error}"
+                    f"Could not lower {operation_name} content: {error}"
                 ) from error
             paragraph, new_fields = _compile_inserted_text_block(
                 updated,
@@ -1518,8 +1623,22 @@ def apply_docx_operations(
                 source_part="/word/document.xml",
                 styles_root=styles_root,
             )
-            insert_index = max(anchor_indices) + 1
+            insert_index = (
+                max(anchor_indices) + 1
+                if operation_name == "node.insert_after"
+                else min(anchor_indices)
+            )
             body.insert(insert_index, paragraph)
+            synchronize_section_start(
+                change,
+                operation_name=str(operation_name),
+                anchor_id=target_id,
+                new_start_id=created_id,
+                new_start_elements=[paragraph],
+                can_rebind=(
+                    operation_name == "node.insert_before"
+                ),
+            )
             temporary_ref = native_ref_for_part_elements(
                 [paragraph],
                 [insert_index],
@@ -1809,6 +1928,16 @@ def apply_docx_operations(
             )
             for offset, element in enumerate(elements):
                 body.insert(insert_index + offset, element)
+            synchronize_section_start(
+                change,
+                operation_name=str(operation_name),
+                anchor_id=anchor_id,
+                new_start_id=target_id,
+                new_start_elements=elements,
+                can_rebind=(
+                    operation_name == "node.move_before"
+                ),
+            )
             moved_nodes.add(target_id)
             changed_xml_parts.add("/word/document.xml")
             continue
@@ -1949,6 +2078,16 @@ def apply_docx_operations(
                 container.remove(element)
             removed_nodes.add(target_id)
             changed_xml_parts.add(source_ref.part_uri)
+
+    result_section_starts = {
+        section.id: section.start_at
+        for section in result_spec.sections
+    }
+    if result_section_starts != native_section_starts:
+        raise NativePackageError(
+            "Native structural operations did not reproduce the semantic "
+            "section-start model."
+        )
 
     current_indices = {id(element): index for index, element in enumerate(list(body))}
     identity_updates: dict[str, NativeRef] = {}

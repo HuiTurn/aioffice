@@ -82,6 +82,117 @@ class PatchTests(unittest.TestCase):
         self.assertNotEqual(result.changes[0]["created_nodes"], ["<generated>"])
         self.assertNotEqual(result.changes[1]["created_nodes"], ["<generated>"])
 
+    def test_insert_before_prepends_and_rebinds_section_start(self) -> None:
+        document = (
+            DocumentBuilder(
+                sections=[
+                    {"id": "front", "start_at": None},
+                    {
+                        "id": "body_section",
+                        "start_at": "c",
+                        "layout": {"start_type": "next_page"},
+                    },
+                ]
+            )
+            .paragraph("A", id="a")
+            .paragraph("B", id="b")
+            .paragraph("C", id="c")
+            .paragraph("D", id="d")
+            .build()
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "node.insert_before",
+                    "target": "#a",
+                    "content": {
+                        "id": "prelude",
+                        "type": "paragraph",
+                        "text": "Prelude",
+                    },
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#c",
+                    "content": {
+                        "id": "section_intro",
+                        "type": "heading",
+                        "level": 2,
+                        "text": "Section intro",
+                    },
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#section_intro",
+                    "content": {
+                        "id": "section_label",
+                        "type": "paragraph",
+                        "text": "Section label",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        self.assertEqual(
+            [
+                node["id"]
+                for node in result.document.to_spec()["content"]
+            ],
+            [
+                "prelude",
+                "a",
+                "b",
+                "section_label",
+                "section_intro",
+                "c",
+                "d",
+            ],
+        )
+        self.assertEqual(
+            result.document.to_spec()["sections"][1]["start_at"],
+            "section_label",
+        )
+        self.assertEqual(
+            result.changes[1]["section_start_updated"],
+            {
+                "section_id": "body_section",
+                "from": "c",
+                "to": "section_intro",
+            },
+        )
+        self.assertEqual(
+            result.changes[2]["section_start_updated"],
+            {
+                "section_id": "body_section",
+                "from": "section_intro",
+                "to": "section_label",
+            },
+        )
+        invalid = document.apply(
+            [
+                {
+                    "op": "node.insert_before",
+                    "target": "#a",
+                    "content": {
+                        "id": "invalid",
+                        "type": "paragraph",
+                        "text": "Invalid",
+                    },
+                    "index": 0,
+                }
+            ]
+        )
+        self.assertFalse(invalid.success)
+        self.assertEqual(
+            invalid.diagnostics[0].code,
+            "INVALID_SPEC",
+        )
+        self.assertIn(
+            "unknown fields: index",
+            invalid.diagnostics[0].message,
+        )
+
     def test_move_after_uses_stable_ids_and_preserves_sections(self) -> None:
         document = (
             DocumentBuilder(
@@ -106,6 +217,13 @@ class PatchTests(unittest.TestCase):
             "structural_editing"
         ]
         self.assertTrue(structural_capabilities["available"])
+        self.assertEqual(
+            structural_capabilities["insert_operations"],
+            {
+                "after": "node.insert_after",
+                "before": "node.insert_before",
+            },
+        )
         self.assertEqual(
             structural_capabilities["move_operations"],
             {

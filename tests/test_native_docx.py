@@ -550,6 +550,123 @@ class NativeDocxTests(unittest.TestCase):
             [0, 1, 2, 3],
         )
 
+    def test_native_insert_before_handles_head_and_multi_element_anchor(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Before", id="before")
+            .bullet_list(["One", "Two"], id="steps")
+            .paragraph("After", id="after")
+            .build()
+            .to_bytes("docx")
+        )
+        document = Document.from_docx(source)
+        before_root = parse_xml(
+            ZipFile(io.BytesIO(source)).read("word/document.xml")
+        )
+        before_body = before_root.find(_q(W, "body"))
+        assert before_body is not None
+        original_payloads = {
+            node["id"]: [
+                ET.tostring(list(before_body)[index])
+                for index in node["source_ref"]["element_indices"]
+            ]
+            for node in document.to_spec()["content"]
+        }
+        result = document.apply(
+            [
+                {
+                    "op": "node.insert_before",
+                    "target": "#before",
+                    "content": {
+                        "id": "document_prelude",
+                        "type": "heading",
+                        "level": 2,
+                        "text": "Document prelude",
+                    },
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#steps",
+                    "content": {
+                        "id": "list_intro",
+                        "type": "paragraph",
+                        "text": "List intro",
+                    },
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#list_intro",
+                    "content": {
+                        "id": "list_label",
+                        "type": "paragraph",
+                        "text": "List label",
+                    },
+                },
+                {
+                    "op": "paragraph.format",
+                    "target": "#list_label",
+                    "set": {"keep_with_next": True},
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert result.document is not None
+        self.assertEqual(
+            [
+                node["id"]
+                for node in result.document.to_spec()["content"]
+            ],
+            [
+                "document_prelude",
+                "before",
+                "list_label",
+                "list_intro",
+                "steps",
+                "after",
+            ],
+        )
+        output = result.document.to_bytes("docx")
+        output_root = parse_xml(
+            ZipFile(io.BytesIO(output)).read("word/document.xml")
+        )
+        output_body = output_root.find(_q(W, "body"))
+        assert output_body is not None
+        for node in result.document.to_spec()["content"]:
+            if node["id"] not in original_payloads:
+                continue
+            self.assertEqual(
+                [
+                    ET.tostring(list(output_body)[index])
+                    for index in node["source_ref"]["element_indices"]
+                ],
+                original_payloads[node["id"]],
+                node["id"],
+            )
+        reopened = Document.from_docx(output)
+        reopened_nodes = reopened.to_spec()["content"]
+        self.assertEqual(
+            [node["id"] for node in reopened_nodes],
+            [
+                "document_prelude",
+                "before",
+                "list_label",
+                "list_intro",
+                "steps",
+                "after",
+            ],
+        )
+        self.assertEqual(
+            reopened_nodes[2]["paragraph_style"]["keep_with_next"],
+            True,
+        )
+        self.assertEqual(
+            reopened_nodes[4]["source_ref"]["element_indices"],
+            [4, 5],
+        )
+
     def test_identity_map_is_refreshed_after_removal(self) -> None:
         document = Document.from_docx(self._source_document())
         nodes = document.to_spec()["content"]
@@ -633,6 +750,10 @@ class NativeDocxTests(unittest.TestCase):
             detached.capabilities()["operations"],
         )
         self.assertNotIn(
+            "node.insert_before",
+            detached.capabilities()["operations"],
+        )
+        self.assertNotIn(
             "node.remove",
             detached.capabilities()["operations"],
         )
@@ -652,6 +773,24 @@ class NativeDocxTests(unittest.TestCase):
         self.assertFalse(detached_insert.success)
         self.assertEqual(
             detached_insert.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+        detached_insert_before = detached.apply(
+            [
+                {
+                    "op": "node.insert_before",
+                    "target": ids["A"],
+                    "content": {
+                        "id": "detached_before",
+                        "type": "paragraph",
+                        "text": "Detached before",
+                    },
+                }
+            ]
+        )
+        self.assertFalse(detached_insert_before.success)
+        self.assertEqual(
+            detached_insert_before.diagnostics[0].code,
             "UNSUPPORTED_FEATURE",
         )
         detached_result = detached.apply(
@@ -1017,6 +1156,7 @@ class NativeDocxTests(unittest.TestCase):
             deletions={"customXml/aioffice-manifest.xml"},
         )
         document = Document.from_docx(source)
+        body_section_id = document.to_spec()["sections"][1]["id"]
         ids = {
             _semantic_text(node): str(node["id"])
             for node in document.to_spec()["content"]
@@ -1084,6 +1224,107 @@ class NativeDocxTests(unittest.TestCase):
             "section boundary",
             carrier_remove.diagnostics[0].message,
         )
+        safe_insert = document.apply(
+            [
+                {
+                    "op": "node.insert_before",
+                    "target": ids["Front end"],
+                    "content": {
+                        "id": "front_note",
+                        "type": "paragraph",
+                        "text": "Front note",
+                    },
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": ids["Body"],
+                    "content": {
+                        "id": "body_preface",
+                        "type": "heading",
+                        "level": 2,
+                        "text": "Body preface",
+                    },
+                },
+                {
+                    "op": "node.insert_before",
+                    "target": "#body_preface",
+                    "content": {
+                        "id": "body_label",
+                        "type": "paragraph",
+                        "text": "Body label",
+                    },
+                },
+            ]
+        )
+        self.assertTrue(safe_insert.success, safe_insert.model_dump())
+        self.assertEqual(document.to_bytes("docx"), source)
+        assert safe_insert.document is not None
+        self.assertEqual(
+            safe_insert.document.to_spec()["sections"][1][
+                "start_at"
+            ],
+            "body_label",
+        )
+        self.assertEqual(
+            safe_insert.changes[1]["section_start_updated"],
+            {
+                "section_id": body_section_id,
+                "from": ids["Body"],
+                "to": "body_preface",
+            },
+        )
+        self.assertEqual(
+            safe_insert.changes[2]["section_start_updated"],
+            {
+                "section_id": body_section_id,
+                "from": "body_preface",
+                "to": "body_label",
+            },
+        )
+        safe_output = safe_insert.document.to_bytes("docx")
+        safe_root = parse_xml(
+            ZipFile(io.BytesIO(safe_output)).read(
+                "word/document.xml"
+            )
+        )
+        safe_body = safe_root.find(_q(W, "body"))
+        assert safe_body is not None
+        safe_paragraphs = safe_body.findall(_q(W, "p"))
+        safe_texts = [
+            "".join(
+                node.text or ""
+                for node in paragraph.iter(_q(W, "t"))
+            )
+            for paragraph in safe_paragraphs
+        ]
+        self.assertLess(
+            safe_texts.index("Front note"),
+            safe_texts.index("Front end"),
+        )
+        self.assertLess(
+            safe_texts.index("Front end"),
+            safe_texts.index("Body label"),
+        )
+        self.assertLess(
+            safe_texts.index("Body label"),
+            safe_texts.index("Body preface"),
+        )
+        self.assertLess(
+            safe_texts.index("Body preface"),
+            safe_texts.index("Body"),
+        )
+        boundary_paragraph = safe_paragraphs[
+            safe_texts.index("Front end")
+        ]
+        self.assertIsNotNone(
+            boundary_paragraph.find(f".//{_q(W, 'sectPr')}")
+        )
+        safe_reopened = Document.from_docx(safe_output)
+        self.assertEqual(
+            safe_reopened.to_spec()["sections"][1]["start_at"],
+            "body_label",
+        )
+
         carrier_insert = document.apply(
             [
                 {
