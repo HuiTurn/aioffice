@@ -85,7 +85,11 @@ from aioffice.native import (
     native_ref_for_part_elements,
     serialize_identity_manifest,
 )
-from aioffice.native.xml import parse_xml, serialize_xml
+from aioffice.native.xml import (
+    parse_xml,
+    preserve_namespace_prefixes,
+    serialize_xml,
+)
 from aioffice.operations.text import resolve_text_selection
 from aioffice.spec.models import (
     AiOfficeDocumentSpec,
@@ -4941,7 +4945,14 @@ def apply_docx_operations(
         )
 
     for part_uri in sorted(changed_xml_parts):
-        updated.set_part(part_uri, serialize_xml(part_roots[part_uri]))
+        updated.set_part(
+            part_uri,
+            preserve_namespace_prefixes(
+                serialize_xml(part_roots[part_uri]),
+                source=updated.get_part(part_uri),
+                prefixes=frozenset({"wps"}),
+            ),
+        )
     if styles_changed:
         assert styles_root is not None
         updated.set_part("/word/styles.xml", serialize_xml(styles_root))

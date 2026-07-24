@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import posixpath
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from aioffice.formats.docx_style import apply_paragraph_style
 from aioffice.native import NativePackage
 from aioffice.native.xml import (
     namespace_declarations,
+    namespace_declaration_values,
     parse_xml,
     serialize_xml,
 )
@@ -32,6 +34,7 @@ from aioffice.spec.models import (
     FloatingImageVerticalPosition,
     FloatingImageWrapPoint,
     FloatingImageWrapPolygon,
+    ImageAlternateContent,
     ImageBlock,
     ImageCrop,
     ImageEffectExtent,
@@ -53,6 +56,9 @@ CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
 WP14 = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
 MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+VML = "urn:schemas-microsoft-com:vml"
+OFFICE = "urn:schemas-microsoft-com:office:office"
+WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 _REPLACEMENT_EXTENSIONS = {
     "image/png": "png",
     "image/jpeg": "jpg",
@@ -163,6 +169,7 @@ class SimpleNativeImage:
     outline: ImageOutline | None
     opacity: float | None
     shadow: ImageShadow | None
+    alternate_content: ImageAlternateContent | None
     placement: Literal["inline", "floating"]
     floating: FloatingImageLayout | None
     name: str | None
@@ -173,6 +180,14 @@ class SimpleNativeImage:
     @property
     def asset_id(self) -> str:
         return f"asset_{self.sha256.lower()}"
+
+
+@dataclass(frozen=True, slots=True)
+class _ImageDrawingContext:
+    drawing: ET.Element
+    alternate_content: ET.Element | None = None
+    fallback_shape: ET.Element | None = None
+    fallback_image_data: ET.Element | None = None
 
 
 HorizontalRelativeTo: TypeAlias = Literal[
@@ -1388,6 +1403,301 @@ def _floating_image_layout(
     )
 
 
+_VML_PICTURE_FORMULAS = (
+    "if lineDrawn pixelLineWidth 0",
+    "sum @0 1 0",
+    "sum 0 0 @1",
+    "prod @2 1 2",
+    "prod @3 21600 pixelWidth",
+    "prod @3 21600 pixelHeight",
+    "sum @0 0 1",
+    "prod @6 1 2",
+    "prod @7 21600 pixelWidth",
+    "sum @8 21600 0",
+    "prod @7 21600 pixelHeight",
+    "sum @10 21600 0",
+)
+
+
+def _vml_style_properties(style: str) -> dict[str, str] | None:
+    properties: dict[str, str] = {}
+    for declaration in style.split(";"):
+        if not declaration:
+            continue
+        if declaration.count(":") != 1:
+            return None
+        name, value = declaration.split(":", 1)
+        if (
+            not name
+            or not value
+            or name.strip() != name
+            or value.strip() != value
+            or name in properties
+        ):
+            return None
+        properties[name] = value
+    return properties
+
+
+def _vml_point_value(value: str) -> float | None:
+    if not value.endswith("pt"):
+        return None
+    try:
+        points = float(value[:-2])
+    except ValueError:
+        return None
+    if not math.isfinite(points) or points <= 0:
+        return None
+    return points
+
+
+def _strict_inline_vml_picture(
+    fallback: ET.Element,
+    *,
+    width_points: float | None = None,
+    height_points: float | None = None,
+) -> tuple[ET.Element, ET.Element] | None:
+    if fallback.attrib or len(fallback) != 1:
+        return None
+    picture = fallback[0]
+    if (
+        picture.tag != _q(W, "pict")
+        or picture.attrib
+        or [child.tag for child in picture]
+        != [_q(VML, "shapetype"), _q(VML, "shape")]
+    ):
+        return None
+    shape_type, shape = picture
+    if (
+        shape_type.attrib
+        != {
+            "id": "_x0000_t75",
+            "coordsize": "21600,21600",
+            _q(OFFICE, "spt"): "75",
+            _q(OFFICE, "preferrelative"): "t",
+            "path": "m@4@5l@4@11@9@11@9@5xe",
+            "filled": "f",
+            "stroked": "f",
+        }
+        or [child.tag for child in shape_type]
+        != [
+            _q(VML, "stroke"),
+            _q(VML, "formulas"),
+            _q(VML, "path"),
+            _q(OFFICE, "lock"),
+        ]
+    ):
+        return None
+    type_stroke, formulas, type_path, lock = shape_type
+    if (
+        type_stroke.attrib != {"joinstyle": "miter"}
+        or len(type_stroke)
+        or formulas.attrib
+        or [child.tag for child in formulas]
+        != [_q(VML, "f")] * len(_VML_PICTURE_FORMULAS)
+        or [
+            child.attrib
+            for child in formulas
+        ]
+        != [{"eqn": formula} for formula in _VML_PICTURE_FORMULAS]
+        or any(len(child) for child in formulas)
+        or type_path.attrib
+        != {
+            _q(OFFICE, "extrusionok"): "f",
+            "gradientshapeok": "t",
+            _q(OFFICE, "connecttype"): "rect",
+        }
+        or len(type_path)
+        or lock.attrib
+        != {
+            _q(VML, "ext"): "edit",
+            "aspectratio": "t",
+        }
+        or len(lock)
+    ):
+        return None
+    if (
+        set(shape.attrib)
+        != {
+            "id",
+            "stroked",
+            _q(OFFICE, "allowincell"),
+            "style",
+            "type",
+        }
+        or not shape.attrib["id"]
+        or shape.attrib["stroked"] not in {"t", "f"}
+        or shape.attrib[_q(OFFICE, "allowincell")] != "t"
+        or shape.attrib["type"] not in {
+            "_x0000_t75",
+            "#_x0000_t75",
+        }
+    ):
+        return None
+    style = _vml_style_properties(shape.attrib["style"])
+    if (
+        style is None
+        or set(style)
+        != {
+            "width",
+            "height",
+            "mso-wrap-style",
+            "v-text-anchor",
+        }
+        or style["mso-wrap-style"] != "none"
+        or style["v-text-anchor"] != "middle"
+    ):
+        return None
+    fallback_width = _vml_point_value(style["width"])
+    fallback_height = _vml_point_value(style["height"])
+    if (
+        fallback_width is None
+        or fallback_height is None
+        or (
+            width_points is not None
+            and abs(fallback_width - width_points) > 0.1
+        )
+        or (
+            height_points is not None
+            and abs(fallback_height - height_points) > 0.1
+        )
+    ):
+        return None
+    child_tags = [child.tag for child in shape]
+    if (
+        not child_tags
+        or child_tags[0] != _q(VML, "imagedata")
+        or any(
+            tag not in {
+                _q(VML, "imagedata"),
+                _q(VML, "stroke"),
+                _q(VML, "shadow"),
+            }
+            for tag in child_tags
+        )
+        or len(child_tags) != len(set(child_tags))
+        or (
+            _q(VML, "stroke") in child_tags
+            and child_tags.index(_q(VML, "stroke")) != 1
+        )
+        or (
+            _q(VML, "shadow") in child_tags
+            and child_tags[-1] != _q(VML, "shadow")
+        )
+    ):
+        return None
+    image_data = shape[0]
+    if (
+        image_data.tag != _q(VML, "imagedata")
+        or image_data.attrib
+        != {
+            _q(R, "id"): image_data.attrib.get(_q(R, "id")),
+            _q(OFFICE, "detectmouseclick"): "t",
+        }
+        or not image_data.attrib.get(_q(R, "id"))
+        or len(image_data)
+    ):
+        return None
+    stroke = shape.find(f"./{_q(VML, 'stroke')}")
+    if (
+        stroke is not None
+        and (
+            set(stroke.attrib)
+            - {"color", "weight", "joinstyle", "endcap"}
+            or stroke.attrib.get("joinstyle") not in {None, "round"}
+            or stroke.attrib.get("endcap") not in {None, "flat"}
+            or len(stroke)
+        )
+    ):
+        return None
+    shadow = shape.find(f"./{_q(VML, 'shadow')}")
+    if (
+        shadow is not None
+        and (
+            set(shadow.attrib) - {"on", "obscured", "color"}
+            or shadow.attrib.get("on") != "t"
+            or shadow.attrib.get("obscured") not in {None, "f"}
+            or len(shadow)
+        )
+    ):
+        return None
+    return shape, image_data
+
+
+def _image_drawing_context(
+    package: NativePackage,
+    paragraph: ET.Element,
+    *,
+    source_part: str,
+) -> _ImageDrawingContext | None:
+    candidates: list[_ImageDrawingContext] = []
+    for run in paragraph.findall(f"./{_q(W, 'r')}"):
+        allowed_children = {
+            _q(W, "rPr"),
+            _q(W, "drawing"),
+            _q(MC, "AlternateContent"),
+        }
+        if any(child.tag not in allowed_children for child in run):
+            return None
+        for drawing in run.findall(f"./{_q(W, 'drawing')}"):
+            candidates.append(_ImageDrawingContext(drawing=drawing))
+        for alternate in run.findall(f"./{_q(MC, 'AlternateContent')}"):
+            if (
+                alternate.attrib
+                or [child.tag for child in alternate]
+                != [_q(MC, "Choice"), _q(MC, "Fallback")]
+            ):
+                return None
+            choice, fallback = alternate
+            if (
+                choice.attrib != {"Requires": "wps"}
+                or len(choice) != 1
+                or choice[0].tag != _q(W, "drawing")
+            ):
+                return None
+            namespace_values = namespace_declaration_values(
+                package.get_part(source_part)
+            )
+            if namespace_values.get("wps") != frozenset({WPS}):
+                return None
+            fallback_picture = _strict_inline_vml_picture(fallback)
+            if fallback_picture is None:
+                return None
+            shape, image_data = fallback_picture
+            candidates.append(
+                _ImageDrawingContext(
+                    drawing=choice[0],
+                    alternate_content=alternate,
+                    fallback_shape=shape,
+                    fallback_image_data=image_data,
+                )
+            )
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
+def _replace_vml_size(
+    shape: ET.Element,
+    *,
+    width_points: float,
+    height_points: float,
+) -> None:
+    properties = _vml_style_properties(shape.attrib.get("style", ""))
+    if properties is None:
+        raise NativePackageError(
+            "Supported VML fallback no longer has a strict style."
+        )
+    properties["width"] = f"{width_points:.6f}".rstrip("0").rstrip(".") + "pt"
+    properties["height"] = (
+        f"{height_points:.6f}".rstrip("0").rstrip(".") + "pt"
+    )
+    shape.set(
+        "style",
+        ";".join(f"{name}:{value}" for name, value in properties.items()),
+    )
+
+
 def simple_native_image(
     package: NativePackage,
     paragraph: ET.Element,
@@ -1405,15 +1715,15 @@ def simple_native_image(
     if any(child.tag not in {_q(W, "pPr"), _q(W, "r")} for child in paragraph):
         return None
 
-    drawings: list[ET.Element] = []
-    for run in paragraph.findall(f"./{_q(W, 'r')}"):
-        if any(child.tag not in {_q(W, "rPr"), _q(W, "drawing")} for child in run):
-            return None
-        drawings.extend(run.findall(f"./{_q(W, 'drawing')}"))
-    if len(drawings) != 1:
+    drawing_context = _image_drawing_context(
+        package,
+        paragraph,
+        source_part=source_part,
+    )
+    if drawing_context is None:
         return None
 
-    drawing = drawings[0]
+    drawing = drawing_context.drawing
     if len(drawing) != 1:
         return None
     drawing_container = drawing[0]
@@ -1440,6 +1750,8 @@ def simple_native_image(
         ):
             return None
     elif drawing_container.tag == _q(WP, "anchor"):
+        if drawing_context.alternate_content is not None:
+            return None
         placement = "floating"
         floating = _floating_image_layout(drawing_container)
         if floating is None:
@@ -1483,6 +1795,16 @@ def simple_native_image(
     except ValueError:
         return None
     if width_emu <= 0 or height_emu <= 0:
+        return None
+    if (
+        drawing_context.alternate_content is not None
+        and _strict_inline_vml_picture(
+            drawing_context.alternate_content[1],
+            width_points=width_emu / EMU_PER_POINT,
+            height_points=height_emu / EMU_PER_POINT,
+        )
+        is None
+    ):
         return None
 
     effect_extent = drawing_container.find(
@@ -1550,8 +1872,16 @@ def simple_native_image(
         len(blips) != 1
         or len(source_rectangles) > 1
         or stretch is None
-        or len(stretch) != 1
-        or stretch[0].tag != _q(A, "fillRect")
+        or len(stretch) > 1
+        or (
+            len(stretch) == 1
+            and (
+                stretch[0].tag != _q(A, "fillRect")
+                or stretch[0].attrib
+                or len(stretch[0])
+            )
+        )
+        or stretch.attrib
         or [child.tag for child in blip_fill]
         != expected_blip_fill_children
     ):
@@ -2021,6 +2351,47 @@ def simple_native_image(
         or not package.has_part(part_uri)
     ):
         return None
+    alternate_content: ImageAlternateContent | None = None
+    if drawing_context.alternate_content is not None:
+        fallback_image_data = drawing_context.fallback_image_data
+        if fallback_image_data is None:
+            return None
+        fallback_relationship_id = fallback_image_data.get(_q(R, "id"))
+        fallback_relationships = [
+            relationship
+            for relationship in package.relationships
+            if relationship.source_part == source_part
+            and relationship.relationship_id == fallback_relationship_id
+            and relationship.relationship_type == IMAGE_RELATIONSHIP_TYPE
+            and not relationship.external
+        ]
+        if len(fallback_relationships) != 1:
+            return None
+        fallback_part_uri = resolve_relationship_target(
+            source_part,
+            fallback_relationships[0].target,
+        )
+        fallback_part = next(
+            (
+                candidate
+                for candidate in package.parts
+                if candidate.uri == fallback_part_uri
+            ),
+            None,
+        )
+        if (
+            fallback_part is None
+            or not fallback_part.content_type.casefold().startswith("image/")
+            or not package.has_part(fallback_part_uri)
+        ):
+            return None
+        alternate_content = ImageAlternateContent(
+            fallback_asset_matches_choice=(
+                fallback_part.content_type.casefold()
+                == part.content_type.casefold()
+                and fallback_part.sha256.lower() == part.sha256.lower()
+            )
+        )
 
     def optional_attribute(name: str) -> str | None:
         value = document_properties.attrib.get(name)
@@ -2046,6 +2417,7 @@ def simple_native_image(
         outline=image_outline,
         opacity=image_opacity,
         shadow=image_shadow,
+        alternate_content=alternate_content,
         placement=placement,
         floating=floating,
         name=optional_attribute("name"),
@@ -2123,10 +2495,32 @@ def patch_simple_native_image(
         raise NativePackageError(
             "image.update requires one supported native picture."
         )
-    drawing_container = paragraph.find(
-        f"./{_q(W, 'r')}/{_q(W, 'drawing')}/*"
+    drawing_context = _image_drawing_context(
+        package,
+        paragraph,
+        source_part=source_part,
     )
-    if drawing_container is None or drawing_container.tag not in {
+    if (
+        drawing_context is None
+        or len(drawing_context.drawing) != 1
+    ):
+        raise NativePackageError(
+            "Supported native image has no unambiguous DrawingML context."
+        )
+    if (
+        original.alternate_content is not None
+        and fields - {"width", "height"}
+    ):
+        unsupported_fields = ", ".join(
+            sorted(fields - {"width", "height"})
+        )
+        raise NativePackageError(
+            "image.update can synchronize only width and height across this "
+            "DrawingML/VML alternate-content wrapper; unsupported fields: "
+            f"{unsupported_fields}."
+        )
+    drawing_container = drawing_context.drawing[0]
+    if drawing_container.tag not in {
         _q(WP, "inline"),
         _q(WP, "anchor"),
     }:
@@ -2164,6 +2558,17 @@ def patch_simple_native_image(
         for extent in (outer_extent, inner_extent):
             extent.set("cx", str(width_emu))
             extent.set("cy", str(height_emu))
+        if original.alternate_content is not None:
+            fallback_shape = drawing_context.fallback_shape
+            if fallback_shape is None:
+                raise NativePackageError(
+                    "Supported alternate-content image has no VML shape."
+                )
+            _replace_vml_size(
+                fallback_shape,
+                width_points=width_emu / EMU_PER_POINT,
+                height_points=height_emu / EMU_PER_POINT,
+            )
 
     for field_name, attribute_name in (
         ("alt_text", "descr"),
@@ -2399,6 +2804,7 @@ def patch_simple_native_image(
         or verified.outline != result.outline
         or verified.opacity != result.opacity
         or verified.shadow != result.shadow
+        or verified.alternate_content != original.alternate_content
         or verified.placement != original.placement
         or not floating_image_layout_matches(
             verified.floating,
@@ -2782,6 +3188,23 @@ def replace_simple_native_image(
         raise NativePackageError(
             "image.replace requires one supported native picture."
         )
+    drawing_context = _image_drawing_context(
+        package,
+        paragraph,
+        source_part=source_part,
+    )
+    if drawing_context is None:
+        raise NativePackageError(
+            "Supported native image has no unambiguous DrawingML context."
+        )
+    if (
+        original.alternate_content is not None
+        and not original.alternate_content.fallback_asset_matches_choice
+    ):
+        raise NativePackageError(
+            "image.replace cannot safely replace this alternate-content "
+            "image because its VML fallback uses different asset bytes."
+        )
     relationship_id, media_part_uri = _attach_image_asset(
         package,
         source_part=source_part,
@@ -2795,6 +3218,13 @@ def replace_simple_native_image(
             "Supported native image no longer contains exactly one a:blip."
         )
     blips[0].set(_q(R, "embed"), relationship_id)
+    if original.alternate_content is not None:
+        fallback_image_data = drawing_context.fallback_image_data
+        if fallback_image_data is None:
+            raise NativePackageError(
+                "Supported alternate-content image has no VML image data."
+            )
+        fallback_image_data.set(_q(R, "id"), relationship_id)
 
     replaced = simple_native_image(
         package,
@@ -2813,6 +3243,7 @@ def replace_simple_native_image(
         or replaced.outline != original.outline
         or replaced.opacity != original.opacity
         or replaced.shadow != original.shadow
+        or replaced.alternate_content != original.alternate_content
         or replaced.placement != original.placement
         or not floating_image_layout_matches(
             replaced.floating,

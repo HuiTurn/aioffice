@@ -452,6 +452,23 @@ def _image_shadow_attributes(image: ImageBlock) -> str:
     )
 
 
+def _image_alternate_content_attributes(image: ImageBlock) -> str:
+    if image.alternate_content is None:
+        return ""
+    alternate = image.alternate_content
+    return (
+        ' data-aioffice-alternate-content="true"'
+        f' data-aioffice-choice-requires="'
+        f'{alternate.choice_requires_prefix}"'
+        f' data-aioffice-choice-requires-namespace="'
+        f'{escape(alternate.choice_requires_namespace, quote=True)}"'
+        f' data-aioffice-fallback-kind="{alternate.fallback_kind}"'
+        ' data-aioffice-fallback-asset-matches-choice="'
+        f'{"true" if alternate.fallback_asset_matches_choice else "false"}"'
+        ' data-aioffice-synchronized-update-fields="width,height"'
+    )
+
+
 def _image_placement_attributes(image: ImageBlock) -> str:
     return f' data-aioffice-placement="{image.placement}"'
 
@@ -541,6 +558,7 @@ def _header_footer_html(
                 f"{_image_outline_attributes(block)}"
                 f"{_image_opacity_attributes(block)}"
                 f"{_image_shadow_attributes(block)}"
+                f"{_image_alternate_content_attributes(block)}"
                 f"{figure_style}>"
                 '<div class="native-image-placeholder" role="img" '
                 f'aria-label="{escape(label, quote=True)}" '
@@ -1026,6 +1044,7 @@ def export_html(
                 f"{_image_outline_attributes(block)}"
                 f"{_image_opacity_attributes(block)}"
                 f"{_image_shadow_attributes(block)}"
+                f"{_image_alternate_content_attributes(block)}"
                 f"{_style_attribute(figure_css)}>"
             )
             lines.append(

@@ -99,6 +99,12 @@ shadow. The clone preserves the complete `a:effectLst/a:outerShdw` subtree and
 shares the media target; later shadow, opacity, outline, transform, anchor,
 paragraph, or binary updates remain isolated to the selected story occurrence.
 
+In `0.2.0.dev47`, a strict inline `mc:AlternateContent` DrawingML/VML picture can be
+projected, read, resized, and conditionally replaced inside an existing header or
+footer. Cloning a part that contains the VML compatibility branch is still refused:
+the current clone proof intentionally does not rebase legacy VML shape identities or
+duplicate producer-specific fallback assets.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

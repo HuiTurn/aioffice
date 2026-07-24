@@ -455,6 +455,11 @@ def _paragraph_projection(
                 if native_image.shadow is not None
                 else None
             ),
+            "alternate_content": (
+                native_image.alternate_content.model_dump(mode="json")
+                if native_image.alternate_content is not None
+                else None
+            ),
             "floating": (
                 native_image.floating.model_dump(
                     mode="json",

@@ -19,7 +19,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.46"
+SPEC_VERSION = "0.2-draft.47"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -2058,6 +2058,33 @@ class ImageShadow(StrictModel):
         return self
 
 
+class ImageAlternateContent(StrictModel):
+    """Evidence for one proven DrawingML/VML compatibility wrapper."""
+
+    choice_requires_prefix: Literal["wps"] = "wps"
+    choice_requires_namespace: Literal[
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+    ] = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+    fallback_kind: Literal["vml_picture"] = "vml_picture"
+    synchronized_update_fields: list[
+        Literal["width", "height"]
+    ] = Field(
+        default_factory=lambda: ["width", "height"],
+        min_length=2,
+        max_length=2,
+    )
+    fallback_asset_matches_choice: bool = Field(strict=True)
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> "ImageAlternateContent":
+        if self.synchronized_update_fields != ["width", "height"]:
+            raise ValueError(
+                "Alternate-content image updates must declare exactly width "
+                "then height as synchronized fields."
+            )
+        return self
+
+
 class ImageBlock(NodeBase):
     """One AI-addressable image occurrence backed by a native binary asset."""
 
@@ -2072,6 +2099,7 @@ class ImageBlock(NodeBase):
     outline: ImageOutline | None = None
     opacity: ImageOpacityPercentage | None = None
     shadow: ImageShadow | None = None
+    alternate_content: ImageAlternateContent | None = None
     floating: FloatingImageLayout | None = None
     name: str | None = None
     alt_text: str | None = None
@@ -2368,6 +2396,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.44",
         "0.2-draft.45",
         "0.2-draft.46",
+        "0.2-draft.47",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

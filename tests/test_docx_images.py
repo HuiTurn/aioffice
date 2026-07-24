@@ -28,6 +28,9 @@ WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+VML = "urn:schemas-microsoft-com:vml"
+OFFICE = "urn:schemas-microsoft-com:office:office"
+WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 IMAGE_RELATIONSHIP_TYPE = (
@@ -559,6 +562,169 @@ def _header_image_document(
     )
 
 
+def _alternate_content_image_document(
+    source: bytes,
+    *,
+    part_name: str = "word/document.xml",
+    fallback_matches_choice: bool = True,
+    empty_stretch: bool = False,
+) -> bytes:
+    relationship_name = (
+        f"{part_name.rsplit('/', 1)[0]}/_rels/"
+        f"{part_name.rsplit('/', 1)[1]}.rels"
+    )
+    with ZipFile(io.BytesIO(source)) as archive:
+        root = parse_xml(archive.read(part_name))
+        relationships = parse_xml(archive.read(relationship_name))
+        content_types = parse_xml(archive.read("[Content_Types].xml"))
+
+    drawing = root.find(f".//{_q(W, 'drawing')}")
+    assert drawing is not None
+    if empty_stretch:
+        stretch = drawing.find(f".//{_q(A, 'stretch')}")
+        assert stretch is not None
+        stretch.clear()
+    run = next(
+        element
+        for element in root.iter(_q(W, "r"))
+        if drawing in list(element)
+    )
+    run.remove(drawing)
+    alternate = ET.SubElement(run, _q(MC, "AlternateContent"))
+    choice = ET.SubElement(
+        alternate,
+        _q(MC, "Choice"),
+        {"Requires": "wps"},
+    )
+    choice.append(drawing)
+    fallback = ET.SubElement(alternate, _q(MC, "Fallback"))
+    picture = ET.SubElement(fallback, _q(W, "pict"))
+    shape_type = ET.SubElement(
+        picture,
+        _q(VML, "shapetype"),
+        {
+            "id": "_x0000_t75",
+            "coordsize": "21600,21600",
+            _q(OFFICE, "spt"): "75",
+            _q(OFFICE, "preferrelative"): "t",
+            "path": "m@4@5l@4@11@9@11@9@5xe",
+            "filled": "f",
+            "stroked": "f",
+        },
+    )
+    ET.SubElement(
+        shape_type,
+        _q(VML, "stroke"),
+        {"joinstyle": "miter"},
+    )
+    formulas = ET.SubElement(shape_type, _q(VML, "formulas"))
+    for formula in (
+        "if lineDrawn pixelLineWidth 0",
+        "sum @0 1 0",
+        "sum 0 0 @1",
+        "prod @2 1 2",
+        "prod @3 21600 pixelWidth",
+        "prod @3 21600 pixelHeight",
+        "sum @0 0 1",
+        "prod @6 1 2",
+        "prod @7 21600 pixelWidth",
+        "sum @8 21600 0",
+        "prod @7 21600 pixelHeight",
+        "sum @10 21600 0",
+    ):
+        ET.SubElement(formulas, _q(VML, "f"), {"eqn": formula})
+    ET.SubElement(
+        shape_type,
+        _q(VML, "path"),
+        {
+            _q(OFFICE, "extrusionok"): "f",
+            "gradientshapeok": "t",
+            _q(OFFICE, "connecttype"): "rect",
+        },
+    )
+    ET.SubElement(
+        shape_type,
+        _q(OFFICE, "lock"),
+        {
+            _q(VML, "ext"): "edit",
+            "aspectratio": "t",
+        },
+    )
+    fallback_relationship_id = (
+        "rIdImage1"
+        if fallback_matches_choice
+        else "rIdFallbackImage"
+    )
+    shape = ET.SubElement(
+        picture,
+        _q(VML, "shape"),
+        {
+            "id": "_x0000_i1025",
+            "stroked": "f",
+            _q(OFFICE, "allowincell"): "t",
+            "style": (
+                "width:144pt;height:72pt;"
+                "mso-wrap-style:none;v-text-anchor:middle"
+            ),
+            "type": "#_x0000_t75",
+        },
+    )
+    ET.SubElement(
+        shape,
+        _q(VML, "imagedata"),
+        {
+            _q(R, "id"): fallback_relationship_id,
+            _q(OFFICE, "detectmouseclick"): "t",
+        },
+    )
+    additions: dict[str, bytes] = {}
+    if not fallback_matches_choice:
+        ET.SubElement(
+            relationships,
+            _q(REL, "Relationship"),
+            {
+                "Id": fallback_relationship_id,
+                "Type": IMAGE_RELATIONSHIP_TYPE,
+                "Target": "media/fallback.jpg",
+            },
+        )
+        additions["word/media/fallback.jpg"] = JPEG
+        if not any(
+            child.get("Extension", "").casefold() in {"jpg", "jpeg"}
+            for child in content_types
+        ):
+            ET.SubElement(
+                content_types,
+                _q(CT, "Default"),
+                {
+                    "Extension": "jpg",
+                    "ContentType": "image/jpeg",
+                },
+            )
+
+    ET.register_namespace("mc", MC)
+    ET.register_namespace("v", VML)
+    ET.register_namespace("o", OFFICE)
+    part_payload = serialize_xml(root)
+    declaration_end = part_payload.find(b"?>")
+    root_end = part_payload.find(b">", declaration_end + 2)
+    assert root_end > declaration_end
+    part_payload = (
+        part_payload[:root_end]
+        + f' xmlns:wps="{WPS}"'.encode()
+        + part_payload[root_end:]
+    )
+    return _rewrite_package(
+        source,
+        replacements={
+            part_name: part_payload,
+            relationship_name: serialize_xml(relationships),
+            "[Content_Types].xml": serialize_xml(content_types),
+        },
+        additions=additions,
+    )
+
+
 class DocxImageTests(unittest.TestCase):
     def test_cli_exposes_strict_image_and_asset_schemas(self) -> None:
         for kind, required_properties in (
@@ -601,6 +767,16 @@ class DocxImageTests(unittest.TestCase):
                     "alignment",
                     "rotate_with_shape",
                     "effect_extent",
+                },
+            ),
+            (
+                "image-alternate-content",
+                {
+                    "choice_requires_prefix",
+                    "choice_requires_namespace",
+                    "fallback_kind",
+                    "synchronized_update_fields",
+                    "fallback_asset_matches_choice",
                 },
             ),
             (
@@ -869,7 +1045,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.46")
+        self.assertEqual(spec["spec_version"], "0.2-draft.47")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -1084,6 +1260,315 @@ class DocxImageTests(unittest.TestCase):
             _image_document(mixed_text="Caption")
         ).to_spec()["content"][0]
         self.assertIn("with text", mixed["summary"])
+
+    def test_strict_inline_alternate_content_projects_resizes_and_replaces(
+        self,
+    ) -> None:
+        source = _alternate_content_image_document(
+            _image_document(shadowed=True),
+            empty_stretch=True,
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        expected_alternate = {
+            "choice_requires_prefix": "wps",
+            "choice_requires_namespace": WPS,
+            "fallback_kind": "vml_picture",
+            "synchronized_update_fields": ["width", "height"],
+            "fallback_asset_matches_choice": True,
+        }
+        self.assertEqual(image["alternate_content"], expected_alternate)
+        self.assertEqual(document.image_bytes(image["id"]), PNG)
+        self.assertEqual(document.to_bytes("docx"), source)
+
+        inspected = document.inspect()["nodes"][0]
+        self.assertEqual(
+            inspected["alternate_content"],
+            expected_alternate,
+        )
+        self.assertEqual(
+            inspected["native_update_fields"],
+            ["width", "height"],
+        )
+        self.assertIn("image.replace", inspected["supported_operations"])
+        html = document.to_bytes("html").decode()
+        self.assertIn('data-aioffice-alternate-content="true"', html)
+        self.assertIn(
+            'data-aioffice-fallback-asset-matches-choice="true"',
+            html,
+        )
+        capabilities = document.capabilities()["assets"]
+        self.assertEqual(
+            capabilities["image_alternate_content_schema"],
+            "image-alternate-content",
+        )
+        self.assertEqual(
+            capabilities[
+                "image_alternate_content_synchronized_update_fields"
+            ],
+            ["width", "height"],
+        )
+        formatted = document.apply(
+            [
+                {
+                    "op": "paragraph.format",
+                    "target": image["id"],
+                    "set": {"alignment": "center"},
+                }
+            ]
+        )
+        self.assertTrue(formatted.success, formatted.model_dump())
+        assert formatted.document is not None
+        formatted_reopened = Document.from_docx(
+            formatted.document.to_bytes("docx")
+        )
+        self.assertEqual(
+            formatted_reopened.to_spec()["content"][0][
+                "alternate_content"
+            ],
+            expected_alternate,
+        )
+
+        refused = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"opacity": 50},
+                }
+            ]
+        )
+        self.assertFalse(refused.success)
+        self.assertEqual(
+            refused.diagnostics[0].code,
+            "INVALID_SPEC",
+        )
+        self.assertIn(
+            "alternate-content wrapper",
+            refused.diagnostics[0].message,
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+
+        resized = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "width": {"value": 288, "unit": "pt"},
+                    },
+                }
+            ]
+        )
+        self.assertTrue(resized.success, resized.model_dump())
+        assert resized.document is not None
+        resized_image = resized.document.to_spec()["content"][0]
+        self.assertEqual(
+            resized_image["width"],
+            {"value": 288.0, "unit": "pt"},
+        )
+        self.assertEqual(
+            resized_image["height"],
+            {"value": 144.0, "unit": "pt"},
+        )
+        with ZipFile(
+            io.BytesIO(resized.document.to_bytes("docx"))
+        ) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        extent = root.find(f".//{_q(WP, 'extent')}")
+        fallback_shape = root.find(f".//{_q(VML, 'shape')}")
+        assert extent is not None
+        assert fallback_shape is not None
+        self.assertEqual(
+            extent.attrib,
+            {"cx": "3657600", "cy": "1828800"},
+        )
+        self.assertEqual(
+            fallback_shape.get("style"),
+            (
+                "width:288pt;height:144pt;"
+                "mso-wrap-style:none;v-text-anchor:middle"
+            ),
+        )
+
+        replaced = resized.document.replace_image(
+            image["id"],
+            JPEG,
+            media_type="image/jpeg",
+        )
+        self.assertTrue(replaced.success, replaced.model_dump())
+        assert replaced.document is not None
+        self.assertEqual(replaced.document.image_bytes(image["id"]), JPEG)
+        replaced_image = replaced.document.to_spec()["content"][0]
+        self.assertEqual(
+            replaced_image["alternate_content"],
+            expected_alternate,
+        )
+        with ZipFile(
+            io.BytesIO(replaced.document.to_bytes("docx"))
+        ) as package:
+            root = parse_xml(package.read("word/document.xml"))
+            relationships = parse_xml(
+                package.read("word/_rels/document.xml.rels")
+            )
+        blip = root.find(f".//{_q(A, 'blip')}")
+        image_data = root.find(f".//{_q(VML, 'imagedata')}")
+        assert blip is not None
+        assert image_data is not None
+        replacement_id = blip.get(_q(R, "embed"))
+        self.assertEqual(image_data.get(_q(R, "id")), replacement_id)
+        relationship = next(
+            item
+            for item in relationships.findall(
+                _q(REL, "Relationship")
+            )
+            if item.get("Id") == replacement_id
+        )
+        self.assertTrue(
+            relationship.get("Target", "").endswith(".jpg")
+        )
+
+    def test_alternate_content_with_distinct_fallback_refuses_replace(
+        self,
+    ) -> None:
+        source = _alternate_content_image_document(
+            _image_document(shadowed=True),
+            fallback_matches_choice=False,
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertFalse(
+            image["alternate_content"][
+                "fallback_asset_matches_choice"
+            ]
+        )
+        self.assertEqual(document.image_bytes(image["id"]), PNG)
+        self.assertEqual(len(document.to_spec()["assets"]), 1)
+        inspected = document.inspect()["nodes"][0]
+        self.assertNotIn(
+            "image.replace",
+            inspected["supported_operations"],
+        )
+        self.assertNotIn(
+            "image.replace",
+            document.capabilities()["operations"],
+        )
+        result = document.replace_image(
+            image["id"],
+            JPEG,
+            media_type="image/jpeg",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.diagnostics[0].code,
+            "UNSUPPORTED_FEATURE",
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+
+    def test_header_alternate_content_projects_and_resizes_both_branches(
+        self,
+    ) -> None:
+        source = _alternate_content_image_document(
+            _header_image_document(),
+            part_name="word/header1.xml",
+        )
+        document = Document.from_docx(source)
+        header = document.to_spec()["header_footers"][0]
+        image = header["content"][0]
+        self.assertTrue(
+            image["alternate_content"][
+                "fallback_asset_matches_choice"
+            ]
+        )
+        inspected = document.inspect()["header_footers"][0]["blocks"][0]
+        self.assertEqual(
+            inspected["native_update_fields"],
+            ["width", "height"],
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "height": {"value": 108, "unit": "pt"},
+                    },
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        with ZipFile(
+            io.BytesIO(result.document.to_bytes("docx"))
+        ) as package:
+            root = parse_xml(package.read("word/header1.xml"))
+        extent = root.find(f".//{_q(WP, 'extent')}")
+        fallback_shape = root.find(f".//{_q(VML, 'shape')}")
+        assert extent is not None
+        assert fallback_shape is not None
+        self.assertEqual(
+            extent.attrib,
+            {"cx": "2743200", "cy": "1371600"},
+        )
+        self.assertEqual(
+            fallback_shape.get("style"),
+            (
+                "width:216pt;height:108pt;"
+                "mso-wrap-style:none;v-text-anchor:middle"
+            ),
+        )
+
+    def test_unrecognized_alternate_content_remains_opaque(self) -> None:
+        mutations = {
+            "missing_fallback": lambda alternate: alternate.remove(
+                alternate.find(_q(MC, "Fallback"))
+            ),
+            "wrong_requires": lambda alternate: alternate.find(
+                _q(MC, "Choice")
+            ).set("Requires", "future"),
+            "size_mismatch": lambda alternate: alternate.find(
+                f".//{_q(VML, 'shape')}"
+            ).set(
+                "style",
+                (
+                    "width:145pt;height:72pt;"
+                    "mso-wrap-style:none;v-text-anchor:middle"
+                ),
+            ),
+            "extra_fallback_shape": lambda alternate: alternate.find(
+                f"./{_q(MC, 'Fallback')}/{_q(W, 'pict')}"
+            ).append(ET.Element(_q(VML, "shape"))),
+        }
+        for name, mutate in mutations.items():
+            source = _alternate_content_image_document(_image_document())
+            with ZipFile(io.BytesIO(source)) as archive:
+                root = parse_xml(archive.read("word/document.xml"))
+            alternate = root.find(f".//{_q(MC, 'AlternateContent')}")
+            assert alternate is not None
+            mutate(alternate)
+            mutated = _rewrite_package(
+                source,
+                replacements={
+                    "word/document.xml": serialize_xml(root),
+                },
+                additions={},
+            )
+            with self.subTest(name=name):
+                document = Document.from_docx(mutated)
+                self.assertEqual(
+                    document.to_spec()["content"][0]["type"],
+                    "opaque",
+                )
+                self.assertEqual(document.to_spec()["assets"], [])
+
+        anchored = _alternate_content_image_document(
+            _image_document(anchored=True)
+        )
+        document = Document.from_docx(anchored)
+        self.assertEqual(
+            document.to_spec()["content"][0]["type"],
+            "opaque",
+        )
 
     def test_floating_square_wrap_projects_and_preserves_native_layout(
         self,

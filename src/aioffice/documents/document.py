@@ -373,6 +373,7 @@ class Document:
             or image.outline != native_image.outline
             or image.opacity != native_image.opacity
             or image.shadow != native_image.shadow
+            or image.alternate_content != native_image.alternate_content
             or round(image.width.to_points() * 12_700)
             != round(native_image.width.to_points() * 12_700)
             or round(image.height.to_points() * 12_700)
@@ -812,6 +813,14 @@ class Document:
                             if node.shadow is not None
                             else None
                         ),
+                        alternate_content=(
+                            node.alternate_content.model_dump(
+                                mode="json",
+                                exclude_none=True,
+                            )
+                            if node.alternate_content is not None
+                            else None
+                        ),
                         floating=(
                             node.floating.model_dump(
                                 mode="json",
@@ -827,7 +836,15 @@ class Document:
                         supported_operations=(
                             [
                                 "image.insert_after",
-                                "image.replace",
+                                *(
+                                    ["image.replace"]
+                                    if (
+                                        node.alternate_content is None
+                                        or node.alternate_content
+                                        .fallback_asset_matches_choice
+                                    )
+                                    else []
+                                ),
                                 "image.update",
                                 *(
                                     ["image.anchor.update"]
@@ -839,6 +856,22 @@ class Document:
                             ]
                             if self._native is not None
                             else []
+                        ),
+                        native_update_fields=(
+                            node.alternate_content
+                            .synchronized_update_fields
+                            if node.alternate_content is not None
+                            else [
+                                "width",
+                                "height",
+                                "crop",
+                                "transform",
+                                "outline",
+                                "opacity",
+                                "shadow",
+                                "alt_text",
+                                "title",
+                            ]
                         ),
                         editable=node.editable,
                         asset=(
@@ -978,6 +1011,15 @@ class Document:
                                             if block.shadow is not None
                                             else None
                                         ),
+                                        "alternate_content": (
+                                            block.alternate_content.model_dump(
+                                                mode="json",
+                                                exclude_none=True,
+                                            )
+                                            if block.alternate_content
+                                            is not None
+                                            else None
+                                        ),
                                         "placement": block.placement,
                                         "floating": (
                                             block.floating.model_dump(
@@ -993,7 +1035,17 @@ class Document:
                                         "capabilities": block.capabilities,
                                         "supported_operations": (
                                             [
-                                                "image.replace",
+                                                *(
+                                                    ["image.replace"]
+                                                    if (
+                                                        block.alternate_content
+                                                        is None
+                                                        or block
+                                                        .alternate_content
+                                                        .fallback_asset_matches_choice
+                                                    )
+                                                    else []
+                                                ),
                                                 "image.update",
                                                 *(
                                                     ["image.anchor.update"]
@@ -1005,6 +1057,23 @@ class Document:
                                             ]
                                             if self._native is not None
                                             else []
+                                        ),
+                                        "native_update_fields": (
+                                            block.alternate_content
+                                            .synchronized_update_fields
+                                            if block.alternate_content
+                                            is not None
+                                            else [
+                                                "width",
+                                                "height",
+                                                "crop",
+                                                "transform",
+                                                "outline",
+                                                "opacity",
+                                                "shadow",
+                                                "alt_text",
+                                                "title",
+                                            ]
                                         ),
                                     }
                                     if isinstance(block, ImageBlock)
@@ -1177,9 +1246,14 @@ class Document:
                 "table.cell.format",
             ]
             if any(
-                True for _ in _document_images(self._spec)
+                image.alternate_content is None
+                or image.alternate_content.fallback_asset_matches_choice
+                for image in _document_images(self._spec)
             ):
                 operations.append("image.replace")
+            if any(
+                True for _ in _document_images(self._spec)
+            ):
                 operations.append("image.update")
             if any(
                 image.placement == "floating"
@@ -1254,6 +1328,44 @@ class Document:
                     "shadow",
                     "alt_text",
                     "title",
+                ],
+                "image_alternate_content_schema": (
+                    "image-alternate-content"
+                ),
+                "image_alternate_content_projection": (
+                    "strict_inline_mc_choice_drawingml_and_vml_picture_"
+                    "fallback"
+                ),
+                "image_alternate_content_choice_requires": {
+                    "prefix": "wps",
+                    "namespace": (
+                        "http://schemas.microsoft.com/office/word/2010/"
+                        "wordprocessingShape"
+                    ),
+                },
+                "image_alternate_content_synchronized_update_fields": [
+                    "width",
+                    "height",
+                ],
+                "image_alternate_content_replace_condition": (
+                    "vml_fallback_asset_bytes_and_media_type_match_choice"
+                ),
+                "image_alternate_content_unsupported_updates": [
+                    "crop",
+                    "transform",
+                    "outline",
+                    "opacity",
+                    "shadow",
+                    "alt_text",
+                    "title",
+                    "anchor_layout",
+                ],
+                "image_alternate_content_opaque_cases": [
+                    "non_inline_or_non_picture_fallback",
+                    "unknown_or_rebound_requires_prefix",
+                    "multiple_choices_or_fallbacks",
+                    "branch_geometry_mismatch",
+                    "unrecognized_vml_shape",
                 ],
                 "clearable_update_fields": [
                     "crop",
@@ -1358,6 +1470,7 @@ class Document:
                     "pic:spPr/a:ln",
                     "pic:blipFill/a:blip/a:alphaModFix",
                     "pic:spPr/a:effectLst/a:outerShdw",
+                    "mc:Fallback/w:pict/v:shape/@style(width,height)",
                 ],
                 "projected_placements": [
                     "inline",
@@ -1524,6 +1637,8 @@ class Document:
                     "picture_outline",
                     "picture_opacity",
                     "picture_outer_shadow",
+                    "alternate_content_wrapper_when_supported",
+                    "synchronized_vml_fallback_asset_when_identical",
                     "native_placement_and_anchor_layout",
                     "alternative_text",
                     "title",
@@ -1614,6 +1729,10 @@ class Document:
                         "body, header, or footer paragraph with no other "
                         "visible content"
                     ),
+                    (
+                        "optional strict inline mc:AlternateContent with one "
+                        "wps DrawingML choice and canonical VML picture fallback"
+                    ),
                 ],
                 "opaque_native_cases": [
                     (
@@ -1629,7 +1748,7 @@ class Document:
                         "unsupported-shadow, or other effected picture"
                     ),
                     "picture in table",
-                    "VML, OLE, or embedded object",
+                    "standalone or unrecognized VML, OLE, or embedded object",
                 ],
                 "native_render_is_visual_authority": True,
             },
@@ -1812,6 +1931,7 @@ class Document:
                         "subdocument",
                         "tracked_change_or_move",
                         "legacy_pict_or_vml",
+                        "alternate_content_with_vml_fallback",
                     ],
                     "clone_content_edit": "subsequent_patch_only",
                     "clone_then_bind_same_patch": True,
@@ -4382,6 +4502,34 @@ class Document:
                         node_ids=[image["id"]],
                     )
                 )
+            alternate_content = image.get("alternate_content")
+            if (
+                isinstance(alternate_content, dict)
+                and not alternate_content.get(
+                    "fallback_asset_matches_choice",
+                    False,
+                )
+            ):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="UNSUPPORTED_FEATURE",
+                        message=(
+                            "image.replace cannot safely synchronize this "
+                            "DrawingML/VML alternate-content image because "
+                            "the fallback uses different asset bytes."
+                        ),
+                        node_ids=[image["id"]],
+                        suggested_actions=[
+                            {
+                                "action": (
+                                    "retain_native_fallback_or_replace_in_"
+                                    "an_office_application"
+                                )
+                            }
+                        ],
+                    )
+                )
             try:
                 replacement = AssetRef.model_validate(
                     operation.get("asset")
@@ -4567,6 +4715,17 @@ class Document:
                 if isinstance(set_values, dict)
                 else False
             )
+            unsupported_alternate_fields = (
+                sorted(
+                    (set(set_values) | set(clear_values))
+                    - {"width", "height"}
+                )
+                if (
+                    valid_shape
+                    and isinstance(image.get("alternate_content"), dict)
+                )
+                else []
+            )
             if (
                 not valid_shape
                 or not set_values
@@ -4575,6 +4734,7 @@ class Document:
                 or overlap
                 or invalid_clear
                 or has_null
+                or unsupported_alternate_fields
             ):
                 detail = (
                     "set must be an object and clear a unique string list"
@@ -4593,6 +4753,11 @@ class Document:
                         f"{', '.join(invalid_clear)}"
                     )
                     if invalid_clear
+                    else (
+                        "alternate-content wrapper cannot synchronize: "
+                        f"{', '.join(unsupported_alternate_fields)}"
+                    )
+                    if unsupported_alternate_fields
                     else "set values cannot be null"
                 )
                 raise _PatchFailure(

@@ -187,9 +187,22 @@
   order fail-closed as opaque.
 - Verified that LibreOffice 26.8 renders the tested direct black outer shadow,
   retains it on save, and may quantize its EMU lengths or add effect extents. A
-  LibreOffice save may wrap the drawing in `mc:AlternateContent`, which remains
-  losslessly opaque; Microsoft Word/Office remains the cross-producer visual
-  authority.
+  LibreOffice save may wrap the drawing in `mc:AlternateContent`; Microsoft
+  Word/Office remains the cross-producer visual authority.
+- Added strict projection of inline `mc:AlternateContent` images containing one
+  `Requires="wps"` DrawingML choice and one canonical VML picture fallback, with
+  unambiguous namespace-binding proof and AI-readable `ImageAlternateContent`
+  evidence in the Spec, inspect output, JSON Schema, capabilities, and semantic HTML.
+- Added coordinated width/height lowering across DrawingML extents and VML point
+  styles, including preservation of the otherwise lexical-only `wps` namespace
+  declaration through native part serialization.
+- Allowed occurrence-scoped replacement of a supported compatibility wrapper only
+  when the choice and fallback resolve to byte- and media-type-identical assets, then
+  synchronized both relationship references. Distinct baked fallback assets,
+  anchored wrappers, branch geometry disagreement, malformed VML, and every
+  unsynchronized field remain atomic fail-closed boundaries.
+- Accepted LibreOffice's equivalent empty `a:stretch` normalization without
+  reconstructing it, allowing real saved shadow wrappers to re-project.
 - Accepted LibreOffice's visually neutral picture normalization
   (`pic:spPr/@bwMode="auto"` and at most one empty `a:noFill`) so aligned pictures
   remain projected and editable after an Office-compatible open/save cycle, while
@@ -598,6 +611,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.44`.
 - Advanced the AiOffice Document Spec to `0.2-draft.45`.
 - Advanced the AiOffice Document Spec to `0.2-draft.46`.
+- Advanced the AiOffice Document Spec to `0.2-draft.47`.
 
 ## 0.1.0
 

@@ -192,16 +192,18 @@ occurrence and fixes its capability list to `inspect`, `extract`, and `render`.
 An image becomes an `image` block only when all of these conditions hold:
 
 1. the paragraph contains only paragraph properties and runs;
-2. the runs contain only run properties and exactly one `w:drawing`;
-3. the drawing contains one supported `wp:inline` or `wp:anchor`;
+2. the runs contain only run properties and exactly one direct `w:drawing`, or the
+   exact strict inline `mc:AlternateContent` compatibility wrapper documented below;
+3. the selected drawing contains one supported `wp:inline` or `wp:anchor`;
 4. `wp:extent` has positive `cx` and `cy` values;
 5. the graphic data contains one DrawingML picture;
 6. one `a:blip` uses `r:embed`, with no `r:link`;
 7. that relationship is one internal image relationship from the containing body,
    header, or footer part;
 8. the target exists and has an `image/*` OPC content type;
-9. the picture uses one rectangular stretch fill, optionally preceded by one
-   non-negative, non-overconstrained `a:srcRect`;
+9. the picture uses one rectangular stretch fill (an empty `a:stretch` or one empty
+   `a:fillRect`), optionally preceded by one non-negative, non-overconstrained
+   `a:srcRect`;
 10. `a:xfrm` has zero `a:off`, one `a:ext` matching the outer extent, and only
     valid signed-Int32 rotation plus strict horizontal/vertical flip attributes;
 11. `pic:spPr` uses exact supported child order and has at most one direct picture
@@ -530,9 +532,71 @@ The dev46 outer-shadow fixture preserves its complete direct
 `a:effectLst/a:outerShdw` subtree byte-for-byte on exact no-op and unrelated
 AiOffice edits. LibreOffice 26.8 renders the tested direct black shadow and
 preserves the effect when saving, while possibly quantizing blur/distance EMUs,
-adding effect extents, and wrapping the drawing in `mc:AlternateContent`. The latter
-rewritten representation remains losslessly opaque in the current conservative
-projection. Use Microsoft Word/Office for final cross-producer visual approval.
+adding effect extents, and wrapping the drawing in `mc:AlternateContent`. Dev47 can
+re-project the strict inline compatibility form described below. Use Microsoft
+Word/Office for final cross-producer visual approval.
+
+## DrawingML/VML compatibility wrappers
+
+JSON remains the semantic exchange protocol; the native package remains the
+authority for producer-specific compatibility branches. Dev47 projects one
+deliberately narrow `mc:AlternateContent` form when all of these proofs hold:
+
+1. the image paragraph otherwise satisfies the ordinary one-picture rules;
+2. the run contains one wrapper with exactly one `mc:Choice` followed by one
+   `mc:Fallback`;
+3. the choice has exactly `Requires="wps"`, and every declaration of the `wps`
+   prefix in that XML part resolves to
+   `http://schemas.microsoft.com/office/word/2010/wordprocessingShape`;
+4. the choice contains one supported inline DrawingML picture;
+5. the fallback contains one canonical VML type-75 picture shape, one internal
+   image relationship, and no unrecognized children or attributes;
+6. the VML point width and height agree with the DrawingML extents within the
+   producer-rounding tolerance.
+
+This follows the
+[Open XML markup-compatibility selection model](https://learn.microsoft.com/en-us/office/open-xml/general/introduction-to-markup-compatibility):
+a consumer uses the first understood choice and otherwise the fallback. The
+[`AlternateContentChoice` contract](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.alternatecontentchoice?view=openxml-3.0.1)
+defines `Requires` as namespace prefixes, so AiOffice treats the prefix binding as
+security- and fidelity-relevant evidence rather than trusting the lexical string
+alone.
+
+The projected `ImageBlock.alternate_content` object records:
+
+```json
+{
+  "choice_requires_prefix": "wps",
+  "choice_requires_namespace": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+  "fallback_kind": "vml_picture",
+  "synchronized_update_fields": ["width", "height"],
+  "fallback_asset_matches_choice": false
+}
+```
+
+The occurrence-specific `native_update_fields` is narrowed to `width` and `height`.
+AiOffice changes both `wp:extent`/`a:xfrm/a:ext` and the VML
+`v:shape/@style` dimensions, then re-proves the wrapper. Other image fields are
+rejected atomically because updating only the DrawingML choice could produce a
+different image for fallback consumers.
+
+`image.replace` is advertised only when the choice and fallback resolve to the same
+media type and SHA-256 bytes. In that case both references are changed to the same
+new occurrence-scoped relationship. A distinct fallback is common when an office
+producer bakes opacity or other effects into separate raster bytes; AiOffice exposes
+that fact and refuses replacement instead of discarding it.
+
+Unused namespace declarations are normally dropped by Python's ElementTree.
+Because `mc:Choice/@Requires` refers to `wps` lexically, native lowering explicitly
+preserves that unambiguous declaration whenever the containing body, header, or
+footer part is rewritten.
+
+Anchored wrappers, multiple choices, rebound or unknown required prefixes, missing
+fallbacks, non-picture VML, geometry disagreement, external/missing/non-image
+fallback relationships, and unfamiliar VML shape structures remain opaque. A
+header/footer part containing even a projected wrapper is not yet clone-safe because
+VML identities and producer-specific fallback assets are not rebased by the clone
+algorithm.
 
 ## Verified binary access
 
@@ -1169,7 +1233,8 @@ These cases remain native and explicit `opaque`/read-only projections:
 - active-simple-position, unsupported wrap-specific effects, malformed
   relative-size rules, or otherwise unsupported floating anchors;
 - non-default picture black-and-white modes or non-neutral shape fills;
-- multiple pictures or alternate representations;
+- multiple pictures or alternate representations outside the strict inline
+  `mc:AlternateContent` compatibility contract;
 - linked or external images;
 - negative, overconstrained, malformed, or otherwise unsupported crop rectangles;
 - malformed/unknown picture transforms or nonzero transform offsets;
@@ -1181,8 +1246,8 @@ These cases remain native and explicit `opaque`/read-only projections:
   malformed outer-shadow attributes and children;
 - drawings inside tables;
 - complex header/footer drawings that do not satisfy the same one-picture proof;
-- VML pictures, OLE objects, embedded files, charts, SmartArt, and other graphic
-  data types.
+- standalone or unrecognized VML pictures, OLE objects, embedded files, charts,
+  SmartArt, and other graphic data types.
 
 The boundary is intentionally based on what the semantic layer can prove, not what it
 can approximately display. Unrelated edits preserve every original package part and
@@ -1195,7 +1260,9 @@ subset are not claimed in this release.
 
 Semantic HTML emits an accessible, dimensioned placeholder with the asset ID, media
 type, placement, and normalized crop, transform, outline, opacity, and shadow
-evidence. Markdown emits an `aioffice-asset:` reference. Neither exporter embeds
+evidence. A supported compatibility wrapper additionally emits its required
+namespace, fallback kind, asset-match result, and synchronized fields. Markdown
+emits an `aioffice-asset:` reference. Neither exporter embeds
 binary data or claims to reproduce native floating placement, wrapping, crop,
 transform, outline, opacity, shadow, or picture content.
 
