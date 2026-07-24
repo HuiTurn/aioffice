@@ -132,6 +132,21 @@
 - Documented that LibreOffice 26.8 currently ignores these Office 2010 rules for
   layout and removes them on save while retaining the absolute fallback extent;
   AiOffice preserves them exactly until another producer rewrites the package.
+- Added strict `ImageTransform` semantics for DrawingML picture rotation plus
+  horizontal and vertical mirroring in body, header, and footer stories.
+- Projected `a:xfrm/@rot` as canonical clockwise degrees in `[0, 360)`, quantized
+  to the native 1/60000-degree unit, while preserving negative and multi-turn raw
+  native values byte-for-byte during no-op and unrelated edits.
+- Added complete-group transform set/clear lowering, transformed insertion,
+  semantic HTML evidence, CLI and Workspace transport, copy-on-write replacement,
+  anchor-update, header/footer-clone, and verified-read preservation checks.
+- Kept the exact outer and inner extents independent from rotation, rejected
+  malformed transform attributes, booleans, offsets, child order, and values
+  outside signed Int32, and retained native rendering as visual authority.
+- Verified that LibreOffice 26.8 renders the tested transforms without pixel drift
+  but may normalize equivalent rotation/flip state and rewrite or quantize extents;
+  AiOffice truthfully falls back to opaque when the rewritten geometry no longer
+  satisfies the exact projection proof.
 - Accepted LibreOffice's visually neutral picture normalization
   (`pic:spPr/@bwMode="auto"` and at most one empty `a:noFill`) so aligned pictures
   remain projected and editable after an Office-compatible open/save cycle, while
@@ -536,6 +551,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.40`.
 - Advanced the AiOffice Document Spec to `0.2-draft.41`.
 - Advanced the AiOffice Document Spec to `0.2-draft.42`.
+- Advanced the AiOffice Document Spec to `0.2-draft.43`.
 
 ## 0.1.0
 

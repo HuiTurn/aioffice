@@ -386,6 +386,20 @@ def _image_crop_attributes(image: ImageBlock) -> str:
     )
 
 
+def _image_transform_attributes(image: ImageBlock) -> str:
+    if image.transform is None:
+        return ""
+    transform = image.transform
+    return (
+        ' data-aioffice-rotation-degrees-clockwise="'
+        f'{transform.rotation_degrees_clockwise:g}"'
+        f' data-aioffice-flip-horizontal="'
+        f'{"true" if transform.flip_horizontal else "false"}"'
+        f' data-aioffice-flip-vertical="'
+        f'{"true" if transform.flip_vertical else "false"}"'
+    )
+
+
 def _image_placement_attributes(image: ImageBlock) -> str:
     return f' data-aioffice-placement="{image.placement}"'
 
@@ -471,6 +485,7 @@ def _header_footer_html(
                 f'{escape(media_type, quote=True)}" '
                 f"{_image_placement_attributes(block)}"
                 f"{_image_crop_attributes(block)}"
+                f"{_image_transform_attributes(block)}"
                 f"{figure_style}>"
                 '<div class="native-image-placeholder" role="img" '
                 f'aria-label="{escape(label, quote=True)}" '
@@ -952,6 +967,7 @@ def export_html(
                 f'{escape(media_type, quote=True)}"'
                 f"{_image_placement_attributes(block)}"
                 f"{_image_crop_attributes(block)}"
+                f"{_image_transform_attributes(block)}"
                 f"{_style_attribute(figure_css)}>"
             )
             lines.append(

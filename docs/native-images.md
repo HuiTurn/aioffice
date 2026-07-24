@@ -35,6 +35,11 @@ occurrence lives in its `header_footers[].content`:
         "right": 12.5,
         "bottom": 5
       },
+      "transform": {
+        "rotation_degrees_clockwise": 90,
+        "flip_horizontal": true,
+        "flip_vertical": false
+      },
       "name": "Expert diagram",
       "alt_text": "A compact expert workflow diagram",
       "title": "Workflow",
@@ -182,8 +187,10 @@ An image becomes an `image` block only when all of these conditions hold:
 8. the target exists and has an `image/*` OPC content type;
 9. the picture uses one rectangular stretch fill, optionally preceded by one
    non-negative, non-overconstrained `a:srcRect`;
-10. the picture has no rotation, flip, visible outline, or recognized DrawingML
-    visual effect; LibreOffice's optional neutral
+10. `a:xfrm` has zero `a:off`, one `a:ext` matching the outer extent, and only
+    valid signed-Int32 rotation plus strict horizontal/vertical flip attributes;
+11. the picture has no visible outline or recognized DrawingML visual effect;
+    LibreOffice's optional neutral
     `pic:spPr/@bwMode="auto"` and at most one empty `a:noFill` normalization are
     allowed.
 
@@ -474,6 +481,14 @@ rules on save while retaining that absolute fallback. AiOffice therefore reopens
 the saved file as an absolute-size picture instead of claiming the removed rules
 survived.
 
+The dev43 transform fixture preserves negative or multi-turn `a:xfrm/@rot` values
+and explicit flip booleans byte-for-byte on exact no-op and through unrelated
+AiOffice edits, while projecting a canonical angle. LibreOffice 26.8 produced a
+pixel-identical rendering in the tested round trip, but normalized some equivalent
+rotation/flip combinations and quantized or rewrote extent evidence. When that new
+geometry no longer has exact matching inner and outer extents, AiOffice deliberately
+reopens it as opaque instead of claiming the original editable subset survived.
+
 ## Verified binary access
 
 Use the projected image node ID, never a part path:
@@ -496,7 +511,7 @@ document.extract_image(
 4. resolves the embedded relationship from the correct source part;
 5. confirms the image target and OPC media type;
 6. compares native identity, asset ID, placement, floating layout, displayed extent,
-   crop, accessibility metadata, declared size, and SHA-256;
+   crop, picture transform, accessibility metadata, declared size, and SHA-256;
 7. hashes the returned bytes again.
 
 Any stale, forged, missing, external, or structurally changed reference fails closed.
@@ -515,7 +530,7 @@ filename, size, SHA-256, and output path as JSON.
 ## Selective native updates
 
 `image.update` changes only the supported native picture's accessibility metadata,
-displayed extent, and/or rectangular source crop:
+displayed extent, rectangular source crop, and/or picture transform:
 
 ```python
 result = document.apply([
@@ -530,6 +545,10 @@ result = document.apply([
                 "right": 12.5,
                 "bottom": 5
             },
+            "transform": {
+                "rotation_degrees_clockwise": 90,
+                "flip_horizontal": true
+            },
             "alt_text": "Expert workflow with three approval stages",
             "title": "Expert workflow",
         },
@@ -538,14 +557,14 @@ result = document.apply([
 assert result.success
 ```
 
-The operation accepts `width`, `height`, `crop`, `alt_text`, and `title` in `set`.
-`crop`, `alt_text`, and `title` are clearable:
+The operation accepts `width`, `height`, `crop`, `transform`, `alt_text`, and
+`title` in `set`. `crop`, `transform`, `alt_text`, and `title` are clearable:
 
 ```json
 {
   "op": "image.update",
   "target": "#image_3A17C04E",
-  "clear": ["crop", "alt_text", "title"]
+  "clear": ["crop", "transform", "alt_text", "title"]
 }
 ```
 
@@ -598,6 +617,30 @@ An empty or all-zero native `a:srcRect` has no semantic crop and is preserved by
 unrelated edits. Negative values, values outside the bounded range, overconstrained
 edge sums, duplicate crop elements, unknown attributes, alternate fill structures,
 or malformed child order fail the conservative proof and remain opaque.
+
+### Picture rotation and mirroring
+
+`transform.rotation_degrees_clockwise` is the canonical clockwise angle in
+`[0, 360)`. AiOffice rounds it to DrawingML's signed `ST_Angle` unit of
+1/60000 degree. `flip_horizontal` and `flip_vertical` are strict booleans. At
+least one field must produce a visible transform; clear the complete `transform`
+group to restore the identity transform.
+
+The native authority is `pic:spPr/a:xfrm`: `rot` stores the angle and `flipH` /
+`flipV` store the mirror state. The protocol normalizes a valid negative or
+multi-turn native angle modulo one turn for easier AI reasoning, but unrelated
+edits retain the original raw attributes. An explicit transform update writes one
+canonical representation and never changes `wp:extent` or `a:xfrm/a:ext`.
+This follows the Open XML
+[`Transform2D`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.transform2d?view=openxml-3.0.1)
+contract; native DOCX rendering remains the authority for final composition.
+
+Setting `transform` replaces the complete rotation/mirror group, so omitted flips
+become false and omitted rotation becomes zero. Unknown transform attributes,
+invalid XML booleans, non-integer or out-of-Int32 rotations, nonzero `a:off`,
+mismatched extents, extra children, or malformed child order fail closed as opaque.
+Semantic HTML publishes normalized `data-aioffice-rotation-degrees-clockwise` and
+flip attributes as evidence but does not pretend to be Word's layout engine.
 
 The native lowering re-proves the conservative image shape before and after mutation.
 It does not decode, resample, replace, or recompress the image, and it does not change
@@ -856,6 +899,8 @@ The contract is deliberately explicit:
 - `image_id` is optional but, when supplied, must be globally unique;
 - `paragraph_style` may set direct paragraph alignment, spacing, indentation,
   background, and supported borders around the picture's host paragraph;
+- optional `transform` sets one complete clockwise rotation and horizontal/vertical
+  mirror group using the same strict semantics as `image.update`;
 - placement defaults to `inline`; a non-null `floating` value selects floating
   placement and must validate as one complete `FloatingImageLayout`;
 - every horizontal and vertical position must select exactly one explicit `offset`,
@@ -867,8 +912,8 @@ The contract is deliberately explicit:
   `side` is required for square/tight/through; tight/through also require a native
   ordered polygon; parent distances are optional and separate from schema-defined
   wrap-local geometry;
-- active simple-position anchors, malformed relative-size rules or polygons, crop,
-  rotation, effects, and other drawing features are not silently inferred.
+- active simple-position anchors, malformed relative-size rules, polygons, or
+  transforms, crop, effects, and other drawing features are not silently inferred.
 
 The native lowering adds or reuses the content-addressed image part, creates a fresh
 relationship ID, creates a `w:p/w:r/w:drawing` tree with `wp:inline` or canonical
@@ -903,14 +948,16 @@ aioffice insert-image-after \
   --height 1.5 --height-unit in \
   --alt-text "Expert workflow with three approval stages" \
   --image-id expert_workflow \
+  --transform image-transform.json \
   --floating-layout floating-layout.json \
   -o inserted.docx
 ```
 
-`floating-layout.json` is exactly the object accepted by
-`aioffice schema --kind floating-image-layout`. Omitting the flag keeps inline
-placement. The Workspace CLI accepts the same flag and records `placement` plus the
-normalized layout in its binary-free patch log.
+`image-transform.json` and `floating-layout.json` are exactly the objects accepted
+by `aioffice schema --kind image-transform` and
+`aioffice schema --kind floating-image-layout`. Omitting the floating-layout flag
+keeps inline placement. The Workspace CLI accepts the same flags and records the
+normalized transform, placement, and layout in its binary-free patch log.
 
 Tracked insertion creates one new workspace revision without storing binary data in
 the patch log:
@@ -945,7 +992,8 @@ These cases remain native and explicit `opaque`/read-only projections:
 - multiple pictures or alternate representations;
 - linked or external images;
 - negative, overconstrained, malformed, or otherwise unsupported crop rectangles;
-- rotations, flips, outlines, or effects;
+- malformed/unknown picture transforms, nonzero transform offsets, outlines, or
+  effects;
 - drawings inside tables;
 - complex header/footer drawings that do not satisfy the same one-picture proof;
 - VML pictures, OLE objects, embedded files, charts, SmartArt, and other graphic

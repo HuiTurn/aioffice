@@ -95,6 +95,7 @@ def _image_document(
     relative_size: bool = False,
     wrap_mode: str = "square",
     cropped: bool = False,
+    transform_attributes: dict[str, str] | None = None,
     alt_text: str | None = "A compact expert workflow diagram",
 ) -> bytes:
     if (aligned or percentage_position or relative_size) and not anchored:
@@ -312,7 +313,11 @@ def _image_document(
     stretch = ET.SubElement(blip_fill, _q(A, "stretch"))
     ET.SubElement(stretch, _q(A, "fillRect"))
     shape = ET.SubElement(picture, _q(PIC, "spPr"))
-    transform = ET.SubElement(shape, _q(A, "xfrm"))
+    transform = ET.SubElement(
+        shape,
+        _q(A, "xfrm"),
+        transform_attributes or {},
+    )
     ET.SubElement(transform, _q(A, "off"), {"x": "0", "y": "0"})
     ET.SubElement(
         transform,
@@ -394,6 +399,7 @@ def _header_image_document(
     percentage_position: bool = False,
     relative_size: bool = False,
     wrap_mode: str = "square",
+    transform_attributes: dict[str, str] | None = None,
 ) -> bytes:
     assert kind in {"header", "footer"}
     body_image = _image_document(
@@ -403,6 +409,7 @@ def _header_image_document(
         percentage_position=percentage_position,
         relative_size=relative_size,
         wrap_mode=wrap_mode,
+        transform_attributes=transform_attributes,
     )
     with ZipFile(io.BytesIO(body_image)) as archive:
         image_document = parse_xml(
@@ -507,6 +514,14 @@ class DocxImageTests(unittest.TestCase):
                 {"left", "top", "right", "bottom"},
             ),
             (
+                "image-transform",
+                {
+                    "rotation_degrees_clockwise",
+                    "flip_horizontal",
+                    "flip_vertical",
+                },
+            ),
+            (
                 "floating-image-effect-extent",
                 {"left", "top", "right", "bottom"},
             ),
@@ -606,13 +621,21 @@ class DocxImageTests(unittest.TestCase):
                     "floating",
                     "width",
                     "height",
+                    "transform",
                     "alt_text",
                     "paragraph_style",
                 },
             ),
             (
                 "image-update",
-                {"width", "height", "crop", "alt_text", "title"},
+                {
+                    "width",
+                    "height",
+                    "crop",
+                    "transform",
+                    "alt_text",
+                    "title",
+                },
             ),
         ):
             stdout = io.StringIO()
@@ -758,7 +781,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.42")
+        self.assertEqual(spec["spec_version"], "0.2-draft.43")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -841,11 +864,18 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(
             capabilities["native_update_fields"],
-            ["width", "height", "crop", "alt_text", "title"],
+            [
+                "width",
+                "height",
+                "crop",
+                "transform",
+                "alt_text",
+                "title",
+            ],
         )
         self.assertEqual(
             capabilities["clearable_update_fields"],
-            ["crop", "alt_text", "title"],
+            ["crop", "transform", "alt_text", "title"],
         )
         self.assertEqual(
             capabilities["single_dimension_resize"],
@@ -2226,6 +2256,7 @@ class DocxImageTests(unittest.TestCase):
             "width",
             "height",
             "crop",
+            "transform",
             "name",
             "alt_text",
             "title",
@@ -2941,6 +2972,237 @@ class DocxImageTests(unittest.TestCase):
                 self.assertEqual(spec["assets"], [])
                 self.assertEqual(document.to_bytes("docx"), mutated)
 
+    def test_picture_transform_projects_updates_clears_and_preserves(
+        self,
+    ) -> None:
+        source = _image_document(
+            transform_attributes={
+                "rot": "-5400000",
+                "flipH": "1",
+                "flipV": "false",
+            },
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(
+            image["transform"],
+            {
+                "rotation_degrees_clockwise": 270.0,
+                "flip_horizontal": True,
+                "flip_vertical": False,
+            },
+        )
+        self.assertEqual(
+            document.inspect()["nodes"][0]["transform"],
+            image["transform"],
+        )
+        self.assertEqual(document.to_bytes("docx"), source)
+        self.assertEqual(document.image_bytes(image["id"]), PNG)
+
+        capabilities = document.capabilities()["assets"]
+        self.assertIn("transform", capabilities["native_update_fields"])
+        self.assertIn("transform", capabilities["clearable_update_fields"])
+        self.assertEqual(
+            capabilities["image_transform_schema"],
+            "image-transform",
+        )
+        self.assertEqual(
+            capabilities["image_rotation_native_units_per_degree"],
+            60_000,
+        )
+        self.assertEqual(
+            capabilities["image_rotation_range"],
+            {
+                "minimum_inclusive": 0,
+                "maximum_exclusive": 360,
+            },
+        )
+        html = document.to_bytes("html").decode()
+        self.assertIn(
+            'data-aioffice-rotation-degrees-clockwise="270"',
+            html,
+        )
+        self.assertIn(
+            'data-aioffice-flip-horizontal="true"',
+            html,
+        )
+        self.assertIn(
+            'data-aioffice-flip-vertical="false"',
+            html,
+        )
+
+        metadata_update = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"alt_text": "Rotated expert workflow"},
+                }
+            ]
+        )
+        self.assertTrue(metadata_update.success, metadata_update.model_dump())
+        assert metadata_update.document is not None
+        metadata_output = metadata_update.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(metadata_output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        native_transform = root.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}"
+        )
+        assert native_transform is not None
+        self.assertEqual(
+            native_transform.attrib,
+            {
+                "rot": "-5400000",
+                "flipH": "1",
+                "flipV": "false",
+            },
+        )
+
+        transformed = metadata_update.document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {
+                        "transform": {
+                            "rotation_degrees_clockwise": 90.123456,
+                            "flip_vertical": True,
+                        }
+                    },
+                }
+            ]
+        )
+        self.assertTrue(transformed.success, transformed.model_dump())
+        self.assertEqual(
+            transformed.changes[0]["property_changes"],
+            [
+                {
+                    "path": "transform",
+                    "before": {
+                        "rotation_degrees_clockwise": 270.0,
+                        "flip_horizontal": True,
+                        "flip_vertical": False,
+                    },
+                    "after": {
+                        "rotation_degrees_clockwise": 90.12345,
+                        "flip_horizontal": False,
+                        "flip_vertical": True,
+                    },
+                }
+            ],
+        )
+        assert transformed.document is not None
+        transformed_output = transformed.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(transformed_output)) as package:
+            transformed_root = parse_xml(
+                package.read("word/document.xml")
+            )
+        native_transform = transformed_root.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}"
+        )
+        assert native_transform is not None
+        self.assertEqual(
+            native_transform.attrib,
+            {"rot": "5407407", "flipV": "1"},
+        )
+        self.assertEqual(
+            Document.from_docx(transformed_output).to_spec()["content"][0][
+                "transform"
+            ],
+            {
+                "rotation_degrees_clockwise": 90.12345,
+                "flip_horizontal": False,
+                "flip_vertical": True,
+            },
+        )
+
+        replaced = transformed.document.replace_image(image["id"], JPEG)
+        self.assertTrue(replaced.success, replaced.model_dump())
+        assert replaced.document is not None
+        self.assertEqual(
+            replaced.document.to_spec()["content"][0]["transform"],
+            {
+                "rotation_degrees_clockwise": 90.12345,
+                "flip_horizontal": False,
+                "flip_vertical": True,
+            },
+        )
+
+        cleared = replaced.document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "clear": ["transform"],
+                }
+            ]
+        )
+        self.assertTrue(cleared.success, cleared.model_dump())
+        assert cleared.document is not None
+        cleared_output = cleared.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(cleared_output)) as package:
+            cleared_root = parse_xml(package.read("word/document.xml"))
+        native_transform = cleared_root.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}"
+        )
+        assert native_transform is not None
+        self.assertEqual(native_transform.attrib, {})
+        self.assertEqual(
+            [child.tag for child in native_transform],
+            [_q(A, "off"), _q(A, "ext")],
+        )
+        self.assertNotIn(
+            "transform",
+            Document.from_docx(cleared_output).to_spec()["content"][0],
+        )
+
+    def test_floating_picture_transform_survives_anchor_update(
+        self,
+    ) -> None:
+        document = Document.from_docx(
+            _image_document(
+                anchored=True,
+                transform_attributes={
+                    "rot": "21660000",
+                    "flipV": "true",
+                },
+            )
+        )
+        image = document.to_spec()["content"][0]
+        self.assertEqual(
+            image["transform"],
+            {
+                "rotation_degrees_clockwise": 1.0,
+                "flip_horizontal": False,
+                "flip_vertical": True,
+            },
+        )
+        result = document.apply(
+            [
+                {
+                    "op": "image.anchor.update",
+                    "target": image["id"],
+                    "set": {"relative_height": 4096},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        self.assertEqual(
+            result.document.to_spec()["content"][0]["transform"],
+            image["transform"],
+        )
+        with ZipFile(io.BytesIO(result.document.to_bytes("docx"))) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        native_transform = root.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}"
+        )
+        assert native_transform is not None
+        self.assertEqual(
+            native_transform.attrib,
+            {"rot": "21660000", "flipV": "true"},
+        )
+
     def test_rectangular_source_crop_projects_updates_and_clears(
         self,
     ) -> None:
@@ -3111,6 +3373,60 @@ class DocxImageTests(unittest.TestCase):
                 )
                 self.assertEqual(document.to_spec()["assets"], [])
                 self.assertEqual(document.to_bytes("docx"), source)
+
+    def test_invalid_native_picture_transforms_remain_opaque(self) -> None:
+        for case in (
+            "unknown_attribute",
+            "non_integer_rotation",
+            "rotation_out_of_int32",
+            "invalid_flip_boolean",
+            "nonzero_offset",
+            "extra_extent_attribute",
+            "wrong_child_order",
+        ):
+            source = _image_document(
+                transform_attributes={"rot": "5400000", "flipH": "1"}
+            )
+            with ZipFile(io.BytesIO(source)) as package:
+                root = parse_xml(package.read("word/document.xml"))
+            transform = root.find(
+                f".//{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}"
+            )
+            assert transform is not None
+            offset = transform.find(f"./{_q(A, 'off')}")
+            extent = transform.find(f"./{_q(A, 'ext')}")
+            assert offset is not None
+            assert extent is not None
+            if case == "unknown_attribute":
+                transform.set("future", "1")
+            elif case == "non_integer_rotation":
+                transform.set("rot", "90deg")
+            elif case == "rotation_out_of_int32":
+                transform.set("rot", str(2**31))
+            elif case == "invalid_flip_boolean":
+                transform.set("flipH", "yes")
+            elif case == "nonzero_offset":
+                offset.set("x", "1")
+            elif case == "extra_extent_attribute":
+                extent.set("future", "1")
+            elif case == "wrong_child_order":
+                transform.remove(offset)
+                transform.append(offset)
+            mutated = _rewrite_package(
+                source,
+                replacements={
+                    "word/document.xml": serialize_xml(root),
+                },
+                additions={},
+            )
+            with self.subTest(case=case):
+                document = Document.from_docx(mutated)
+                self.assertEqual(
+                    document.to_spec()["content"][0]["type"],
+                    "opaque",
+                )
+                self.assertEqual(document.to_spec()["assets"], [])
+                self.assertEqual(document.to_bytes("docx"), mutated)
 
     def test_mismatched_picture_extents_remain_opaque(self) -> None:
         source = _image_document()
@@ -3725,6 +4041,38 @@ class DocxImageTests(unittest.TestCase):
                 "target": image["id"],
                 "set": {"crop": {"top": -0.001}},
             },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"transform": {}},
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "transform": {
+                        "rotation_degrees_clockwise": 360,
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "transform": {
+                        "rotation_degrees_clockwise": "90",
+                    }
+                },
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {
+                    "transform": {
+                        "flip_horizontal": "true",
+                    }
+                },
+            },
         ]
         for operation in invalid_operations:
             with self.subTest(operation=operation):
@@ -3899,7 +4247,12 @@ class DocxImageTests(unittest.TestCase):
     def test_header_image_projects_reads_updates_and_renders_semantically(
         self,
     ) -> None:
-        source = _header_image_document()
+        source = _header_image_document(
+            transform_attributes={
+                "rot": "10800000",
+                "flipH": "1",
+            }
+        )
         document = Document.from_docx(source)
         spec = document.to_spec()
         header = spec["header_footers"][0]
@@ -3912,6 +4265,14 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             image["source_ref"]["part_uri"],
             "/word/header1.xml",
+        )
+        self.assertEqual(
+            image["transform"],
+            {
+                "rotation_degrees_clockwise": 180.0,
+                "flip_horizontal": True,
+                "flip_vertical": False,
+            },
         )
         self.assertEqual(document.image_bytes(image["id"]), PNG)
         self.assertEqual(document.inspect()["image_count"], 1)
@@ -4022,6 +4383,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_image["paragraph_style"]["alignment"],
             "right",
+        )
+        self.assertEqual(
+            reopened_image["transform"],
+            image["transform"],
         )
         self.assertEqual(reopened.to_bytes("docx"), output)
 
@@ -4652,6 +5017,11 @@ class DocxImageTests(unittest.TestCase):
             anchored=True,
             relative_size=True,
             wrap_mode="tight",
+            transform_attributes={
+                "rot": "1350000",
+                "flipH": "1",
+                "flipV": "1",
+            },
         )
         document = Document.from_docx(source)
         spec = document.to_spec()
@@ -4694,6 +5064,10 @@ class DocxImageTests(unittest.TestCase):
             source_image["asset_id"],
         )
         self.assertEqual(cloned_image["crop"], source_image["crop"])
+        self.assertEqual(
+            cloned_image["transform"],
+            source_image["transform"],
+        )
 
         replaced = cloned.document.replace_image(
             cloned_image["id"],
@@ -4786,6 +5160,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_clone_image["floating"]["relative_size"],
             reopened_source_image["floating"]["relative_size"],
+        )
+        self.assertEqual(
+            reopened_clone_image["transform"],
+            reopened_source_image["transform"],
         )
         self.assertEqual(reopened.to_bytes("docx"), output)
 
@@ -5029,6 +5407,10 @@ class DocxImageTests(unittest.TestCase):
             image_id="inserted_chart",
             name="Expert workflow chart",
             title="Workflow",
+            transform={
+                "rotation_degrees_clockwise": 45.123456,
+                "flip_horizontal": True,
+            },
             paragraph_style={
                 "alignment": "center",
                 "spacing_before": {"value": 6, "unit": "pt"},
@@ -5075,6 +5457,14 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             inserted["height"],
             {"value": 0.75, "unit": "in"},
+        )
+        self.assertEqual(
+            inserted["transform"],
+            {
+                "rotation_degrees_clockwise": 45.12345,
+                "flip_horizontal": True,
+                "flip_vertical": False,
+            },
         )
         self.assertEqual(
             inserted["paragraph_style"]["alignment"],
@@ -5127,6 +5517,14 @@ class DocxImageTests(unittest.TestCase):
             (inner_extent.get("cx"), inner_extent.get("cy")),
             ("1371600", "685800"),
         )
+        inserted_transform = inserted_paragraph.find(
+            f".//{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}"
+        )
+        assert inserted_transform is not None
+        self.assertEqual(
+            inserted_transform.attrib,
+            {"rot": "2707407", "flipH": "1"},
+        )
         inserted_relationship_id = inserted_paragraph.find(
             f".//{_q(A, 'blip')}"
         ).get(_q(R, "embed"))
@@ -5164,6 +5562,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_inserted["alt_text"],
             "Inserted expert workflow chart",
+        )
+        self.assertEqual(
+            reopened_inserted["transform"],
+            inserted["transform"],
         )
         self.assertEqual(reopened.image_bytes("inserted_chart"), JPEG)
 
@@ -6105,6 +6507,11 @@ class DocxImageTests(unittest.TestCase):
             replacement_path = root / "replacement.jpg"
             output_path = root / "inserted.docx"
             floating_layout_path = root / "floating-layout.json"
+            transform_path = root / "transform.json"
+            transform = {
+                "rotation_degrees_clockwise": 15,
+                "flip_vertical": True,
+            }
             floating_layout = {
                 "horizontal": {
                     "relative_to": "column",
@@ -6138,6 +6545,10 @@ class DocxImageTests(unittest.TestCase):
                 json.dumps(floating_layout),
                 encoding="utf-8",
             )
+            transform_path.write_text(
+                json.dumps(transform),
+                encoding="utf-8",
+            )
             stdout = io.StringIO()
             with redirect_stdout(stdout):
                 exit_code = main(
@@ -6158,6 +6569,8 @@ class DocxImageTests(unittest.TestCase):
                         "CLI inserted chart",
                         "--image-id",
                         "cli_chart",
+                        "--transform",
+                        str(transform_path),
                         "--floating-layout",
                         str(floating_layout_path),
                         "--align",
@@ -6178,6 +6591,14 @@ class DocxImageTests(unittest.TestCase):
             )
             self.assertEqual(cli_image["placement"], "floating")
             self.assertEqual(
+                cli_image["transform"],
+                {
+                    "rotation_degrees_clockwise": 15.0,
+                    "flip_horizontal": False,
+                    "flip_vertical": True,
+                },
+            )
+            self.assertEqual(
                 cli_image["floating"]["horizontal"],
                 floating_layout["horizontal"],
             )
@@ -6192,6 +6613,7 @@ class DocxImageTests(unittest.TestCase):
                 height={"value": 1, "unit": "in"},
                 alt_text="Workspace inserted chart",
                 image_id="workspace_chart",
+                transform=transform,
                 floating=floating_layout,
                 paragraph_style={"alignment": "right"},
                 base_revision=tracked.revision,
@@ -6213,6 +6635,10 @@ class DocxImageTests(unittest.TestCase):
             self.assertEqual(
                 workspace_image["placement"],
                 "floating",
+            )
+            self.assertEqual(
+                workspace_image["transform"],
+                cli_image["transform"],
             )
             self.assertIn(
                 "insert_image_after",
@@ -6256,6 +6682,10 @@ class DocxImageTests(unittest.TestCase):
             self.assertEqual(
                 patch["operations"][0]["image"]["floating"],
                 floating_layout,
+            )
+            self.assertEqual(
+                patch["operations"][0]["image"]["transform"],
+                cli_image["transform"],
             )
             self.assertEqual(
                 patch["changes"][0]["binary_transport"],

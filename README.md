@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev42`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev43`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -25,6 +25,7 @@ rich table-cell paragraphs, explicit table/cell border control, paragraph
 background/border surfaces, conservative body and header/footer image projection,
 verified asset extraction, selective native image metadata and geometry updates,
 bounded rectangular source cropping,
+native picture rotation and horizontal/vertical mirroring,
 conservative offset/alignment/percentage floating-image anchor projection,
 optional Office 2010 relative width/height rules with absolute extent fallbacks,
 square/no-wrap/top-and-bottom/tight/through text wrapping, selective floating-anchor layout

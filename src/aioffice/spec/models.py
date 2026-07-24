@@ -18,7 +18,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.42"
+SPEC_VERSION = "0.2-draft.43"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1842,6 +1842,49 @@ class FloatingImageLayoutUpdate(StrictModel):
         return self
 
 
+class ImageTransform(StrictModel):
+    """Canonical DrawingML rotation and mirror state for one picture."""
+
+    rotation_degrees_clockwise: float = Field(
+        default=0,
+        ge=0,
+        lt=360,
+        strict=True,
+        description=(
+            "Clockwise rotation in degrees, quantized to the native "
+            "DrawingML ST_Angle unit of 1/60000 degree."
+        ),
+    )
+    flip_horizontal: bool = Field(default=False, strict=True)
+    flip_vertical: bool = Field(default=False, strict=True)
+
+    @field_validator("rotation_degrees_clockwise", mode="before")
+    @classmethod
+    def normalize_rotation(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("Image rotation cannot be a boolean.")
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            if numeric < 0 or numeric >= 360:
+                return value
+            native_angle = round(numeric * 60_000) % 21_600_000
+            return round(native_angle / 60_000, 6)
+        return value
+
+    @model_validator(mode="after")
+    def validate_effect(self) -> "ImageTransform":
+        if (
+            round(self.rotation_degrees_clockwise * 60_000) == 0
+            and not self.flip_horizontal
+            and not self.flip_vertical
+        ):
+            raise ValueError(
+                "Image transform requires a non-zero rotation or a flip; "
+                "clear transform to restore the identity transform."
+            )
+        return self
+
+
 class ImageBlock(NodeBase):
     """One AI-addressable image occurrence backed by a native binary asset."""
 
@@ -1852,6 +1895,7 @@ class ImageBlock(NodeBase):
     width: Length
     height: Length
     crop: ImageCrop | None = None
+    transform: ImageTransform | None = None
     floating: FloatingImageLayout | None = None
     name: str | None = None
     alt_text: str | None = None
@@ -1941,6 +1985,7 @@ class ImageUpdate(StrictModel):
     width: Length | None = None
     height: Length | None = None
     crop: ImageCrop | None = None
+    transform: ImageTransform | None = None
     alt_text: str | None = Field(default=None, min_length=1, max_length=4096)
     title: str | None = Field(default=None, min_length=1, max_length=1024)
 
@@ -1982,6 +2027,7 @@ class ImageInsert(StrictModel):
     floating: FloatingImageLayout | None = None
     width: Length
     height: Length
+    transform: ImageTransform | None = None
     name: str | None = Field(default=None, min_length=1, max_length=1024)
     alt_text: str = Field(min_length=1, max_length=4096)
     title: str | None = Field(default=None, min_length=1, max_length=1024)
@@ -2108,6 +2154,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.40",
         "0.2-draft.41",
         "0.2-draft.42",
+        "0.2-draft.43",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

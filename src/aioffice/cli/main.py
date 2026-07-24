@@ -38,6 +38,7 @@ from aioffice.spec.models import (
     ImageBlock,
     ImageCrop,
     ImageInsert,
+    ImageTransform,
     ImageUpdate,
     NamedStyle,
     PageSize,
@@ -169,6 +170,11 @@ def _build_parser() -> argparse.ArgumentParser:
     insert_image.add_argument("--name")
     insert_image.add_argument("--image-id")
     insert_image.add_argument("--media-type")
+    insert_image.add_argument(
+        "--transform",
+        type=Path,
+        help="JSON file containing one strict ImageTransform.",
+    )
     insert_image.add_argument(
         "--floating-layout",
         type=Path,
@@ -315,6 +321,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "image-block",
             "image-crop",
             "image-insert",
+            "image-transform",
             "image-update",
             "named-style",
             "page-size",
@@ -428,6 +435,11 @@ def _build_parser() -> argparse.ArgumentParser:
     workspace_insert_image.add_argument("--name")
     workspace_insert_image.add_argument("--image-id")
     workspace_insert_image.add_argument("--media-type")
+    workspace_insert_image.add_argument(
+        "--transform",
+        type=Path,
+        help="JSON file containing one strict ImageTransform.",
+    )
     workspace_insert_image.add_argument(
         "--floating-layout",
         type=Path,
@@ -604,6 +616,14 @@ def _run(args: argparse.Namespace) -> int:
                 image_id=args.image_id,
                 name=args.name,
                 title=args.title,
+                transform=(
+                    _load_json_object(
+                        args.transform,
+                        label="Image transform",
+                    )
+                    if args.transform is not None
+                    else None
+                ),
                 floating=(
                     _load_json_object(
                         args.floating_layout,
@@ -745,6 +765,14 @@ def _run(args: argparse.Namespace) -> int:
             image_id=args.image_id,
             name=args.name,
             title=args.title,
+            transform=(
+                _load_json_object(
+                    args.transform,
+                    label="Image transform",
+                )
+                if args.transform is not None
+                else None
+            ),
             floating=(
                 _load_json_object(
                     args.floating_layout,
@@ -909,6 +937,7 @@ def _run(args: argparse.Namespace) -> int:
             "image-block": ImageBlock,
             "image-crop": ImageCrop,
             "image-insert": ImageInsert,
+            "image-transform": ImageTransform,
             "image-update": ImageUpdate,
             "named-style": NamedStyle,
             "page-size": PageSize,

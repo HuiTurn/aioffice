@@ -72,6 +72,7 @@ from aioffice.spec.models import (
     Heading,
     ImageBlock,
     ImageInsert,
+    ImageTransform,
     ImageUpdate,
     LEGACY_DOCUMENT_SCHEMA_URL,
     LEGACY_SPEC_VERSION,
@@ -366,6 +367,7 @@ class Document:
                 native_image.floating,
             )
             or image.crop != native_image.crop
+            or image.transform != native_image.transform
             or round(image.width.to_points() * 12_700)
             != round(native_image.width.to_points() * 12_700)
             or round(image.height.to_points() * 12_700)
@@ -523,6 +525,7 @@ class Document:
         image_id: str | None = None,
         name: str | None = None,
         title: str | None = None,
+        transform: ImageTransform | Mapping[str, Any] | None = None,
         floating: FloatingImageLayout | Mapping[str, Any] | None = None,
         paragraph_style: ParagraphStyle | Mapping[str, Any] | None = None,
         dry_run: bool = False,
@@ -593,6 +596,7 @@ class Document:
             "floating": floating,
             "width": width,
             "height": height,
+            "transform": transform,
             "name": name or prepared.asset.filename,
             "alt_text": alt_text,
             "title": title,
@@ -778,6 +782,11 @@ class Document:
                             if node.crop is not None
                             else None
                         ),
+                        transform=(
+                            node.transform.model_dump(mode="json")
+                            if node.transform is not None
+                            else None
+                        ),
                         floating=(
                             node.floating.model_dump(
                                 mode="json",
@@ -919,6 +928,13 @@ class Document:
                                                 mode="json"
                                             )
                                             if block.crop is not None
+                                            else None
+                                        ),
+                                        "transform": (
+                                            block.transform.model_dump(
+                                                mode="json"
+                                            )
+                                            if block.transform is not None
                                             else None
                                         ),
                                         "placement": block.placement,
@@ -1191,20 +1207,37 @@ class Document:
                     "width",
                     "height",
                     "crop",
+                    "transform",
                     "alt_text",
                     "title",
                 ],
                 "clearable_update_fields": [
                     "crop",
+                    "transform",
                     "alt_text",
                     "title",
                 ],
+                "image_transform_schema": "image-transform",
+                "image_transform_fields": [
+                    "rotation_degrees_clockwise",
+                    "flip_horizontal",
+                    "flip_vertical",
+                ],
+                "image_rotation_unit": "degrees_clockwise",
+                "image_rotation_native_units_per_degree": 60_000,
+                "image_rotation_range": {
+                    "minimum_inclusive": 0,
+                    "maximum_exclusive": 360,
+                },
+                "image_transform_group_update": "complete_object",
+                "image_transform_clear_restores_identity": True,
                 "single_dimension_resize": "preserve_aspect_ratio",
                 "two_dimension_resize": "exact",
                 "native_geometry_patch": [
                     "wp:inline|wp:anchor/wp:extent",
                     "pic:spPr/a:xfrm/a:ext",
                     "pic:blipFill/a:srcRect",
+                    "pic:spPr/a:xfrm/@rot|@flipH|@flipV",
                 ],
                 "projected_placements": [
                     "inline",
@@ -1367,6 +1400,7 @@ class Document:
                     "image_occurrence_id",
                     "display_extent",
                     "source_crop",
+                    "picture_transform",
                     "native_placement_and_anchor_layout",
                     "alternative_text",
                     "title",
@@ -1375,7 +1409,7 @@ class Document:
                 ],
                 "native_insert_api": (
                     "Document.insert_image_after(target, source, width=..., "
-                    "height=..., alt_text=..., floating=None)"
+                    "height=..., alt_text=..., transform=None, floating=None)"
                 ),
                 "native_insert_operation": "image.insert_after",
                 "insert_placement": (
@@ -1394,6 +1428,7 @@ class Document:
                     "floating-image-layout"
                 ),
                 "insert_dimensions": "explicit_width_and_height",
+                "insert_transform_schema": "image-transform",
                 "insert_alt_text": "required",
                 "insert_target": "mapped_top_level_body_node",
                 "insert_supports_paragraph_style": True,
@@ -1427,7 +1462,11 @@ class Document:
                         "optional non-negative rectangular source crop that "
                         "leaves visible width and height"
                     ),
-                    "no rotation, flip, visible outline, or visual effect",
+                    (
+                        "optional canonical DrawingML rotation and horizontal/"
+                        "vertical flips"
+                    ),
+                    "no visible outline or visual effect",
                     (
                         "optional LibreOffice-neutral bwMode auto and empty "
                         "shape no-fill"
@@ -1446,8 +1485,8 @@ class Document:
                     "multiple pictures",
                     "linked or external image",
                     (
-                        "negative, overconstrained, transformed, outlined, "
-                        "or effected picture"
+                        "negative, overconstrained, malformed-transform, "
+                        "outlined, or effected picture"
                     ),
                     "picture in table",
                     "VML, OLE, or embedded object",
@@ -4131,6 +4170,7 @@ class Document:
                 floating=image_insert.floating,
                 width=image_insert.width,
                 height=image_insert.height,
+                transform=image_insert.transform,
                 name=image_insert.name,
                 alt_text=image_insert.alt_text,
                 title=image_insert.title,
@@ -4365,7 +4405,8 @@ class Document:
             )
             invalid_clear = (
                 sorted(
-                    set(clear_values) - {"crop", "alt_text", "title"}
+                    set(clear_values)
+                    - {"crop", "transform", "alt_text", "title"}
                 )
                 if valid_shape
                 else []

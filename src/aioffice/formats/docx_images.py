@@ -35,6 +35,7 @@ from aioffice.spec.models import (
     ImageBlock,
     ImageCrop,
     ImageInsert,
+    ImageTransform,
     Length,
     NativeRef,
 )
@@ -123,6 +124,7 @@ class SimpleNativeImage:
     width: Length
     height: Length
     crop: ImageCrop | None
+    transform: ImageTransform | None
     placement: Literal["inline", "floating"]
     floating: FloatingImageLayout | None
     name: str | None
@@ -650,6 +652,26 @@ def _native_relative_size(
         ).text = str(native_percentage)
         elements.append(element)
     return elements or None
+
+
+def _native_image_transform_attributes(
+    transform: ImageTransform | None,
+) -> dict[str, str] | None:
+    if transform is None:
+        return {}
+    native_rotation = round(
+        transform.rotation_degrees_clockwise * 60_000
+    )
+    if native_rotation < 0 or native_rotation >= 21_600_000:
+        return None
+    attributes: dict[str, str] = {}
+    if native_rotation:
+        attributes["rot"] = str(native_rotation)
+    if transform.flip_horizontal:
+        attributes["flipH"] = "1"
+    if transform.flip_vertical:
+        attributes["flipV"] = "1"
+    return attributes or None
 
 
 def floating_image_layout_matches(
@@ -1461,34 +1483,80 @@ def simple_native_image(
     transforms = shape_properties.findall(f"./{_q(A, 'xfrm')}")
     if len(transforms) != 1:
         return None
-    transform_extent = transforms[0].find(f"./{_q(A, 'ext')}")
+    transform_element = transforms[0]
     if (
-        transform_extent is None
-        or len(transforms[0].findall(f"./{_q(A, 'ext')}")) != 1
+        any(
+            attribute not in {"rot", "flipH", "flipV"}
+            for attribute in transform_element.attrib
+        )
+        or [child.tag for child in transform_element]
+        != [_q(A, "off"), _q(A, "ext")]
+    ):
+        return None
+    transform_offset = transform_element.find(f"./{_q(A, 'off')}")
+    transform_extent = transform_element.find(f"./{_q(A, 'ext')}")
+    if (
+        transform_offset is None
+        or transform_extent is None
+        or set(transform_offset.attrib) != {"x", "y"}
+        or set(transform_extent.attrib) != {"cx", "cy"}
+        or len(transform_offset)
+        or len(transform_extent)
     ):
         return None
     try:
+        transform_x = int(transform_offset.attrib["x"])
+        transform_y = int(transform_offset.attrib["y"])
         transform_width = int(transform_extent.attrib.get("cx", ""))
         transform_height = int(transform_extent.attrib.get("cy", ""))
     except ValueError:
         return None
     if (
-        transform_width != width_emu
+        transform_x != 0
+        or transform_y != 0
+        or transform_width != width_emu
         or transform_height != height_emu
     ):
         return None
-    for transform in transforms:
+    flip_values: dict[str, bool] = {}
+    for attribute_name in ("flipH", "flipV"):
+        if attribute_name not in transform_element.attrib:
+            flip_values[attribute_name] = False
+            continue
+        parsed = _strict_boolean(
+            transform_element.attrib.get(attribute_name)
+        )
+        if parsed is None:
+            return None
+        flip_values[attribute_name] = parsed
+    try:
+        raw_rotation = int(transform_element.attrib.get("rot", "0"))
+    except ValueError:
+        return None
+    if raw_rotation < -(2**31) or raw_rotation > 2**31 - 1:
+        return None
+    native_rotation = raw_rotation % 21_600_000
+    image_transform = (
+        ImageTransform(
+            rotation_degrees_clockwise=round(
+                native_rotation / 60_000,
+                6,
+            ),
+            flip_horizontal=flip_values["flipH"],
+            flip_vertical=flip_values["flipV"],
+        )
         if (
-            _enabled(transform.attrib.get("flipH"))
-            or _enabled(transform.attrib.get("flipV"))
-        ):
-            return None
-        try:
-            rotation = int(transform.attrib.get("rot", "0"))
-        except ValueError:
-            return None
-        if rotation:
-            return None
+            native_rotation
+            or flip_values["flipH"]
+            or flip_values["flipV"]
+        )
+        else None
+    )
+    if (
+        image_transform is not None
+        and _native_image_transform_attributes(image_transform) is None
+    ):
+        return None
     for outline in picture.findall(f".//{_q(A, 'ln')}"):
         if (
             outline.attrib
@@ -1547,6 +1615,7 @@ def simple_native_image(
             unit="pt",
         ),
         crop=crop,
+        transform=image_transform,
         placement=placement,
         floating=floating,
         name=optional_attribute("name"),
@@ -1724,6 +1793,27 @@ def patch_simple_native_image(
                 if value:
                     source_rectangle.set(attribute_name, str(value))
 
+    if "transform" in fields:
+        transforms = drawing_container.findall(
+            f"./{_q(A, 'graphic')}/{_q(A, 'graphicData')}/"
+            f"{_q(PIC, 'pic')}/{_q(PIC, 'spPr')}/{_q(A, 'xfrm')}"
+        )
+        native_transform = _native_image_transform_attributes(
+            result.transform
+        )
+        if (
+            len(transforms) != 1
+            or (
+                result.transform is not None
+                and native_transform is None
+            )
+        ):
+            raise NativePackageError(
+                "image.update transform is outside the supported range."
+            )
+        transforms[0].attrib.clear()
+        transforms[0].attrib.update(native_transform or {})
+
     verified = simple_native_image(
         package,
         paragraph,
@@ -1732,6 +1822,7 @@ def patch_simple_native_image(
     if (
         verified is None
         or verified.crop != result.crop
+        or verified.transform != result.transform
         or verified.placement != original.placement
         or not floating_image_layout_matches(
             verified.floating,
@@ -1945,6 +2036,7 @@ def patch_simple_native_image_anchor(
         or verified.width != original.width
         or verified.height != original.height
         or verified.crop != original.crop
+        or verified.transform != original.transform
         or verified.name != original.name
         or verified.alt_text != original.alt_text
         or verified.title != original.title
@@ -2138,6 +2230,7 @@ def replace_simple_native_image(
         or replaced.sha256 != asset.sha256
         or replaced.size_bytes != asset.size_bytes
         or replaced.crop != original.crop
+        or replaced.transform != original.transform
         or replaced.placement != original.placement
         or not floating_image_layout_matches(
             replaced.floating,
@@ -2433,7 +2526,16 @@ def insert_simple_native_image_after(
     stretch = ET.SubElement(blip_fill, _q(A, "stretch"))
     ET.SubElement(stretch, _q(A, "fillRect"))
     shape = ET.SubElement(picture, _q(PIC, "spPr"))
-    transform = ET.SubElement(shape, _q(A, "xfrm"))
+    native_transform = _native_image_transform_attributes(image.transform)
+    if image.transform is not None and native_transform is None:
+        raise NativePackageError(
+            "Image insertion transform is outside the supported range."
+        )
+    transform = ET.SubElement(
+        shape,
+        _q(A, "xfrm"),
+        native_transform or {},
+    )
     ET.SubElement(transform, _q(A, "off"), {"x": "0", "y": "0"})
     ET.SubElement(
         transform,
@@ -2487,6 +2589,7 @@ def insert_simple_native_image_after(
         != height_emu
         or projected.alt_text != image.alt_text
         or projected.title != image.title
+        or projected.transform != image.transform
         or projected.placement != image.placement
         or not floating_image_layout_matches(
             projected.floating,

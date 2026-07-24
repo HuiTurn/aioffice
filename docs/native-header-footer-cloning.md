@@ -76,6 +76,13 @@ Office 2010 relative width and height rules. The clone retains those rules toget
 with its absolute `wp:extent` fallback. A story-local update can replace or clear
 the complete relative-size group without changing the source story.
 
+In `0.2.0.dev43`, clone-safe inline and floating pictures may carry DrawingML
+rotation plus horizontal and vertical mirror state. Cloning retains the exact
+native `a:xfrm` attributes, while the semantic projection exposes canonical
+clockwise degrees and booleans. A story-local `image.update`, anchor update, or
+copy-on-write binary replacement re-proves that the transform remains isolated to
+the intended occurrence.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

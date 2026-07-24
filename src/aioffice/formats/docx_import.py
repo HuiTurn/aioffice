@@ -439,6 +439,11 @@ def _paragraph_projection(
                 if native_image.crop is not None
                 else None
             ),
+            "transform": (
+                native_image.transform.model_dump(mode="json")
+                if native_image.transform is not None
+                else None
+            ),
             "floating": (
                 native_image.floating.model_dump(
                     mode="json",
