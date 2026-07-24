@@ -116,14 +116,16 @@ already-proven conservative floating picture,
 positioning, supported wrapping, relative height, and compatibility flags without
 recreating the drawing.
 
-A strictly proven inline `mc:AlternateContent` picture remains one projected image
-occurrence with explicit compatibility evidence. Its `image.update` surface narrows
-to `width` and `height`, which are written to both the DrawingML extents and the VML
-fallback style. `image.replace` is available only when both branches originally
-resolve to identical image bytes and media type; it then rewrites both branch
-references to the same new occurrence-scoped relationship. Namespace declarations
-used lexically by `mc:Choice/@Requires` are preserved when the containing native part
-is serialized.
+A strictly proven inline or bounded offset-floating `mc:AlternateContent` picture
+remains one projected image occurrence with explicit compatibility evidence. Its
+`image.update` surface narrows to `width` and `height`, which are written to both the
+DrawingML extents and the VML fallback style. A wrapped floating occurrence does not
+advertise `image.anchor.update`: position or wrap edits would change only one
+compatibility branch. `image.replace` is available only when both branches
+originally resolve to identical image bytes and media type; it then rewrites both
+branch references to the same new occurrence-scoped relationship. Namespace
+declarations used lexically by `mc:Choice/@Requires` are preserved when the
+containing native part is serialized.
 
 Supported paragraph surfaces include solid sRGB `w:shd` fills and four physical
 `w:pBdr` edges. Border edges inherit independently through defaults and named styles.

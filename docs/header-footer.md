@@ -157,12 +157,13 @@ native-authoritative evidence; for the conservative projected subset,
 `image.anchor.update` can selectively change or switch its offset/alignment/percentage
 positions, supported wrap group, relative height, and boolean flags.
 
-A strict inline `mc:AlternateContent` picture with one `Requires="wps"` DrawingML
-choice and one canonical VML picture fallback is also projected with explicit
-compatibility evidence. Only width and height are updateable because both branches
-can be synchronized. Binary replacement is advertised only when both branches
-resolve to identical asset bytes and media type. The containing reusable part is
-not yet clone-safe while it contains VML.
+A strict inline or offset-floating `mc:AlternateContent` picture with one
+`Requires="wps"` DrawingML choice and one canonical VML picture fallback is also
+projected with explicit compatibility evidence. Only width and height are updateable
+because both branches can be synchronized. A wrapped floating picture does not
+advertise `image.anchor.update`. Binary replacement is advertised only when both
+branches resolve to identical asset bytes and media type. The containing reusable
+part is not yet clone-safe while it contains VML.
 
 Image replacement is occurrence-scoped copy-on-write and allocates the new
 relationship in the containing header/footer part. This makes the expert workflow

@@ -58,6 +58,7 @@ WP14 = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
 MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 VML = "urn:schemas-microsoft-com:vml"
 OFFICE = "urn:schemas-microsoft-com:office:office"
+WORD_VML = "urn:schemas-microsoft-com:office:word"
 WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 _REPLACEMENT_EXTENSIONS = {
     "image/png": "png",
@@ -188,6 +189,10 @@ class _ImageDrawingContext:
     alternate_content: ET.Element | None = None
     fallback_shape: ET.Element | None = None
     fallback_image_data: ET.Element | None = None
+    fallback_placement: Literal[
+        "inline",
+        "floating_offset",
+    ] | None = None
 
 
 HorizontalRelativeTo: TypeAlias = Literal[
@@ -1008,11 +1013,19 @@ def _floating_image_layout(
         identity = anchor.get(identity_attribute)
         if identity is None:
             continue
+        hexadecimal_identity = (
+            identity[1:]
+            if identity.startswith("-")
+            else identity
+        )
         try:
-            int(identity, 16)
+            int(hexadecimal_identity, 16)
         except ValueError:
             return None
-        if len(identity) != 8 or not identity.isascii():
+        if (
+            len(hexadecimal_identity) != 8
+            or not hexadecimal_identity.isascii()
+        ):
             return None
 
     simple_position = anchor.find(f"./{_q(WP, 'simplePos')}")
@@ -1451,12 +1464,29 @@ def _vml_point_value(value: str) -> float | None:
     return points
 
 
-def _strict_inline_vml_picture(
+def _vml_signed_point_value(value: str) -> float | None:
+    if not value.endswith("pt"):
+        return None
+    try:
+        points = float(value[:-2])
+    except ValueError:
+        return None
+    return points if math.isfinite(points) else None
+
+
+def _strict_vml_picture(
     fallback: ET.Element,
     *,
+    expected_placement: Literal["inline", "floating"] | None = None,
     width_points: float | None = None,
     height_points: float | None = None,
-) -> tuple[ET.Element, ET.Element] | None:
+    floating: FloatingImageLayout | None = None,
+    anchor_id: str | None = None,
+) -> tuple[
+    ET.Element,
+    ET.Element,
+    Literal["inline", "floating_offset"],
+] | None:
     if fallback.attrib or len(fallback) != 1:
         return None
     picture = fallback[0]
@@ -1516,38 +1546,126 @@ def _strict_inline_vml_picture(
         or len(lock)
     ):
         return None
-    if (
-        set(shape.attrib)
-        != {
+    style = _vml_style_properties(shape.attrib.get("style", ""))
+    if style is None:
+        return None
+    inline_style_fields = {
+        "width",
+        "height",
+        "mso-wrap-style",
+        "v-text-anchor",
+    }
+    floating_style_fields = {
+        "position",
+        "margin-left",
+        "margin-top",
+        *inline_style_fields,
+    }
+    fallback_placement: Literal["inline", "floating_offset"]
+    if set(style) == inline_style_fields:
+        fallback_placement = "inline"
+        expected_shape_attributes = {
             "id",
             "stroked",
             _q(OFFICE, "allowincell"),
             "style",
             "type",
         }
+        if shape.attrib.get(_q(OFFICE, "allowincell")) != "t":
+            return None
+    elif set(style) == floating_style_fields:
+        fallback_placement = "floating_offset"
+        expected_shape_attributes = {
+            "id",
+            "stroked",
+            _q(OFFICE, "allowincell"),
+            "style",
+            _q(WP14, "anchorId"),
+            "type",
+        }
+        if (
+            style["position"] != "absolute"
+            or shape.attrib.get(_q(OFFICE, "allowincell"))
+            not in {"t", "f"}
+            or not shape.attrib.get(_q(WP14, "anchorId"))
+        ):
+            return None
+    else:
+        return None
+    if (
+        set(shape.attrib) != expected_shape_attributes
         or not shape.attrib["id"]
         or shape.attrib["stroked"] not in {"t", "f"}
-        or shape.attrib[_q(OFFICE, "allowincell")] != "t"
         or shape.attrib["type"] not in {
             "_x0000_t75",
             "#_x0000_t75",
         }
-    ):
-        return None
-    style = _vml_style_properties(shape.attrib["style"])
-    if (
-        style is None
-        or set(style)
-        != {
-            "width",
-            "height",
-            "mso-wrap-style",
-            "v-text-anchor",
-        }
         or style["mso-wrap-style"] != "none"
         or style["v-text-anchor"] != "middle"
+        or (
+            expected_placement == "inline"
+            and fallback_placement != "inline"
+        )
+        or (
+            expected_placement == "floating"
+            and fallback_placement != "floating_offset"
+        )
     ):
         return None
+    margin_left_points = (
+        _vml_signed_point_value(style["margin-left"])
+        if fallback_placement == "floating_offset"
+        else None
+    )
+    margin_top_points = (
+        _vml_signed_point_value(style["margin-top"])
+        if fallback_placement == "floating_offset"
+        else None
+    )
+    if (
+        fallback_placement == "floating_offset"
+        and (
+            margin_left_points is None
+            or margin_top_points is None
+            or (
+                anchor_id is not None
+                and shape.attrib.get(_q(WP14, "anchorId")) != anchor_id
+            )
+        )
+    ):
+        return None
+    if floating is not None:
+        horizontal_offset = floating.horizontal.offset
+        vertical_offset = floating.vertical.offset
+        distances = floating.anchor_distances
+        if (
+            fallback_placement != "floating_offset"
+            or floating.horizontal.relative_to != "column"
+            or horizontal_offset is None
+            or floating.vertical.relative_to != "paragraph"
+            or vertical_offset is None
+            or floating.wrap.mode != "square"
+            or floating.wrap.side != "both_sides"
+            or floating.wrap.distances is not None
+            or floating.wrap.effect_extent is not None
+            or floating.relative_size is not None
+            or floating.behind_text
+            or not floating.allow_overlap
+            or shape.attrib[_q(OFFICE, "allowincell")]
+            != ("t" if floating.layout_in_cell else "f")
+            or (
+                distances is not None
+                and any(
+                    getattr(distances, edge).to_points() != 0
+                    for edge in ("top", "right", "bottom", "left")
+                )
+            )
+            or margin_left_points is None
+            or abs(margin_left_points - horizontal_offset.to_points()) > 0.1
+            or margin_top_points is None
+            or abs(margin_top_points - vertical_offset.to_points()) > 0.1
+        ):
+            return None
     fallback_width = _vml_point_value(style["width"])
     fallback_height = _vml_point_value(style["height"])
     if (
@@ -1564,27 +1682,25 @@ def _strict_inline_vml_picture(
     ):
         return None
     child_tags = [child.tag for child in shape]
-    if (
-        not child_tags
-        or child_tags[0] != _q(VML, "imagedata")
-        or any(
-            tag not in {
-                _q(VML, "imagedata"),
-                _q(VML, "stroke"),
-                _q(VML, "shadow"),
-            }
-            for tag in child_tags
-        )
-        or len(child_tags) != len(set(child_tags))
-        or (
-            _q(VML, "stroke") in child_tags
-            and child_tags.index(_q(VML, "stroke")) != 1
-        )
-        or (
-            _q(VML, "shadow") in child_tags
-            and child_tags[-1] != _q(VML, "shadow")
-        )
-    ):
+    expected_child_tags = [
+        _q(VML, "imagedata"),
+        *(
+            [_q(VML, "stroke")]
+            if _q(VML, "stroke") in child_tags
+            else []
+        ),
+        *(
+            [_q(VML, "shadow")]
+            if _q(VML, "shadow") in child_tags
+            else []
+        ),
+        *(
+            [_q(WORD_VML, "wrap")]
+            if fallback_placement == "floating_offset"
+            else []
+        ),
+    ]
+    if child_tags != expected_child_tags:
         return None
     image_data = shape[0]
     if (
@@ -1621,7 +1737,20 @@ def _strict_inline_vml_picture(
         )
     ):
         return None
-    return shape, image_data
+    wrap = shape.find(f"./{_q(WORD_VML, 'wrap')}")
+    if (
+        fallback_placement == "floating_offset"
+        and (
+            wrap is None
+            or wrap.attrib != {"type": "square"}
+            or len(wrap)
+        )
+    ) or (
+        fallback_placement == "inline"
+        and wrap is not None
+    ):
+        return None
+    return shape, image_data, fallback_placement
 
 
 def _image_drawing_context(
@@ -1660,16 +1789,17 @@ def _image_drawing_context(
             )
             if namespace_values.get("wps") != frozenset({WPS}):
                 return None
-            fallback_picture = _strict_inline_vml_picture(fallback)
+            fallback_picture = _strict_vml_picture(fallback)
             if fallback_picture is None:
                 return None
-            shape, image_data = fallback_picture
+            shape, image_data, fallback_placement = fallback_picture
             candidates.append(
                 _ImageDrawingContext(
                     drawing=choice[0],
                     alternate_content=alternate,
                     fallback_shape=shape,
                     fallback_image_data=image_data,
+                    fallback_placement=fallback_placement,
                 )
             )
     if len(candidates) != 1:
@@ -1750,8 +1880,6 @@ def simple_native_image(
         ):
             return None
     elif drawing_container.tag == _q(WP, "anchor"):
-        if drawing_context.alternate_content is not None:
-            return None
         placement = "floating"
         floating = _floating_image_layout(drawing_container)
         if floating is None:
@@ -1798,10 +1926,17 @@ def simple_native_image(
         return None
     if (
         drawing_context.alternate_content is not None
-        and _strict_inline_vml_picture(
+        and _strict_vml_picture(
             drawing_context.alternate_content[1],
+            expected_placement=placement,
             width_points=width_emu / EMU_PER_POINT,
             height_points=height_emu / EMU_PER_POINT,
+            floating=floating,
+            anchor_id=(
+                drawing_container.get(_q(WP14, "anchorId"))
+                if placement == "floating"
+                else None
+            ),
         )
         is None
     ):
@@ -2386,6 +2521,9 @@ def simple_native_image(
         ):
             return None
         alternate_content = ImageAlternateContent(
+            fallback_placement=(
+                drawing_context.fallback_placement or "inline"
+            ),
             fallback_asset_matches_choice=(
                 fallback_part.content_type.casefold()
                 == part.content_type.casefold()
@@ -2836,11 +2974,13 @@ def patch_simple_native_image_anchor(
         original is None
         or original.placement != "floating"
         or original.floating is None
+        or original.alternate_content is not None
         or result.placement != "floating"
         or result.floating is None
     ):
         raise NativePackageError(
-            "image.anchor.update requires one supported floating picture."
+            "image.anchor.update requires one directly represented supported "
+            "floating picture without an alternate-content fallback."
         )
     anchor = paragraph.find(
         f"./{_q(W, 'r')}/{_q(W, 'drawing')}/{_q(WP, 'anchor')}"

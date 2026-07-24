@@ -19,7 +19,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.47"
+SPEC_VERSION = "0.2-draft.48"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -2066,6 +2066,10 @@ class ImageAlternateContent(StrictModel):
         "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
     ] = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
     fallback_kind: Literal["vml_picture"] = "vml_picture"
+    fallback_placement: Literal[
+        "inline",
+        "floating_offset",
+    ] = "inline"
     synchronized_update_fields: list[
         Literal["width", "height"]
     ] = Field(
@@ -2126,6 +2130,24 @@ class ImageBlock(NodeBase):
             raise ValueError(
                 "Floating image placement requires floating layout evidence, "
                 "and inline placement forbids it."
+            )
+        if (
+            self.alternate_content is not None
+            and (
+                (
+                    self.placement == "inline"
+                    and self.alternate_content.fallback_placement != "inline"
+                )
+                or (
+                    self.placement == "floating"
+                    and self.alternate_content.fallback_placement
+                    != "floating_offset"
+                )
+            )
+        ):
+            raise ValueError(
+                "Image placement must agree with alternate-content fallback "
+                "placement evidence."
             )
         if (
             self.placement == "floating"
@@ -2397,6 +2419,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.45",
         "0.2-draft.46",
         "0.2-draft.47",
+        "0.2-draft.48",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

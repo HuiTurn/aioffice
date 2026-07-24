@@ -848,7 +848,10 @@ class Document:
                                 "image.update",
                                 *(
                                     ["image.anchor.update"]
-                                    if node.placement == "floating"
+                                    if (
+                                        node.placement == "floating"
+                                        and node.alternate_content is None
+                                    )
                                     else []
                                 ),
                                 "paragraph.format",
@@ -1051,6 +1054,8 @@ class Document:
                                                     ["image.anchor.update"]
                                                     if block.placement
                                                     == "floating"
+                                                    and block.alternate_content
+                                                    is None
                                                     else []
                                                 ),
                                                 "paragraph.format",
@@ -1257,6 +1262,7 @@ class Document:
                 operations.append("image.update")
             if any(
                 image.placement == "floating"
+                and image.alternate_content is None
                 for image in _document_images(self._spec)
             ):
                 operations.append("image.anchor.update")
@@ -1333,8 +1339,8 @@ class Document:
                     "image-alternate-content"
                 ),
                 "image_alternate_content_projection": (
-                    "strict_inline_mc_choice_drawingml_and_vml_picture_"
-                    "fallback"
+                    "strict_inline_or_offset_floating_mc_choice_drawingml_"
+                    "and_vml_picture_fallback"
                 ),
                 "image_alternate_content_choice_requires": {
                     "prefix": "wps",
@@ -1346,6 +1352,10 @@ class Document:
                 "image_alternate_content_synchronized_update_fields": [
                     "width",
                     "height",
+                ],
+                "image_alternate_content_fallback_placements": [
+                    "inline",
+                    "floating_offset",
                 ],
                 "image_alternate_content_replace_condition": (
                     "vml_fallback_asset_bytes_and_media_type_match_choice"
@@ -1361,7 +1371,7 @@ class Document:
                     "anchor_layout",
                 ],
                 "image_alternate_content_opaque_cases": [
-                    "non_inline_or_non_picture_fallback",
+                    "unsupported_floating_or_non_picture_fallback",
                     "unknown_or_rebound_requires_prefix",
                     "multiple_choices_or_fallbacks",
                     "branch_geometry_mismatch",
@@ -1730,8 +1740,9 @@ class Document:
                         "visible content"
                     ),
                     (
-                        "optional strict inline mc:AlternateContent with one "
-                        "wps DrawingML choice and canonical VML picture fallback"
+                        "optional strict inline or offset-floating "
+                        "mc:AlternateContent with one wps DrawingML choice and "
+                        "canonical VML picture fallback"
                     ),
                 ],
                 "opaque_native_cases": [
@@ -4924,14 +4935,16 @@ class Document:
             if (
                 image.get("placement") != "floating"
                 or not isinstance(image.get("floating"), dict)
+                or isinstance(image.get("alternate_content"), dict)
             ):
                 raise _PatchFailure(
                     Diagnostic(
                         severity=Severity.ERROR,
                         code="UNSUPPORTED_FEATURE",
                         message=(
-                            "image.anchor.update requires an image already "
-                            "projected as a supported floating anchor."
+                            "image.anchor.update requires a directly represented "
+                            "supported floating anchor without an "
+                            "alternate-content fallback."
                         ),
                         node_ids=[image["id"]],
                         suggested_actions=[

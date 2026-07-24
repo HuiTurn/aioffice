@@ -203,6 +203,18 @@
   unsynchronized field remain atomic fail-closed boundaries.
 - Accepted LibreOffice's equivalent empty `a:stretch` normalization without
   reconstructing it, allowing real saved shadow wrappers to re-project.
+- Extended the strict compatibility projection to LibreOffice's offset-positioned
+  floating wrapper when DrawingML and VML agree on column/paragraph physical
+  offsets, dimensions, square wrapping, zero anchor distances, layout-in-cell
+  behavior, and shared `wp14:anchorId`.
+- Accepted LibreOffice's bounded signed eight-hex-digit anchor-ID spelling while
+  preserving the producer-authored value and requiring the same identity in both
+  branches.
+- Kept `image.anchor.update` absent and atomically refused for compatibility-wrapped
+  floating pictures because the complete anchor layout cannot yet be synchronized
+  to VML. Dual-branch resizing, verified reads, paragraph formatting, structural
+  operations, and byte-identical-fallback replacement remain available in body,
+  header, and footer stories.
 - Accepted LibreOffice's visually neutral picture normalization
   (`pic:spPr/@bwMode="auto"` and at most one empty `a:noFill`) so aligned pictures
   remain projected and editable after an Office-compatible open/save cycle, while
@@ -612,6 +624,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.45`.
 - Advanced the AiOffice Document Spec to `0.2-draft.46`.
 - Advanced the AiOffice Document Spec to `0.2-draft.47`.
+- Advanced the AiOffice Document Spec to `0.2-draft.48`.
 
 ## 0.1.0
 

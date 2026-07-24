@@ -193,7 +193,8 @@ An image becomes an `image` block only when all of these conditions hold:
 
 1. the paragraph contains only paragraph properties and runs;
 2. the runs contain only run properties and exactly one direct `w:drawing`, or the
-   exact strict inline `mc:AlternateContent` compatibility wrapper documented below;
+   exact strict inline/offset-floating `mc:AlternateContent` compatibility wrapper
+   documented below;
 3. the selected drawing contains one supported `wp:inline` or `wp:anchor`;
 4. `wp:extent` has positive `cx` and `cy` values;
 5. the graphic data contains one DrawingML picture;
@@ -532,14 +533,14 @@ The dev46 outer-shadow fixture preserves its complete direct
 `a:effectLst/a:outerShdw` subtree byte-for-byte on exact no-op and unrelated
 AiOffice edits. LibreOffice 26.8 renders the tested direct black shadow and
 preserves the effect when saving, while possibly quantizing blur/distance EMUs,
-adding effect extents, and wrapping the drawing in `mc:AlternateContent`. Dev47 can
-re-project the strict inline compatibility form described below. Use Microsoft
-Word/Office for final cross-producer visual approval.
+adding effect extents, and wrapping the drawing in `mc:AlternateContent`. Dev48 can
+re-project the strict inline or offset-floating compatibility forms described below.
+Use Microsoft Word/Office for final cross-producer visual approval.
 
 ## DrawingML/VML compatibility wrappers
 
 JSON remains the semantic exchange protocol; the native package remains the
-authority for producer-specific compatibility branches. Dev47 projects one
+authority for producer-specific compatibility branches. Dev48 projects one
 deliberately narrow `mc:AlternateContent` form when all of these proofs hold:
 
 1. the image paragraph otherwise satisfies the ordinary one-picture rules;
@@ -548,11 +549,18 @@ deliberately narrow `mc:AlternateContent` form when all of these proofs hold:
 3. the choice has exactly `Requires="wps"`, and every declaration of the `wps`
    prefix in that XML part resolves to
    `http://schemas.microsoft.com/office/word/2010/wordprocessingShape`;
-4. the choice contains one supported inline DrawingML picture;
+4. the choice contains one supported inline DrawingML picture or one bounded
+   offset-positioned floating picture;
 5. the fallback contains one canonical VML type-75 picture shape, one internal
    image relationship, and no unrecognized children or attributes;
 6. the VML point width and height agree with the DrawingML extents within the
-   producer-rounding tolerance.
+   producer-rounding tolerance;
+7. for floating placement, both branches share the same `wp14:anchorId`, VML
+   margins match DrawingML column/paragraph physical offsets, wrapping is square on
+   both sides, anchor distances are zero, relative size is absent, and
+   layout-in-cell/overlap/front-of-text behavior is compatible with the bounded VML
+   form. LibreOffice's optional leading minus plus eight hexadecimal anchor-ID
+   spelling is accepted and preserved.
 
 This follows the
 [Open XML markup-compatibility selection model](https://learn.microsoft.com/en-us/office/open-xml/general/introduction-to-markup-compatibility):
@@ -569,6 +577,7 @@ The projected `ImageBlock.alternate_content` object records:
   "choice_requires_prefix": "wps",
   "choice_requires_namespace": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
   "fallback_kind": "vml_picture",
+  "fallback_placement": "floating_offset",
   "synchronized_update_fields": ["width", "height"],
   "fallback_asset_matches_choice": false
 }
@@ -579,6 +588,12 @@ AiOffice changes both `wp:extent`/`a:xfrm/a:ext` and the VML
 `v:shape/@style` dimensions, then re-proves the wrapper. Other image fields are
 rejected atomically because updating only the DrawingML choice could produce a
 different image for fallback consumers.
+
+`fallback_placement` is `inline` or `floating_offset`. A floating wrapper retains
+its full DrawingML `floating` evidence, but does not advertise
+`image.anchor.update`: moving or rewrapping only the DrawingML branch would make
+fallback consumers disagree. Paragraph formatting, verified extraction, structural
+movement/removal, and the synchronized operations remain available.
 
 `image.replace` is advertised only when the choice and fallback resolve to the same
 media type and SHA-256 bytes. In that case both references are changed to the same
@@ -591,8 +606,9 @@ Because `mc:Choice/@Requires` refers to `wps` lexically, native lowering explici
 preserves that unambiguous declaration whenever the containing body, header, or
 footer part is rewritten.
 
-Anchored wrappers, multiple choices, rebound or unknown required prefixes, missing
-fallbacks, non-picture VML, geometry disagreement, external/missing/non-image
+Alignment/percentage-positioned or otherwise unsynchronized anchored wrappers,
+multiple choices, rebound or unknown required prefixes, missing fallbacks,
+non-picture VML, geometry/position/wrap disagreement, external/missing/non-image
 fallback relationships, and unfamiliar VML shape structures remain opaque. A
 header/footer part containing even a projected wrapper is not yet clone-safe because
 VML identities and producer-specific fallback assets are not rebased by the clone
@@ -1233,8 +1249,8 @@ These cases remain native and explicit `opaque`/read-only projections:
 - active-simple-position, unsupported wrap-specific effects, malformed
   relative-size rules, or otherwise unsupported floating anchors;
 - non-default picture black-and-white modes or non-neutral shape fills;
-- multiple pictures or alternate representations outside the strict inline
-  `mc:AlternateContent` compatibility contract;
+- multiple pictures or alternate representations outside the strict
+  inline/offset-floating `mc:AlternateContent` compatibility contract;
 - linked or external images;
 - negative, overconstrained, malformed, or otherwise unsupported crop rectangles;
 - malformed/unknown picture transforms or nonzero transform offsets;

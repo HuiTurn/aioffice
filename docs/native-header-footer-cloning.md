@@ -105,6 +105,11 @@ footer. Cloning a part that contains the VML compatibility branch is still refus
 the current clone proof intentionally does not rebase legacy VML shape identities or
 duplicate producer-specific fallback assets.
 
+In `0.2.0.dev48`, the existing-story projection also accepts the strict
+offset-floating compatibility form. Its position and wrap remain read-only across
+branches, so `image.anchor.update` is not advertised; cloning remains refused for
+the same VML identity and fallback-asset reasons.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

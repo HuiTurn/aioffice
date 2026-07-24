@@ -463,6 +463,8 @@ def _image_alternate_content_attributes(image: ImageBlock) -> str:
         f' data-aioffice-choice-requires-namespace="'
         f'{escape(alternate.choice_requires_namespace, quote=True)}"'
         f' data-aioffice-fallback-kind="{alternate.fallback_kind}"'
+        f' data-aioffice-fallback-placement="'
+        f'{alternate.fallback_placement}"'
         ' data-aioffice-fallback-asset-matches-choice="'
         f'{"true" if alternate.fallback_asset_matches_choice else "false"}"'
         ' data-aioffice-synchronized-update-fields="width,height"'

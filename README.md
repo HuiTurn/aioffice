@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev47`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev48`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -29,7 +29,7 @@ horizontal/vertical mirroring, direct-RGB picture outlines with preset dash styl
 fixed picture opacity with native thousandth-percentage precision,
 direct-RGB picture outer shadows with explicit native geometry,
 strict inline DrawingML/VML `mc:AlternateContent` compatibility evidence and
-dual-branch resizing,
+strict offset-floating compatibility projection plus dual-branch resizing,
 conservative offset/alignment/percentage floating-image anchor projection,
 optional Office 2010 relative width/height rules with absolute extent fallbacks,
 square/no-wrap/top-and-bottom/tight/through text wrapping, selective floating-anchor layout
@@ -225,14 +225,17 @@ snapshot cannot perform this operation.
 LibreOffice 26.8 renders the tested direct black outer shadow, retains its native
 effect on save, and may quantize shadow lengths or add effect-extent evidence. It
 still ignores the tested `a:alphaModFix` picture opacity. A LibreOffice save may
-also wrap an inline drawing in `mc:AlternateContent`. Dev47 projects only the
-strictly proven `Requires="wps"` DrawingML choice plus canonical VML picture
-fallback, exposes that proof as `alternate_content`, and synchronizes only
-`width`/`height` across both branches. Replacement is advertised only when the VML
-fallback bytes and media type equal the DrawingML choice; crop, effects,
-accessibility fields, anchored wrappers, and unfamiliar fallback structures remain
-fail-closed. AiOffice preserves untouched native XML exactly; Microsoft Word/Office
-remains the final authority for cross-producer visual approval.
+also wrap a drawing in `mc:AlternateContent`. Dev48 projects only the strictly
+proven `Requires="wps"` DrawingML choice plus canonical VML picture fallback,
+including a bounded floating form whose physical column/paragraph offsets, square
+wrap, zero distances, anchor identity, and VML margins agree. The proof is exposed
+as `alternate_content`, and only `width`/`height` are synchronized across both
+branches. Replacement is advertised only when the VML fallback bytes and media type
+equal the DrawingML choice. `image.anchor.update`, crop, effects, accessibility
+fields, alignment/percentage-positioned wrappers, and unfamiliar fallback
+structures remain fail-closed. AiOffice preserves untouched native XML exactly;
+Microsoft Word/Office remains the final authority for cross-producer visual
+approval.
 
 The projected image ID also addresses its native host paragraph. Reuse
 `paragraph.format` to control layout around an existing picture without touching its
