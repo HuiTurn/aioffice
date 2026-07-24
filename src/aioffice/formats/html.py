@@ -412,6 +412,12 @@ def _image_outline_attributes(image: ImageBlock) -> str:
     )
 
 
+def _image_opacity_attributes(image: ImageBlock) -> str:
+    if image.opacity is None:
+        return ""
+    return f' data-aioffice-opacity="{image.opacity:g}"'
+
+
 def _image_placement_attributes(image: ImageBlock) -> str:
     return f' data-aioffice-placement="{image.placement}"'
 
@@ -499,6 +505,7 @@ def _header_footer_html(
                 f"{_image_crop_attributes(block)}"
                 f"{_image_transform_attributes(block)}"
                 f"{_image_outline_attributes(block)}"
+                f"{_image_opacity_attributes(block)}"
                 f"{figure_style}>"
                 '<div class="native-image-placeholder" role="img" '
                 f'aria-label="{escape(label, quote=True)}" '
@@ -982,6 +989,7 @@ def export_html(
                 f"{_image_crop_attributes(block)}"
                 f"{_image_transform_attributes(block)}"
                 f"{_image_outline_attributes(block)}"
+                f"{_image_opacity_attributes(block)}"
                 f"{_style_attribute(figure_css)}>"
             )
             lines.append(

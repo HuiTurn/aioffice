@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StringConstraints,
@@ -18,7 +19,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.44"
+SPEC_VERSION = "0.2-draft.45"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1039,6 +1040,32 @@ class ImageCrop(StrictModel):
         return self
 
 
+def _normalize_image_opacity(value: object) -> object:
+    if isinstance(value, bool):
+        raise ValueError("Image opacity cannot be a boolean.")
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric < 0 or numeric >= 100:
+            return value
+        return round(round(numeric * 1_000) / 1_000, 3)
+    return value
+
+
+ImageOpacityPercentage = Annotated[
+    float,
+    BeforeValidator(_normalize_image_opacity),
+    Field(
+        ge=0,
+        lt=100,
+        strict=True,
+        description=(
+            "Picture opacity in percentage points, quantized to DrawingML "
+            "thousandths; clear opacity to restore fully opaque identity."
+        ),
+    ),
+]
+
+
 class FloatingImageRelativeWidth(StrictModel):
     """Office 2010 width rule layered over the absolute fallback extent."""
 
@@ -1936,6 +1963,7 @@ class ImageBlock(NodeBase):
     crop: ImageCrop | None = None
     transform: ImageTransform | None = None
     outline: ImageOutline | None = None
+    opacity: ImageOpacityPercentage | None = None
     floating: FloatingImageLayout | None = None
     name: str | None = None
     alt_text: str | None = None
@@ -2027,6 +2055,7 @@ class ImageUpdate(StrictModel):
     crop: ImageCrop | None = None
     transform: ImageTransform | None = None
     outline: ImageOutline | None = None
+    opacity: ImageOpacityPercentage | None = None
     alt_text: str | None = Field(default=None, min_length=1, max_length=4096)
     title: str | None = Field(default=None, min_length=1, max_length=1024)
 
@@ -2070,6 +2099,7 @@ class ImageInsert(StrictModel):
     height: Length
     transform: ImageTransform | None = None
     outline: ImageOutline | None = None
+    opacity: ImageOpacityPercentage | None = None
     name: str | None = Field(default=None, min_length=1, max_length=1024)
     alt_text: str = Field(min_length=1, max_length=4096)
     title: str | None = Field(default=None, min_length=1, max_length=1024)
@@ -2198,6 +2228,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.42",
         "0.2-draft.43",
         "0.2-draft.44",
+        "0.2-draft.45",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

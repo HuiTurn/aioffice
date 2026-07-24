@@ -161,6 +161,18 @@
 - Verified that LibreOffice 26.8 retains the tested visible direct-RGB outline but
   may drop its preset dash and explicit default line state on save; AiOffice
   truthfully reopens the producer's normalized solid outline.
+- Added strict picture `opacity` semantics backed only by direct
+  `a:blip/a:alphaModFix`, expressed as AI-readable percentage points from zero
+  inclusive to 100 exclusive with native `0.001` precision.
+- Added opacity projection, selective set/clear lowering, insertion, verified reads,
+  HTML evidence, CLI and Workspace transport, copy-on-write replacement,
+  anchor-update preservation, and header/footer clone isolation.
+- Preserved an explicit native 100% identity opacity without inventing semantic
+  state, and kept malformed, duplicate, nested, out-of-range, or alternate visual
+  effects fail-closed as opaque.
+- Documented the verified interoperability boundary that LibreOffice 26.8 currently
+  ignores `a:alphaModFix` during rendering and removes it on save; Word/Office
+  rendering remains required for opacity-sensitive visual approval.
 - Accepted LibreOffice's visually neutral picture normalization
   (`pic:spPr/@bwMode="auto"` and at most one empty `a:noFill`) so aligned pictures
   remain projected and editable after an Office-compatible open/save cycle, while
@@ -567,6 +579,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.42`.
 - Advanced the AiOffice Document Spec to `0.2-draft.43`.
 - Advanced the AiOffice Document Spec to `0.2-draft.44`.
+- Advanced the AiOffice Document Spec to `0.2-draft.45`.
 
 ## 0.1.0
 

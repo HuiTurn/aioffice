@@ -449,6 +449,7 @@ def _paragraph_projection(
                 if native_image.outline is not None
                 else None
             ),
+            "opacity": native_image.opacity,
             "floating": (
                 native_image.floating.model_dump(
                     mode="json",

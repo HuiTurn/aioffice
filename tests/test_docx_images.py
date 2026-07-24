@@ -97,6 +97,7 @@ def _image_document(
     cropped: bool = False,
     transform_attributes: dict[str, str] | None = None,
     outlined: bool = False,
+    opacity_amount: str | None = None,
     alt_text: str | None = "A compact expert workflow diagram",
 ) -> bytes:
     if (aligned or percentage_position or relative_size) and not anchored:
@@ -295,11 +296,17 @@ def _image_document(
     )
     ET.SubElement(non_visual, _q(PIC, "cNvPicPr"))
     blip_fill = ET.SubElement(picture, _q(PIC, "blipFill"))
-    ET.SubElement(
+    blip = ET.SubElement(
         blip_fill,
         _q(A, "blip"),
         {_q(R, "embed"): "rIdImage1"},
     )
+    if opacity_amount is not None:
+        ET.SubElement(
+            blip,
+            _q(A, "alphaModFix"),
+            {"amt": opacity_amount},
+        )
     if cropped:
         ET.SubElement(
             blip_fill,
@@ -425,6 +432,7 @@ def _header_image_document(
     wrap_mode: str = "square",
     transform_attributes: dict[str, str] | None = None,
     outlined: bool = False,
+    opacity_amount: str | None = None,
 ) -> bytes:
     assert kind in {"header", "footer"}
     body_image = _image_document(
@@ -436,6 +444,7 @@ def _header_image_document(
         wrap_mode=wrap_mode,
         transform_attributes=transform_attributes,
         outlined=outlined,
+        opacity_amount=opacity_amount,
     )
     with ZipFile(io.BytesIO(body_image)) as archive:
         image_document = parse_xml(
@@ -653,6 +662,7 @@ class DocxImageTests(unittest.TestCase):
                     "height",
                     "transform",
                     "outline",
+                    "opacity",
                     "alt_text",
                     "paragraph_style",
                 },
@@ -665,6 +675,7 @@ class DocxImageTests(unittest.TestCase):
                     "crop",
                     "transform",
                     "outline",
+                    "opacity",
                     "alt_text",
                     "title",
                 },
@@ -813,7 +824,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.44")
+        self.assertEqual(spec["spec_version"], "0.2-draft.45")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -902,13 +913,21 @@ class DocxImageTests(unittest.TestCase):
                 "crop",
                 "transform",
                 "outline",
+                "opacity",
                 "alt_text",
                 "title",
             ],
         )
         self.assertEqual(
             capabilities["clearable_update_fields"],
-            ["crop", "transform", "outline", "alt_text", "title"],
+            [
+                "crop",
+                "transform",
+                "outline",
+                "opacity",
+                "alt_text",
+                "title",
+            ],
         )
         self.assertEqual(
             capabilities["single_dimension_resize"],
@@ -3196,6 +3215,7 @@ class DocxImageTests(unittest.TestCase):
             _image_document(
                 anchored=True,
                 outlined=True,
+                opacity_amount="81250",
                 transform_attributes={
                     "rot": "21660000",
                     "flipV": "true",
@@ -3229,6 +3249,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             result.document.to_spec()["content"][0]["outline"],
             image["outline"],
+        )
+        self.assertEqual(
+            result.document.to_spec()["content"][0]["opacity"],
+            image["opacity"],
         )
         with ZipFile(io.BytesIO(result.document.to_bytes("docx"))) as package:
             root = parse_xml(package.read("word/document.xml"))
@@ -3431,6 +3455,289 @@ class DocxImageTests(unittest.TestCase):
             with self.subTest(native_dash=native_dash):
                 image = Document.from_docx(mutated).to_spec()["content"][0]
                 self.assertEqual(image["outline"]["dash"], semantic_dash)
+
+    def test_picture_opacity_projects_updates_clears_and_preserves(
+        self,
+    ) -> None:
+        source = _image_document(opacity_amount="33333")
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(image["opacity"], 33.333)
+        self.assertEqual(document.inspect()["nodes"][0]["opacity"], 33.333)
+        self.assertEqual(document.to_bytes("docx"), source)
+        asset = next(
+            candidate
+            for candidate in document.to_spec()["assets"]
+            if candidate["id"] == image["asset_id"]
+        )
+        self.assertEqual(
+            document.read_image(image["id"]).sha256,
+            asset["sha256"],
+        )
+        capabilities = document.capabilities()["assets"]
+        self.assertIn("opacity", capabilities["native_update_fields"])
+        self.assertIn("opacity", capabilities["clearable_update_fields"])
+        self.assertEqual(
+            capabilities["image_opacity_unit"],
+            "percentage_points",
+        )
+        self.assertEqual(capabilities["image_opacity_precision"], 0.001)
+        self.assertEqual(
+            capabilities["image_opacity_range"],
+            {
+                "minimum_inclusive": 0,
+                "maximum_exclusive": 100,
+            },
+        )
+        html = document.to_bytes("html").decode()
+        self.assertIn('data-aioffice-opacity="33.333"', html)
+
+        unrelated = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"alt_text": "Opacity preserved"},
+                }
+            ]
+        )
+        self.assertTrue(unrelated.success, unrelated.model_dump())
+        assert unrelated.document is not None
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(
+                io.BytesIO(unrelated.document.to_bytes("docx"))
+            ) as after,
+        ):
+            before_root = parse_xml(before.read("word/document.xml"))
+            after_root = parse_xml(after.read("word/document.xml"))
+        before_opacity = before_root.find(f".//{_q(A, 'alphaModFix')}")
+        after_opacity = after_root.find(f".//{_q(A, 'alphaModFix')}")
+        assert before_opacity is not None
+        assert after_opacity is not None
+        self.assertEqual(
+            serialize_xml(after_opacity),
+            serialize_xml(before_opacity),
+        )
+
+        updated = unrelated.document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"opacity": 62.3456},
+                }
+            ]
+        )
+        self.assertTrue(updated.success, updated.model_dump())
+        self.assertEqual(
+            updated.changes[0]["property_changes"],
+            [
+                {
+                    "path": "opacity",
+                    "before": 33.333,
+                    "after": 62.346,
+                }
+            ],
+        )
+        assert updated.document is not None
+        updated_output = updated.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(updated_output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+            self.assertEqual(package.read("word/media/image1.png"), PNG)
+        native_opacity = root.find(f".//{_q(A, 'alphaModFix')}")
+        assert native_opacity is not None
+        self.assertEqual(native_opacity.attrib, {"amt": "62346"})
+        reopened = Document.from_docx(updated_output)
+        self.assertEqual(
+            reopened.to_spec()["content"][0]["opacity"],
+            62.346,
+        )
+
+        replaced = reopened.replace_image(
+            image["id"],
+            JPEG,
+            media_type="image/jpeg",
+        )
+        self.assertTrue(replaced.success, replaced.model_dump())
+        assert replaced.document is not None
+        self.assertEqual(
+            replaced.document.to_spec()["content"][0]["opacity"],
+            62.346,
+        )
+
+        cleared = replaced.document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "clear": ["opacity"],
+                }
+            ]
+        )
+        self.assertTrue(cleared.success, cleared.model_dump())
+        assert cleared.document is not None
+        cleared_output = cleared.document.to_bytes("docx")
+        with ZipFile(io.BytesIO(cleared_output)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        self.assertIsNone(root.find(f".//{_q(A, 'alphaModFix')}"))
+        self.assertNotIn(
+            "opacity",
+            Document.from_docx(cleared_output).to_spec()["content"][0],
+        )
+
+    def test_identity_opacity_is_preserved_without_semantic_effect(
+        self,
+    ) -> None:
+        source = _image_document(opacity_amount="100000")
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertNotIn("opacity", image)
+        self.assertEqual(document.to_bytes("docx"), source)
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"title": "Identity opacity preserved"},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        with ZipFile(
+            io.BytesIO(result.document.to_bytes("docx"))
+        ) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        opacity = root.find(f".//{_q(A, 'alphaModFix')}")
+        assert opacity is not None
+        self.assertEqual(opacity.attrib, {"amt": "100000"})
+
+    def test_opacity_update_preserves_blip_extension_metadata(
+        self,
+    ) -> None:
+        source = _image_document()
+        with ZipFile(io.BytesIO(source)) as package:
+            root = parse_xml(package.read("word/document.xml"))
+        blip = root.find(f".//{_q(A, 'blip')}")
+        assert blip is not None
+        blip.set("cstate", "print")
+        extension_list = ET.SubElement(blip, _q(A, "extLst"))
+        extension = ET.SubElement(
+            extension_list,
+            _q(A, "ext"),
+            {"uri": "{28A0092B-C50C-407E-A947-70E740481C1C}"},
+        )
+        ET.SubElement(
+            extension,
+            (
+                "{http://schemas.microsoft.com/office/drawing/"
+                "2010/main}useLocalDpi"
+            ),
+            {"val": "0"},
+        )
+        source = _rewrite_package(
+            source,
+            replacements={
+                "word/document.xml": serialize_xml(root),
+            },
+            additions={},
+        )
+        document = Document.from_docx(source)
+        image = document.to_spec()["content"][0]
+        self.assertEqual(image["type"], "image")
+        self.assertEqual(document.to_bytes("docx"), source)
+        before_extension = serialize_xml(extension_list)
+
+        result = document.apply(
+            [
+                {
+                    "op": "image.update",
+                    "target": image["id"],
+                    "set": {"opacity": 50},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        with ZipFile(
+            io.BytesIO(result.document.to_bytes("docx"))
+        ) as package:
+            updated_root = parse_xml(package.read("word/document.xml"))
+        updated_blip = updated_root.find(f".//{_q(A, 'blip')}")
+        assert updated_blip is not None
+        self.assertEqual(updated_blip.get("cstate"), "print")
+        self.assertEqual(
+            [child.tag for child in updated_blip],
+            [_q(A, "alphaModFix"), _q(A, "extLst")],
+        )
+        updated_extension = updated_blip.find(f"./{_q(A, 'extLst')}")
+        assert updated_extension is not None
+        self.assertEqual(
+            serialize_xml(updated_extension),
+            before_extension,
+        )
+
+    def test_invalid_native_picture_opacity_remains_opaque(self) -> None:
+        for case in (
+            "missing_amount",
+            "unknown_attribute",
+            "child",
+            "non_integer",
+            "negative",
+            "over_100_percent",
+            "duplicate",
+            "other_effect",
+            "nested_opacity",
+            "wrong_child_order",
+            "unknown_blip_attribute",
+        ):
+            source = _image_document(opacity_amount="50000")
+            with ZipFile(io.BytesIO(source)) as package:
+                root = parse_xml(package.read("word/document.xml"))
+            blip = root.find(f".//{_q(A, 'blip')}")
+            opacity = root.find(f".//{_q(A, 'alphaModFix')}")
+            assert blip is not None
+            assert opacity is not None
+            if case == "missing_amount":
+                opacity.attrib.clear()
+            elif case == "unknown_attribute":
+                opacity.set("future", "1")
+            elif case == "child":
+                ET.SubElement(opacity, _q(A, "extLst"))
+            elif case == "non_integer":
+                opacity.set("amt", "50%")
+            elif case == "negative":
+                opacity.set("amt", "-1")
+            elif case == "over_100_percent":
+                opacity.set("amt", "100001")
+            elif case == "duplicate":
+                blip.append(copy.deepcopy(opacity))
+            elif case == "other_effect":
+                ET.SubElement(blip, _q(A, "grayscl"))
+            elif case == "nested_opacity":
+                blip.remove(opacity)
+                extension = ET.SubElement(blip, _q(A, "extLst"))
+                extension.append(opacity)
+            elif case == "wrong_child_order":
+                blip.insert(0, ET.Element(_q(A, "extLst")))
+            elif case == "unknown_blip_attribute":
+                blip.set("future", "1")
+            mutated = _rewrite_package(
+                source,
+                replacements={
+                    "word/document.xml": serialize_xml(root),
+                },
+                additions={},
+            )
+            with self.subTest(case=case):
+                document = Document.from_docx(mutated)
+                self.assertEqual(
+                    document.to_spec()["content"][0]["type"],
+                    "opaque",
+                )
+                self.assertEqual(document.to_spec()["assets"], [])
+                self.assertEqual(document.to_bytes("docx"), mutated)
 
     def test_rectangular_source_crop_projects_updates_and_clears(
         self,
@@ -4467,6 +4774,31 @@ class DocxImageTests(unittest.TestCase):
                     }
                 },
             },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"opacity": -0.001},
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"opacity": 100},
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"opacity": 99.9999},
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"opacity": True},
+            },
+            {
+                "op": "image.update",
+                "target": image["id"],
+                "set": {"opacity": "50"},
+            },
         ]
         for operation in invalid_operations:
             with self.subTest(operation=operation):
@@ -5412,6 +5744,7 @@ class DocxImageTests(unittest.TestCase):
             relative_size=True,
             wrap_mode="tight",
             outlined=True,
+            opacity_amount="62500",
             transform_attributes={
                 "rot": "1350000",
                 "flipH": "1",
@@ -5467,6 +5800,7 @@ class DocxImageTests(unittest.TestCase):
             cloned_image["outline"],
             source_image["outline"],
         )
+        self.assertEqual(cloned_image["opacity"], source_image["opacity"])
 
         replaced = cloned.document.replace_image(
             cloned_image["id"],
@@ -5567,6 +5901,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_clone_image["outline"],
             reopened_source_image["outline"],
+        )
+        self.assertEqual(
+            reopened_clone_image["opacity"],
+            reopened_source_image["opacity"],
         )
         self.assertEqual(reopened.to_bytes("docx"), output)
 
@@ -5819,6 +6157,7 @@ class DocxImageTests(unittest.TestCase):
                 "color": "#2457A7",
                 "dash": "dash",
             },
+            opacity=72.3456,
             paragraph_style={
                 "alignment": "center",
                 "spacing_before": {"value": 6, "unit": "pt"},
@@ -5882,6 +6221,7 @@ class DocxImageTests(unittest.TestCase):
                 "dash": "dash",
             },
         )
+        self.assertEqual(inserted["opacity"], 72.346)
         self.assertEqual(
             inserted["paragraph_style"]["alignment"],
             "center",
@@ -5954,6 +6294,11 @@ class DocxImageTests(unittest.TestCase):
                 "algn": "ctr",
             },
         )
+        inserted_opacity = inserted_paragraph.find(
+            f".//{_q(A, 'blip')}/{_q(A, 'alphaModFix')}"
+        )
+        assert inserted_opacity is not None
+        self.assertEqual(inserted_opacity.attrib, {"amt": "72346"})
         inserted_relationship_id = inserted_paragraph.find(
             f".//{_q(A, 'blip')}"
         ).get(_q(R, "embed"))
@@ -5999,6 +6344,10 @@ class DocxImageTests(unittest.TestCase):
         self.assertEqual(
             reopened_inserted["outline"],
             inserted["outline"],
+        )
+        self.assertEqual(
+            reopened_inserted["opacity"],
+            inserted["opacity"],
         )
         self.assertEqual(reopened.image_bytes("inserted_chart"), JPEG)
 
@@ -7016,6 +7365,8 @@ class DocxImageTests(unittest.TestCase):
                         str(transform_path),
                         "--outline",
                         str(outline_path),
+                        "--opacity",
+                        "64.3214",
                         "--floating-layout",
                         str(floating_layout_path),
                         "--align",
@@ -7044,6 +7395,7 @@ class DocxImageTests(unittest.TestCase):
                 },
             )
             self.assertEqual(cli_image["outline"], outline)
+            self.assertEqual(cli_image["opacity"], 64.321)
             self.assertEqual(
                 cli_image["floating"]["horizontal"],
                 floating_layout["horizontal"],
@@ -7061,6 +7413,7 @@ class DocxImageTests(unittest.TestCase):
                 image_id="workspace_chart",
                 transform=transform,
                 outline=outline,
+                opacity=64.3214,
                 floating=floating_layout,
                 paragraph_style={"alignment": "right"},
                 base_revision=tracked.revision,
@@ -7088,6 +7441,7 @@ class DocxImageTests(unittest.TestCase):
                 cli_image["transform"],
             )
             self.assertEqual(workspace_image["outline"], outline)
+            self.assertEqual(workspace_image["opacity"], 64.321)
             self.assertIn(
                 "insert_image_after",
                 workspace.capabilities(tracked.id)["operations"],
@@ -7138,6 +7492,10 @@ class DocxImageTests(unittest.TestCase):
             self.assertEqual(
                 patch["operations"][0]["image"]["outline"],
                 outline,
+            )
+            self.assertEqual(
+                patch["operations"][0]["image"]["opacity"],
+                64.321,
             )
             self.assertEqual(
                 patch["changes"][0]["binary_transport"],

@@ -89,6 +89,11 @@ the complete `a:ln` subtree and shares the same media target; later outline,
 transform, anchor, paragraph, or binary updates re-prove that only the selected
 story occurrence changed.
 
+In `0.2.0.dev45`, clone-safe pictures may carry one direct fixed-opacity effect.
+The clone preserves the exact `a:blip/a:alphaModFix` value and shares the media
+target; later opacity, outline, transform, anchor, paragraph, or binary updates
+remain isolated to the selected story occurrence.
+
 ## Clone and bind atomically
 
 The new part may be assigned to a section in the same Patch:

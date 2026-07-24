@@ -370,6 +370,7 @@ class Document:
             or image.crop != native_image.crop
             or image.transform != native_image.transform
             or image.outline != native_image.outline
+            or image.opacity != native_image.opacity
             or round(image.width.to_points() * 12_700)
             != round(native_image.width.to_points() * 12_700)
             or round(image.height.to_points() * 12_700)
@@ -529,6 +530,7 @@ class Document:
         title: str | None = None,
         transform: ImageTransform | Mapping[str, Any] | None = None,
         outline: ImageOutline | Mapping[str, Any] | None = None,
+        opacity: float | None = None,
         floating: FloatingImageLayout | Mapping[str, Any] | None = None,
         paragraph_style: ParagraphStyle | Mapping[str, Any] | None = None,
         dry_run: bool = False,
@@ -601,6 +603,7 @@ class Document:
             "height": height,
             "transform": transform,
             "outline": outline,
+            "opacity": opacity,
             "name": name or prepared.asset.filename,
             "alt_text": alt_text,
             "title": title,
@@ -796,6 +799,7 @@ class Document:
                             if node.outline is not None
                             else None
                         ),
+                        opacity=node.opacity,
                         floating=(
                             node.floating.model_dump(
                                 mode="json",
@@ -953,6 +957,7 @@ class Document:
                                             if block.outline is not None
                                             else None
                                         ),
+                                        "opacity": block.opacity,
                                         "placement": block.placement,
                                         "floating": (
                                             block.floating.model_dump(
@@ -1225,6 +1230,7 @@ class Document:
                     "crop",
                     "transform",
                     "outline",
+                    "opacity",
                     "alt_text",
                     "title",
                 ],
@@ -1232,6 +1238,7 @@ class Document:
                     "crop",
                     "transform",
                     "outline",
+                    "opacity",
                     "alt_text",
                     "title",
                 ],
@@ -1278,6 +1285,16 @@ class Document:
                 "image_outline_width_quantization": "nearest_native_emu",
                 "image_outline_group_update": "complete_object",
                 "image_outline_clear_removes_direct_line": True,
+                "image_opacity_unit": "percentage_points",
+                "image_opacity_precision": 0.001,
+                "image_opacity_range": {
+                    "minimum_inclusive": 0,
+                    "maximum_exclusive": 100,
+                },
+                "image_opacity_native_element": (
+                    "pic:blipFill/a:blip/a:alphaModFix"
+                ),
+                "image_opacity_clear_restores_fully_opaque": True,
                 "single_dimension_resize": "preserve_aspect_ratio",
                 "two_dimension_resize": "exact",
                 "native_geometry_patch": [
@@ -1286,6 +1303,7 @@ class Document:
                     "pic:blipFill/a:srcRect",
                     "pic:spPr/a:xfrm/@rot|@flipH|@flipV",
                     "pic:spPr/a:ln",
+                    "pic:blipFill/a:blip/a:alphaModFix",
                 ],
                 "projected_placements": [
                     "inline",
@@ -1450,6 +1468,7 @@ class Document:
                     "source_crop",
                     "picture_transform",
                     "picture_outline",
+                    "picture_opacity",
                     "native_placement_and_anchor_layout",
                     "alternative_text",
                     "title",
@@ -1459,7 +1478,7 @@ class Document:
                 "native_insert_api": (
                     "Document.insert_image_after(target, source, width=..., "
                     "height=..., alt_text=..., transform=None, outline=None, "
-                    "floating=None)"
+                    "opacity=None, floating=None)"
                 ),
                 "native_insert_operation": "image.insert_after",
                 "insert_placement": (
@@ -1480,6 +1499,7 @@ class Document:
                 "insert_dimensions": "explicit_width_and_height",
                 "insert_transform_schema": "image-transform",
                 "insert_outline_schema": "image-outline",
+                "insert_opacity_unit": "percentage_points",
                 "insert_alt_text": "required",
                 "insert_target": "mapped_top_level_body_node",
                 "insert_supports_paragraph_style": True,
@@ -1521,7 +1541,11 @@ class Document:
                         "optional direct-RGB DrawingML outline with native "
                         "preset dash"
                     ),
-                    "no visual effect",
+                    (
+                        "optional direct a:alphaModFix picture opacity with "
+                        "0.001-percentage-point precision"
+                    ),
+                    "no other visual effect",
                     (
                         "optional LibreOffice-neutral bwMode auto and empty "
                         "shape no-fill"
@@ -1541,7 +1565,8 @@ class Document:
                     "linked or external image",
                     (
                         "negative, overconstrained, malformed-transform, "
-                        "unsupported-outline, or effected picture"
+                        "unsupported-outline, malformed-opacity, or other "
+                        "effected picture"
                     ),
                     "picture in table",
                     "VML, OLE, or embedded object",
@@ -4227,6 +4252,7 @@ class Document:
                 height=image_insert.height,
                 transform=image_insert.transform,
                 outline=image_insert.outline,
+                opacity=image_insert.opacity,
                 name=image_insert.name,
                 alt_text=image_insert.alt_text,
                 title=image_insert.title,
@@ -4466,6 +4492,7 @@ class Document:
                         "crop",
                         "transform",
                         "outline",
+                        "opacity",
                         "alt_text",
                         "title",
                     }

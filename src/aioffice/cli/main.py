@@ -182,6 +182,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="JSON file containing one strict ImageOutline.",
     )
     insert_image.add_argument(
+        "--opacity",
+        type=float,
+        help=(
+            "Picture opacity in percentage points [0, 100); "
+            "omit for fully opaque."
+        ),
+    )
+    insert_image.add_argument(
         "--floating-layout",
         type=Path,
         help=(
@@ -453,6 +461,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="JSON file containing one strict ImageOutline.",
     )
     workspace_insert_image.add_argument(
+        "--opacity",
+        type=float,
+        help=(
+            "Picture opacity in percentage points [0, 100); "
+            "omit for fully opaque."
+        ),
+    )
+    workspace_insert_image.add_argument(
         "--floating-layout",
         type=Path,
         help=(
@@ -644,6 +660,7 @@ def _run(args: argparse.Namespace) -> int:
                     if args.outline is not None
                     else None
                 ),
+                opacity=args.opacity,
                 floating=(
                     _load_json_object(
                         args.floating_layout,
@@ -801,6 +818,7 @@ def _run(args: argparse.Namespace) -> int:
                 if args.outline is not None
                 else None
             ),
+            opacity=args.opacity,
             floating=(
                 _load_json_object(
                     args.floating_layout,

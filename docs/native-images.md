@@ -45,6 +45,7 @@ occurrence lives in its `header_footers[].content`:
         "color": "#CC0000",
         "dash": "dash_dot"
       },
+      "opacity": 72.5,
       "name": "Expert diagram",
       "alt_text": "A compact expert workflow diagram",
       "title": "Workflow",
@@ -198,9 +199,11 @@ An image becomes an `image` block only when all of these conditions hold:
     line: either a neutral absent/zero-width `a:noFill` line or one positive
     `ST_LineWidth` line with direct `a:srgbClr`, a supported preset dash, and only
     the supported default cap, compound, alignment, and round-join semantics;
-12. the picture has no recognized DrawingML visual effect; LibreOffice's optional
-    neutral `pic:spPr/@bwMode="auto"` and at most one empty shape `a:noFill`
-    normalization are allowed.
+12. `a:blip` has at most one direct, strict `a:alphaModFix` opacity from 0 through
+    100,000 native thousandths of one percent;
+13. the picture has no other recognized DrawingML visual effect; LibreOffice's
+    optional neutral `pic:spPr/@bwMode="auto"` and at most one empty shape
+    `a:noFill` normalization are allowed.
 
 For `wp:anchor`, the proof additionally requires `simplePos="0"` with zero simple
 coordinates; one horizontal and vertical position, each containing exactly one
@@ -504,6 +507,13 @@ preset dash plus explicit default line attributes and round-join element on save
 making the rewritten native line solid. AiOffice reopens that producer-authored
 solid outline instead of claiming the original dash rule survived.
 
+The dev45 opacity fixture preserves direct `a:blip/a:alphaModFix` byte-for-byte on
+exact no-op and through unrelated AiOffice edits. LibreOffice 26.8 currently ignores
+the tested opacity during rendering and removes the element on save. AiOffice
+therefore reopens that externally saved file as fully opaque instead of claiming the
+removed rule survived. Use Microsoft Word/Office native rendering—not the
+LibreOffice provider—to visually approve opacity-sensitive composition.
+
 ## Verified binary access
 
 Use the projected image node ID, never a part path:
@@ -526,8 +536,8 @@ document.extract_image(
 4. resolves the embedded relationship from the correct source part;
 5. confirms the image target and OPC media type;
 6. compares native identity, asset ID, placement, floating layout, displayed extent,
-   crop, picture transform, picture outline, accessibility metadata, declared size,
-   and SHA-256;
+   crop, picture transform, picture outline, picture opacity, accessibility
+   metadata, declared size, and SHA-256;
 7. hashes the returned bytes again.
 
 Any stale, forged, missing, external, or structurally changed reference fails closed.
@@ -546,7 +556,8 @@ filename, size, SHA-256, and output path as JSON.
 ## Selective native updates
 
 `image.update` changes only the supported native picture's accessibility metadata,
-displayed extent, rectangular source crop, picture transform, and/or direct outline:
+displayed extent, rectangular source crop, picture transform, direct outline, and/or
+fixed opacity:
 
 ```python
 result = document.apply([
@@ -570,6 +581,7 @@ result = document.apply([
                 "color": "#CC0000",
                 "dash": "dash_dot"
             },
+            "opacity": 72.5,
             "alt_text": "Expert workflow with three approval stages",
             "title": "Expert workflow",
         },
@@ -578,15 +590,15 @@ result = document.apply([
 assert result.success
 ```
 
-The operation accepts `width`, `height`, `crop`, `transform`, `outline`, `alt_text`,
-and `title` in `set`. `crop`, `transform`, `outline`, `alt_text`, and `title` are
-clearable:
+The operation accepts `width`, `height`, `crop`, `transform`, `outline`, `opacity`,
+`alt_text`, and `title` in `set`. `crop`, `transform`, `outline`, `opacity`,
+`alt_text`, and `title` are clearable:
 
 ```json
 {
   "op": "image.update",
   "target": "#image_3A17C04E",
-  "clear": ["crop", "transform", "outline", "alt_text", "title"]
+  "clear": ["crop", "transform", "outline", "opacity", "alt_text", "title"]
 }
 ```
 
@@ -697,6 +709,28 @@ Microsoft's [`LinePropertiesType`](https://learn.microsoft.com/en-us/dotnet/api/
 and [Office DrawingML default-resolution notes](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/a9897c2b-0404-4676-aa5c-8f25bc6d66ca).
 Semantic HTML exposes width, color, and dash as evidence attributes; DOCX rendering
 remains the visual authority.
+
+### Picture opacity
+
+`opacity` is the visible picture opacity in percentage points from `0` inclusive to
+`100` exclusive. AiOffice rounds it to `0.001` percentage point and writes the
+integer thousandths to one direct
+`pic:blipFill/a:blip/a:alphaModFix/@amt`. For example, `62.3456` becomes
+`62346` and reopens as `62.346`. Set `0` for a fully transparent occurrence; clear
+the field to restore the fully opaque identity state.
+
+An imported explicit native `amt="100000"` is semantically identical to no effect,
+so it is not projected as `opacity`; its raw XML is still preserved through no-op
+and unrelated edits. Explicit opacity updates use a canonical integer form, while
+clear removes only the direct `a:alphaModFix` element.
+
+Missing/unknown attributes, child content, non-integer values, values outside
+0–100,000, duplicates, nested opacity, and every other blip or shape visual effect
+remain opaque. The native element and unit follow Microsoft's
+[`AlphaModulationFixed`](https://learn.microsoft.com/zh-cn/dotnet/api/documentformat.openxml.drawing.alphamodulationfixed?view=openxml-2.20.0)
+contract. Semantic HTML exposes normalized opacity as evidence but does not simulate
+Word composition. LibreOffice 26.8 neither renders nor preserves this tested effect,
+so Microsoft Word/Office output is the visual authority for opacity-sensitive pages.
 
 The native lowering re-proves the conservative image shape before and after mutation.
 It does not decode, resample, replace, or recompress the image, and it does not change
@@ -959,6 +993,8 @@ The contract is deliberately explicit:
   mirror group using the same strict semantics as `image.update`;
 - optional `outline` sets one complete direct-RGB picture line using the same
   width and preset-dash semantics as `image.update`;
+- optional `opacity` sets direct picture opacity in percentage points from 0
+  inclusive to 100 exclusive using the same native precision as `image.update`;
 - placement defaults to `inline`; a non-null `floating` value selects floating
   placement and must validate as one complete `FloatingImageLayout`;
 - every horizontal and vertical position must select exactly one explicit `offset`,
@@ -1009,6 +1045,7 @@ aioffice insert-image-after \
   --image-id expert_workflow \
   --transform image-transform.json \
   --outline image-outline.json \
+  --opacity 85 \
   --floating-layout floating-layout.json \
   -o inserted.docx
 ```
@@ -1018,7 +1055,8 @@ the objects accepted by `aioffice schema --kind image-transform`,
 `aioffice schema --kind image-outline`, and
 `aioffice schema --kind floating-image-layout`. Omitting the floating-layout flag
 keeps inline placement. The Workspace CLI accepts the same flags and records the
-normalized transform, outline, placement, and layout in its binary-free patch log.
+normalized transform, outline, opacity, placement, and layout in its binary-free
+patch log.
 
 Tracked insertion creates one new workspace revision without storing binary data in
 the patch log:
@@ -1056,6 +1094,8 @@ These cases remain native and explicit `opaque`/read-only projections:
 - malformed/unknown picture transforms or nonzero transform offsets;
 - unsupported picture outline fills, colors, joins, compound modes, arrowheads,
   custom dashes, extensions, or malformed line structures;
+- malformed, duplicate, nested, or out-of-range opacity and every other picture
+  visual effect;
 - drawings inside tables;
 - complex header/footer drawings that do not satisfy the same one-picture proof;
 - VML pictures, OLE objects, embedded files, charts, SmartArt, and other graphic
@@ -1072,9 +1112,9 @@ subset are not claimed in this release.
 
 Semantic HTML emits an accessible, dimensioned placeholder with the asset ID, media
 type, placement, and normalized crop, transform, and outline evidence. Markdown
-emits an `aioffice-asset:` reference. Neither exporter embeds binary data or claims
-to reproduce native floating placement, wrapping, crop, transform, outline, or
-picture content.
+emits an `aioffice-asset:` reference. Semantic HTML also exposes normalized opacity
+as evidence. Neither exporter embeds binary data or claims to reproduce native
+floating placement, wrapping, crop, transform, outline, opacity, or picture content.
 
 Use the native LibreOffice PDF/PNG provider to judge the actual picture, cropping,
 position, pagination, and surrounding layout. Native rendering remains the visual

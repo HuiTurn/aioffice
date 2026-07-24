@@ -144,6 +144,7 @@ class SimpleNativeImage:
     crop: ImageCrop | None
     transform: ImageTransform | None
     outline: ImageOutline | None
+    opacity: float | None
     placement: Literal["inline", "floating"]
     floating: FloatingImageLayout | None
     name: str | None
@@ -739,6 +740,15 @@ def _native_image_outline_element(
     )
     ET.SubElement(line, _q(A, "round"))
     return line
+
+
+def _native_image_opacity_amount(opacity: float | None) -> str | None:
+    if opacity is None:
+        return None
+    native_opacity = round(opacity * 1_000)
+    if native_opacity < 0 or native_opacity >= 100_000:
+        return None
+    return str(native_opacity)
 
 
 def floating_image_layout_matches(
@@ -1472,8 +1482,44 @@ def simple_native_image(
         return None
     blip = blips[0]
     relationship_id = blip.attrib.get(_q(R, "embed"))
-    if not relationship_id or blip.attrib.get(_q(R, "link")):
+    if (
+        not relationship_id
+        or blip.attrib.get(_q(R, "link"))
+        or set(blip.attrib) - {_q(R, "embed"), "cstate"}
+        or blip.attrib.get("cstate")
+        not in {None, "email", "screen", "print", "hqprint", "none"}
+    ):
         return None
+    opacity_elements = blip.findall(f"./{_q(A, 'alphaModFix')}")
+    extension_lists = blip.findall(f"./{_q(A, 'extLst')}")
+    expected_blip_children = [
+        *([_q(A, "alphaModFix")] if opacity_elements else []),
+        *([_q(A, "extLst")] if extension_lists else []),
+    ]
+    if (
+        len(opacity_elements) > 1
+        or len(extension_lists) > 1
+        or [child.tag for child in blip] != expected_blip_children
+    ):
+        return None
+    opacity_element = (
+        opacity_elements[0] if opacity_elements else None
+    )
+    image_opacity: float | None = None
+    if opacity_element is not None:
+        if (
+            set(opacity_element.attrib) != {"amt"}
+            or len(opacity_element)
+        ):
+            return None
+        try:
+            native_opacity = int(opacity_element.attrib["amt"])
+        except ValueError:
+            return None
+        if native_opacity < 0 or native_opacity > 100_000:
+            return None
+        if native_opacity < 100_000:
+            image_opacity = round(native_opacity / 1_000, 3)
 
     crop: ImageCrop | None = None
     if source_rectangles:
@@ -1755,6 +1801,7 @@ def simple_native_image(
         return None
     if any(
         _local_name(element.tag) in _VISUAL_EFFECT_NAMES
+        and element is not opacity_element
         for element in picture.iter()
     ):
         return None
@@ -1806,6 +1853,7 @@ def simple_native_image(
         crop=crop,
         transform=image_transform,
         outline=image_outline,
+        opacity=image_opacity,
         placement=placement,
         floating=floating,
         name=optional_attribute("name"),
@@ -2033,6 +2081,42 @@ def patch_simple_native_image(
                 )
             shape_properties.insert(existing_index, native_outline)
 
+    if "opacity" in fields:
+        blip = drawing_container.find(
+            f"./{_q(A, 'graphic')}/{_q(A, 'graphicData')}/"
+            f"{_q(PIC, 'pic')}/{_q(PIC, 'blipFill')}/"
+            f"{_q(A, 'blip')}"
+        )
+        if blip is None:
+            raise NativePackageError(
+                "Supported native image has no a:blip element."
+            )
+        opacity_elements = blip.findall(f"./{_q(A, 'alphaModFix')}")
+        if len(opacity_elements) > 1:
+            raise NativePackageError(
+                "Supported native image has duplicate opacity effects."
+            )
+        existing_index = (
+            list(blip).index(opacity_elements[0])
+            if opacity_elements
+            else 0
+        )
+        if opacity_elements:
+            blip.remove(opacity_elements[0])
+        if result.opacity is not None:
+            native_opacity = _native_image_opacity_amount(result.opacity)
+            if native_opacity is None:
+                raise NativePackageError(
+                    "image.update opacity is outside the supported range."
+                )
+            blip.insert(
+                existing_index,
+                ET.Element(
+                    _q(A, "alphaModFix"),
+                    {"amt": native_opacity},
+                ),
+            )
+
     verified = simple_native_image(
         package,
         paragraph,
@@ -2043,6 +2127,7 @@ def patch_simple_native_image(
         or verified.crop != result.crop
         or verified.transform != result.transform
         or verified.outline != result.outline
+        or verified.opacity != result.opacity
         or verified.placement != original.placement
         or not floating_image_layout_matches(
             verified.floating,
@@ -2258,6 +2343,7 @@ def patch_simple_native_image_anchor(
         or verified.crop != original.crop
         or verified.transform != original.transform
         or verified.outline != original.outline
+        or verified.opacity != original.opacity
         or verified.name != original.name
         or verified.alt_text != original.alt_text
         or verified.title != original.title
@@ -2453,6 +2539,7 @@ def replace_simple_native_image(
         or replaced.crop != original.crop
         or replaced.transform != original.transform
         or replaced.outline != original.outline
+        or replaced.opacity != original.opacity
         or replaced.placement != original.placement
         or not floating_image_layout_matches(
             replaced.floating,
@@ -2740,11 +2827,22 @@ def insert_simple_native_image_after(
     )
     ET.SubElement(non_visual, _q(PIC, "cNvPicPr"))
     blip_fill = ET.SubElement(picture, _q(PIC, "blipFill"))
-    ET.SubElement(
+    blip = ET.SubElement(
         blip_fill,
         _q(A, "blip"),
         {_q(R, "embed"): relationship_id},
     )
+    if image.opacity is not None:
+        native_opacity = _native_image_opacity_amount(image.opacity)
+        if native_opacity is None:
+            raise NativePackageError(
+                "Image insertion opacity is outside the supported range."
+            )
+        ET.SubElement(
+            blip,
+            _q(A, "alphaModFix"),
+            {"amt": native_opacity},
+        )
     stretch = ET.SubElement(blip_fill, _q(A, "stretch"))
     ET.SubElement(stretch, _q(A, "fillRect"))
     shape = ET.SubElement(picture, _q(PIC, "spPr"))
@@ -2820,6 +2918,7 @@ def insert_simple_native_image_after(
         or projected.title != image.title
         or projected.transform != image.transform
         or projected.outline != image.outline
+        or projected.opacity != image.opacity
         or projected.placement != image.placement
         or not floating_image_layout_matches(
             projected.floating,
