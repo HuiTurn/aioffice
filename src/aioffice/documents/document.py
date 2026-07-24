@@ -980,6 +980,7 @@ class Document:
             "style.define",
             "style.format",
             "header_footer.create",
+            "header_footer.clone",
             "section.header_footer.bind",
             "section.insert_before",
             "section.format",
@@ -1003,6 +1004,7 @@ class Document:
                 "style.define",
                 "style.format",
                 "header_footer.create",
+                "header_footer.clone",
                 "section.header_footer.bind",
                 "section.insert_before",
                 "section.format",
@@ -1026,6 +1028,7 @@ class Document:
             operations.remove("node.move_before")
             operations.remove("node.remove")
             operations.remove("header_footer.create")
+            operations.remove("header_footer.clone")
             operations.remove("section.header_footer.bind")
             operations.remove("section.insert_before")
         ambiguous_node_ids = sorted(
@@ -1275,6 +1278,47 @@ class Document:
                         "external_hyperlink",
                     ],
                     "create_then_bind_same_patch": True,
+                    "clone_operation": "header_footer.clone",
+                    "clone_source": (
+                        "existing_reusable_header_footer_part_id"
+                    ),
+                    "clone_ids": (
+                        "deterministic_new_part_block_and_field_ids"
+                    ),
+                    "clone_native_graph": [
+                        "new_header_or_footer_part",
+                        "copied_part_local_relationships",
+                        "shared_relationship_targets",
+                        "new_document_relationship",
+                        "new_content_type_override",
+                    ],
+                    "clone_rebased_native_identities": [
+                        "w14:paraId",
+                        "wp:docPr@id",
+                        "a:cNvPr@id",
+                        "pic:cNvPr@id",
+                    ],
+                    "clone_supported_native_content": [
+                        "ordinary_rich_paragraph",
+                        "dynamic_field",
+                        "external_hyperlink",
+                        "drawingml_image_with_shared_asset",
+                        "opaque_content_without_cross_story_identity",
+                    ],
+                    "clone_refused_native_features": [
+                        "altChunk",
+                        "bookmark",
+                        "comment",
+                        "customXml",
+                        "embedded_object",
+                        "permission_range",
+                        "structured_document_tag",
+                        "subdocument",
+                        "tracked_change_or_move",
+                        "legacy_pict_or_vml",
+                    ],
+                    "clone_content_edit": "subsequent_patch_only",
+                    "clone_then_bind_same_patch": True,
                     "binding_operation": (
                         "section.header_footer.bind"
                     ),
@@ -1298,7 +1342,7 @@ class Document:
                     ],
                     "binding_unsupported": [
                         "delete_part",
-                        "copy_on_write_part_content",
+                        "same_patch_clone_content_edit",
                         "external_relationship",
                         "ambiguous_relationship",
                     ],
@@ -2999,6 +3043,7 @@ class Document:
                     "node.move_before",
                     "node.remove",
                     "header_footer.create",
+                    "header_footer.clone",
                     "section.header_footer.bind",
                     "section.insert_before",
                 }
@@ -3012,7 +3057,8 @@ class Document:
                 message=(
                     "node.append, node.insert_after, node.insert_before, "
                     "node.move_after, node.move_before, node.remove, "
-                    "header_footer.create, section.header_footer.bind, and "
+                    "header_footer.create, header_footer.clone, "
+                    "section.header_footer.bind, and "
                     "section.insert_before "
                     "require the attached native DOCX package for a "
                     "native-authority projection; detached JSON cannot prove "
@@ -4770,6 +4816,326 @@ class Document:
                 ],
             }
 
+        if operation_name == "header_footer.clone":
+            unexpected = sorted(
+                set(operation) - {"op", "target", "part"}
+            )
+            if unexpected:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.clone received unknown fields: "
+                            f"{', '.join(unexpected)}."
+                        ),
+                    )
+                )
+            source_part_id = Document._target_id(
+                operation.get("target")
+            )
+            source_matches = [
+                part
+                for part in payload.get("header_footers", [])
+                if part.get("id") == source_part_id
+            ]
+            if not source_matches:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="TARGET_NOT_FOUND",
+                        message=(
+                            "No reusable header/footer part matched "
+                            f"#{source_part_id}."
+                        ),
+                        suggested_actions=[
+                            {"action": "inspect_header_footers"}
+                        ],
+                    )
+                )
+            if len(source_matches) != 1:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="AMBIGUOUS_SELECTOR",
+                        message=(
+                            "Multiple reusable header/footer parts matched "
+                            f"#{source_part_id}."
+                        ),
+                        node_ids=[source_part_id],
+                    )
+                )
+            raw_part = operation.get("part")
+            if not isinstance(raw_part, dict):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.clone requires an object in part."
+                        ),
+                        node_ids=[source_part_id],
+                    )
+                )
+            unexpected_part_fields = sorted(
+                set(raw_part) - {"id", "type", "metadata"}
+            )
+            if unexpected_part_fields:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.clone part received unknown or "
+                            "source-owned fields: "
+                            f"{', '.join(unexpected_part_fields)}."
+                        ),
+                        node_ids=[source_part_id],
+                        suggested_actions=[
+                            {
+                                "action": "provide_clone_identity_only",
+                                "fields": ["id", "metadata"],
+                            }
+                        ],
+                    )
+                )
+            raw_part_id = raw_part.get("id")
+            if not isinstance(raw_part_id, str) or not raw_part_id:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.clone part.id must be a "
+                            "non-empty stable ID."
+                        ),
+                        node_ids=[source_part_id],
+                    )
+                )
+            if raw_part.get("type", "header_footer") != "header_footer":
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.clone part.type must be "
+                            "'header_footer' when provided."
+                        ),
+                        node_ids=[source_part_id],
+                    )
+                )
+            raw_metadata = raw_part.get("metadata", {})
+            if not isinstance(raw_metadata, dict):
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.clone part.metadata must be "
+                            "an object."
+                        ),
+                        node_ids=[source_part_id],
+                    )
+                )
+
+            used_ids: set[str] = set()
+
+            def collect_ids(value: Any) -> None:
+                if isinstance(value, dict):
+                    node_id = value.get("id")
+                    if isinstance(node_id, str):
+                        used_ids.add(node_id)
+                    for nested in value.values():
+                        collect_ids(nested)
+                elif isinstance(value, list):
+                    for nested in value:
+                        collect_ids(nested)
+
+            collect_ids(payload)
+            if raw_part_id in used_ids:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            f"Header/footer part ID {raw_part_id!r} "
+                            "already exists."
+                        ),
+                        node_ids=[raw_part_id, source_part_id],
+                        suggested_actions=[
+                            {"action": "assign_unique_id"}
+                        ],
+                    )
+            )
+            try:
+                HeaderFooterPart.model_validate(
+                    {
+                        "id": raw_part_id,
+                        "kind": source_matches[0].get("kind"),
+                    }
+                )
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.clone part.id is invalid."
+                        ),
+                        node_ids=[source_part_id],
+                        suggested_actions=[
+                            {
+                                "action": "fix_clone_part_id",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            used_ids.add(raw_part_id)
+
+            def cloned_id(
+                source_id: str,
+                *,
+                prefix: str,
+            ) -> str:
+                ordinal = 0
+                while True:
+                    digest = hashlib.sha256(
+                        (
+                            f"{raw_part_id}:{source_id}:{ordinal}"
+                        ).encode()
+                    ).hexdigest()[:24]
+                    candidate = f"{prefix}_{digest}"
+                    if candidate not in used_ids:
+                        used_ids.add(candidate)
+                        return candidate
+                    ordinal += 1
+
+            source_part = source_matches[0]
+            candidate = deepcopy(source_part)
+            candidate["id"] = raw_part_id
+            candidate["source_ref"] = None
+            candidate["revision_added"] = next_revision
+            candidate["revision_updated"] = next_revision
+            metadata = deepcopy(source_part.get("metadata", {}))
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.pop("native_part_uri", None)
+            metadata.update(deepcopy(raw_metadata))
+            metadata["cloned_from"] = source_part_id
+            candidate["metadata"] = metadata
+            id_map: dict[str, str] = {
+                source_part_id: raw_part_id,
+            }
+            for block in candidate.get("content", []):
+                source_block_id = block.get("id")
+                if not isinstance(source_block_id, str):
+                    raise _PatchFailure(
+                        Diagnostic(
+                            severity=Severity.ERROR,
+                            code="INVALID_SPEC",
+                            message=(
+                                "header_footer.clone source contains a "
+                                "block without a stable ID."
+                            ),
+                            node_ids=[source_part_id],
+                        )
+                    )
+                prefix = (
+                    "para"
+                    if block.get("type") == "paragraph"
+                    else "opaque"
+                )
+                block_id = cloned_id(
+                    source_block_id,
+                    prefix=prefix,
+                )
+                id_map[source_block_id] = block_id
+                block["id"] = block_id
+                block["source_ref"] = None
+                block["revision_added"] = next_revision
+                block["revision_updated"] = next_revision
+                for inline in block.get("content", []):
+                    if (
+                        not isinstance(inline, dict)
+                        or inline.get("type") != "field"
+                    ):
+                        continue
+                    source_field_id = inline.get("id")
+                    if not isinstance(source_field_id, str):
+                        raise _PatchFailure(
+                            Diagnostic(
+                                severity=Severity.ERROR,
+                                code="INVALID_SPEC",
+                                message=(
+                                    "header_footer.clone source contains "
+                                    "a field without a stable ID."
+                                ),
+                                node_ids=[
+                                    source_part_id,
+                                    source_block_id,
+                                ],
+                            )
+                        )
+                    field_id = cloned_id(
+                        source_field_id,
+                        prefix="field",
+                    )
+                    id_map[source_field_id] = field_id
+                    inline["id"] = field_id
+                    inline["source_ref"] = None
+                    inline["revision_added"] = next_revision
+                    inline["revision_updated"] = next_revision
+            try:
+                normalized_part = HeaderFooterPart.model_validate(
+                    candidate
+                )
+            except ValidationError as error:
+                raise _PatchFailure(
+                    Diagnostic(
+                        severity=Severity.ERROR,
+                        code="INVALID_SPEC",
+                        message=(
+                            "header_footer.clone could not normalize the "
+                            "cloned semantic part."
+                        ),
+                        node_ids=[source_part_id, raw_part_id],
+                        suggested_actions=[
+                            {
+                                "action": "inspect_source_part",
+                                "diagnostics": [
+                                    item.model_dump(mode="json")
+                                    for item in _validation_error_diagnostics(
+                                        error
+                                    )
+                                ],
+                            }
+                        ],
+                    )
+                ) from error
+            payload.setdefault("header_footers", []).append(
+                normalized_part.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+            )
+            return {
+                "operation": "header_footer.clone",
+                "source_part_ids": [source_part_id],
+                "part_ids": [normalized_part.id],
+                "kind": normalized_part.kind,
+                "created_nodes": [
+                    block.id
+                    for block in normalized_part.content
+                ],
+                "id_map": id_map,
+            }
+
         if operation_name == "section.header_footer.bind":
             unexpected = sorted(
                 set(operation) - {"op", "target", "set", "clear"}
@@ -6448,7 +6814,8 @@ class Document:
                     "node.remove, "
                     "node.update, style.apply, "
                     "style.define, style.format, "
-                    "header_footer.create, section.header_footer.bind, "
+                    "header_footer.create, header_footer.clone, "
+                    "section.header_footer.bind, "
                     "section.insert_before, "
                     "section.format, field.update, "
                     "image.insert_after, image.replace, image.update, "

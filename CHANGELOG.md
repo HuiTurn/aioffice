@@ -52,6 +52,12 @@
 - Added transactional `header_footer.create` native lowering with collision-free
   part and relationship allocation, rich paragraph/field/hyperlink compilation,
   same-Patch section binding, and final OPC graph proof.
+- Added deterministic `header_footer.clone` copy-on-write primitives for reusable
+  native regions, including exact local-relationship copying, shared media targets,
+  rebased paragraph/DrawingML identities, same-Patch binding, and creation-time
+  graph proof.
+- Refused header/footer cloning when bookmarks, comments, tracked changes, content
+  controls, VML, or other cross-story identities cannot yet be safely rebased.
 - Preserved intentionally empty header/footer semantics across native reopen while
   retaining the mandatory blank Word paragraph in the package.
 - Kept newly mutated OPC relationship parts in the default package namespace for
@@ -396,7 +402,7 @@
 - Added structured fidelity policies and reports.
 - Added package limits and defenses against traversal, ZIP bombs, unsafe XML, and macros.
 - Advanced the AiOffice Document Spec to `0.2-draft.29`.
-- Advanced the AiOffice Document Spec to `0.2-draft.30`.
+- Advanced the AiOffice Document Spec to `0.2-draft.31`.
 
 ## 0.1.0
 

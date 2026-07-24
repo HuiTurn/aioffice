@@ -1,6 +1,6 @@
 # Incremental native header/footer creation
 
-AiOffice `0.2.0.dev30` can create a reusable header or footer inside an imported
+AiOffice `0.2.0.dev31` can create a reusable header or footer inside an imported
 DOCX without rebuilding the document package. JSON describes the semantic region;
 the attached native package remains authoritative for package-part names,
 relationship IDs, content types, and all preserved content.
@@ -142,8 +142,10 @@ unknown XML remain byte-for-byte untouched. A third-party package without a
 manifest additionally receives the one-time manifest relationship and content-type
 entries.
 
-Deleting a part, cloning a shared part, and copy-on-write editing of complex native
-region content remain separate lifecycle operations. `header_footer.create` never
+Deleting a part and editing complex native region content remain separate lifecycle
+operations. Use
+[`header_footer.clone`](native-header-footer-cloning.md) to fork a supported shared
+native region before editing it. `header_footer.create` never
 guesses which section should use the new part and never enables first-page or
 even-page switches automatically.
 

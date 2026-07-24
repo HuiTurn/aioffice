@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 import hashlib
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Literal
 from xml.etree import ElementTree as ET
 
 from pydantic import ValidationError
@@ -114,6 +114,13 @@ from aioffice.spec.models import (
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+WP = (
+    "http://schemas.openxmlformats.org/drawingml/2006/"
+    "wordprocessingDrawing"
+)
+A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+VML = "urn:schemas-microsoft-com:vml"
 XML = "http://www.w3.org/XML/1998/namespace"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -440,6 +447,302 @@ def _create_header_footer_package_graph(
             "Could not prove the newly created header/footer native part."
         )
     return part_uri, relationship_id, root, refs
+
+
+def _header_footer_clone_unsupported_features(
+    root: ET.Element,
+) -> list[str]:
+    unsupported_word_elements = {
+        "altChunk",
+        "bookmarkEnd",
+        "bookmarkStart",
+        "commentRangeEnd",
+        "commentRangeStart",
+        "commentReference",
+        "customXml",
+        "del",
+        "ins",
+        "moveFrom",
+        "moveFromRangeEnd",
+        "moveFromRangeStart",
+        "moveTo",
+        "moveToRangeEnd",
+        "moveToRangeStart",
+        "object",
+        "permEnd",
+        "permStart",
+        "pict",
+        "sdt",
+        "subDoc",
+    }
+    features: set[str] = set()
+    for element in root.iter():
+        if not isinstance(element.tag, str):
+            continue
+        if element.tag.startswith("{"):
+            namespace, local_name = element.tag[1:].split(
+                "}",
+                1,
+            )
+        else:
+            namespace, local_name = "", element.tag
+        if namespace == W and local_name in unsupported_word_elements:
+            features.add(f"w:{local_name}")
+        elif namespace == VML:
+            features.add("VML")
+    return sorted(features)
+
+
+def _native_drawing_ids(
+    package: NativePackage,
+) -> set[int]:
+    drawing_tags = {
+        _q(WP, "docPr"),
+        _q(A, "cNvPr"),
+        _q(PIC, "cNvPr"),
+    }
+    identifiers: set[int] = set()
+    for part in package.parts:
+        if (
+            part.state == "deleted"
+            or not part.uri.casefold().endswith(".xml")
+            or not part.uri.startswith("/word/")
+        ):
+            continue
+        payload = package.get_part(part.uri)
+        if b"docPr" not in payload and b"cNvPr" not in payload:
+            continue
+        root = parse_xml(payload)
+        for element in root.iter():
+            if element.tag not in drawing_tags:
+                continue
+            value = element.get("id")
+            if (
+                value is not None
+                and value.isascii()
+                and value.isdecimal()
+            ):
+                identifiers.add(int(value))
+    return identifiers
+
+
+def _clone_native_story_signature(
+    root: ET.Element,
+) -> tuple[Any, ...]:
+    drawing_tags = {
+        _q(WP, "docPr"),
+        _q(A, "cNvPr"),
+        _q(PIC, "cNvPr"),
+    }
+
+    def signature(element: ET.Element) -> tuple[Any, ...]:
+        ignored_attributes = {
+            _q(W14, "paraId"),
+        }
+        if element.tag in drawing_tags:
+            ignored_attributes.add("id")
+        return (
+            element.tag,
+            tuple(
+                sorted(
+                    (name, value)
+                    for name, value in element.attrib.items()
+                    if name not in ignored_attributes
+                )
+            ),
+            element.text,
+            element.tail,
+            tuple(
+                signature(child)
+                for child in list(element)
+            ),
+        )
+
+    return signature(root)
+
+
+def _clone_header_footer_native_part(
+    package: NativePackage,
+    source_root: ET.Element,
+    *,
+    source_part_uri: str,
+    clone_part_id: str,
+    kind: Literal["header", "footer"],
+    reserved_paragraph_ids: set[str],
+    reserved_drawing_ids: set[int],
+) -> tuple[str, str, ET.Element]:
+    root_name, _, content_type = _header_footer_contract(kind)
+    if source_root.tag != _q(W, root_name):
+        raise NativePackageError(
+            "header_footer.clone source has the wrong native root."
+        )
+    unsupported = _header_footer_clone_unsupported_features(
+        source_root
+    )
+    if unsupported:
+        raise NativePackageError(
+            "header_footer.clone refuses native features with "
+            "cross-story or unrebased identities: "
+            f"{', '.join(unsupported)}."
+        )
+
+    source_relationship_part = _relationship_part_uri(
+        source_part_uri
+    )
+    local_relationship_payload = (
+        package.get_part(source_relationship_part)
+        if package.has_part(source_relationship_part)
+        else None
+    )
+    source_relationships = [
+        relationship
+        for relationship in package.relationships
+        if relationship.source_part == source_part_uri
+    ]
+    if local_relationship_payload is not None:
+        relationship_root = parse_xml(
+            local_relationship_payload
+        )
+        if (
+            relationship_root.tag != _q(REL, "Relationships")
+            or any(
+                isinstance(child.tag, str)
+                and child.tag != _q(REL, "Relationship")
+                for child in relationship_root
+            )
+        ):
+            raise NativePackageError(
+                "header_footer.clone source-local relationship part "
+                "has an invalid root or child."
+            )
+    relationship_ids = [
+        relationship.relationship_id
+        for relationship in source_relationships
+    ]
+    if (
+        any(
+            not relationship.relationship_id
+            or not relationship.relationship_type
+            or not relationship.target
+            for relationship in source_relationships
+        )
+        or len(relationship_ids) != len(set(relationship_ids))
+        or (
+            local_relationship_payload is None
+            and source_relationships
+        )
+    ):
+        raise NativePackageError(
+            "header_footer.clone source-local relationships are "
+            "incomplete or ambiguous."
+        )
+    for relationship in source_relationships:
+        if (
+            not relationship.external
+            and not package.has_part(
+                resolve_relationship_target(
+                    relationship.source_part,
+                    relationship.target,
+                )
+            )
+        ):
+            raise NativePackageError(
+                "header_footer.clone source relationship targets a "
+                "missing package part."
+            )
+
+    clone_root = deepcopy(source_root)
+    for paragraph_index, paragraph in enumerate(
+        clone_root.iter(_q(W, "p"))
+    ):
+        anchor = _fresh_native_paragraph_anchor(
+            reserved_paragraph_ids,
+            f"{clone_part_id}:{paragraph_index}",
+        )
+        paragraph.set(_q(W14, "paraId"), anchor)
+        reserved_paragraph_ids.add(anchor)
+    drawing_tags = {
+        _q(WP, "docPr"),
+        _q(A, "cNvPr"),
+        _q(PIC, "cNvPr"),
+    }
+    for element in clone_root.iter():
+        if element.tag not in drawing_tags:
+            continue
+        identifier = _fresh_decimal_id(
+            reserved_drawing_ids,
+            start=1,
+        )
+        element.set("id", str(identifier))
+        reserved_drawing_ids.add(identifier)
+    if (
+        _clone_native_story_signature(source_root)
+        != _clone_native_story_signature(clone_root)
+    ):
+        raise NativePackageError(
+            "header_footer.clone changed native content beyond "
+            "rebased identity attributes."
+        )
+    clone_payload = serialize_xml(clone_root)
+    parse_xml(clone_payload)
+
+    placeholder = HeaderFooterPart(
+        id=clone_part_id,
+        kind=kind,
+    )
+    (
+        clone_part_uri,
+        relationship_id,
+        _,
+        _,
+    ) = _create_header_footer_package_graph(
+        package,
+        placeholder,
+        native_anchors={},
+    )
+    package.set_part(
+        clone_part_uri,
+        clone_payload,
+        content_type=content_type,
+    )
+    if local_relationship_payload is not None:
+        package.set_part(
+            _relationship_part_uri(clone_part_uri),
+            local_relationship_payload,
+            content_type=RELATIONSHIPS_CONTENT_TYPE,
+        )
+    cloned_relationships = [
+        relationship
+        for relationship in package.relationships
+        if relationship.source_part == clone_part_uri
+    ]
+    source_relationship_signature = sorted(
+        (
+            relationship.relationship_id,
+            relationship.relationship_type,
+            relationship.target,
+            relationship.external,
+        )
+        for relationship in source_relationships
+    )
+    clone_relationship_signature = sorted(
+        (
+            relationship.relationship_id,
+            relationship.relationship_type,
+            relationship.target,
+            relationship.external,
+        )
+        for relationship in cloned_relationships
+    )
+    if (
+        source_relationship_signature
+        != clone_relationship_signature
+    ):
+        raise NativePackageError(
+            "header_footer.clone did not preserve the part-local "
+            "relationship graph."
+        )
+    return clone_part_uri, relationship_id, clone_root
 
 
 def _native_paragraph_anchor(
@@ -1807,6 +2110,7 @@ def apply_docx_operations(
         "style.define",
         "style.format",
         "header_footer.create",
+        "header_footer.clone",
         "section.header_footer.bind",
         "section.insert_before",
         "section.format",
@@ -1828,7 +2132,8 @@ def apply_docx_operations(
             "node.append, node.insert_after, node.insert_before, node.move_after, "
             "node.move_before, node.remove, "
             "style.apply, style.define, style.format, "
-            "header_footer.create, section.header_footer.bind, "
+            "header_footer.create, header_footer.clone, "
+            "section.header_footer.bind, "
             "section.insert_before, "
             "section.format, and "
             "field.update, image.insert_after, image.replace, image.update, "
@@ -2071,6 +2376,14 @@ def apply_docx_operations(
         )
         is not None
     )
+    reserved_native_drawing_ids = (
+        _native_drawing_ids(updated)
+        if any(
+            operation.get("op") == "header_footer.clone"
+            for operation in operations
+        )
+        else set()
+    )
     binding_slots = {
         field_name: (kind, variant)
         for field_name, kind, variant
@@ -2253,6 +2566,13 @@ def apply_docx_operations(
     inserted_header_footer_parts: dict[
         str,
         tuple[str, str, str],
+    ] = {}
+    cloned_header_footer_evidence: dict[
+        str,
+        tuple[
+            tuple[Any, ...],
+            tuple[tuple[str, str, str, bool], ...],
+        ],
     ] = {}
     created_identity_refs: dict[str, NativeRef] = {}
     rebound_header_footer_sections: set[str] = set()
@@ -2457,6 +2777,345 @@ def apply_docx_operations(
                     source_fields[document_field.id] = (
                         mapped[0],
                         field_ref,
+                    )
+            continue
+        if operation_name == "header_footer.clone":
+            source_part_id = _target_id(
+                operation.get("target")
+            )
+            source_part = source_header_footer_parts.get(
+                source_part_id
+            )
+            part_ids = change.get("part_ids")
+            source_part_ids = change.get("source_part_ids")
+            id_map = change.get("id_map")
+            if (
+                source_part is None
+                or change.get("operation") != operation_name
+                or source_part_ids != [source_part_id]
+                or not isinstance(part_ids, list)
+                or len(part_ids) != 1
+                or not isinstance(part_ids[0], str)
+                or not isinstance(id_map, Mapping)
+            ):
+                raise NativePackageError(
+                    "header_footer.clone semantic change evidence is "
+                    "missing or ambiguous."
+                )
+            clone_part_id = part_ids[0]
+            if clone_part_id in source_header_footer_parts:
+                raise NativePackageError(
+                    f"Header/footer part {clone_part_id!r} already exists."
+                )
+            result_matches = [
+                candidate
+                for candidate in result_spec.header_footers
+                if candidate.id == clone_part_id
+            ]
+            if len(result_matches) != 1:
+                raise NativePackageError(
+                    "header_footer.clone result does not contain exactly "
+                    "one cloned part."
+                )
+            result_part = result_matches[0]
+            if (
+                change.get("kind") != source_part.kind
+                or result_part.kind != source_part.kind
+                or change.get("created_nodes")
+                != [block.id for block in result_part.content]
+                or len(source_part.content)
+                != len(result_part.content)
+            ):
+                raise NativePackageError(
+                    "header_footer.clone semantic change evidence does "
+                    "not match the source and result parts."
+                )
+            expected_id_map: dict[str, str] = {
+                source_part_id: clone_part_id,
+            }
+            for source_block, result_block in zip(
+                source_part.content,
+                result_part.content,
+                strict=True,
+            ):
+                if source_block.type != result_block.type:
+                    raise NativePackageError(
+                        "header_footer.clone changed a block type."
+                    )
+                expected_id_map[source_block.id] = result_block.id
+                if isinstance(source_block, Paragraph):
+                    if not isinstance(result_block, Paragraph):
+                        raise NativePackageError(
+                            "header_footer.clone paragraph evidence is "
+                            "inconsistent."
+                        )
+                    source_document_fields = [
+                        inline
+                        for inline in source_block.content
+                        if isinstance(inline, DocumentField)
+                    ]
+                    result_document_fields = [
+                        inline
+                        for inline in result_block.content
+                        if isinstance(inline, DocumentField)
+                    ]
+                    if len(source_document_fields) != len(
+                        result_document_fields
+                    ):
+                        raise NativePackageError(
+                            "header_footer.clone changed field structure."
+                        )
+                    for source_field, result_field in zip(
+                        source_document_fields,
+                        result_document_fields,
+                        strict=True,
+                    ):
+                        expected_id_map[source_field.id] = (
+                            result_field.id
+                        )
+            if dict(id_map) != expected_id_map:
+                raise NativePackageError(
+                    "header_footer.clone ID-map evidence does not match "
+                    "the cloned semantic structure."
+                )
+            claimed_refs = [
+                result_part.source_ref,
+                *(
+                    block.source_ref
+                    for block in result_part.content
+                ),
+                *(
+                    inline.source_ref
+                    for block in result_part.content
+                    if isinstance(block, Paragraph)
+                    for inline in block.content
+                    if isinstance(inline, DocumentField)
+                ),
+            ]
+            if any(
+                source_ref is not None
+                for source_ref in claimed_refs
+            ):
+                raise NativePackageError(
+                    "header_footer.clone result cannot claim existing "
+                    "native source references."
+                )
+
+            source_ref = source_part.source_ref
+            expected_native_kind = (
+                "w:hdr-part"
+                if source_part.kind == "header"
+                else "w:ftr-part"
+            )
+            if (
+                not isinstance(source_ref, NativeRef)
+                or source_ref.format != "docx"
+                or source_ref.native_kind != expected_native_kind
+                or not updated.has_part(source_ref.part_uri)
+            ):
+                raise NativePackageError(
+                    f"Header/footer part {source_part_id!r} has no "
+                    "cloneable native source."
+                )
+            source_root = part_roots.get(source_ref.part_uri)
+            if source_root is None:
+                source_root = parse_xml(
+                    updated.get_part(source_ref.part_uri)
+                )
+                part_roots[source_ref.part_uri] = source_root
+            expected_relationship_type = (
+                HEADER_RELATIONSHIP_TYPE
+                if source_part.kind == "header"
+                else FOOTER_RELATIONSHIP_TYPE
+            )
+            source_document_relationships = [
+                relationship
+                for relationship in updated.relationships
+                if relationship.source_part == "/word/document.xml"
+                and not relationship.external
+                and relationship.relationship_type
+                == expected_relationship_type
+                and resolve_relationship_target(
+                    relationship.source_part,
+                    relationship.target,
+                )
+                == source_ref.part_uri
+            ]
+            if len(source_document_relationships) != 1:
+                raise NativePackageError(
+                    f"Header/footer part {source_part_id!r} must have "
+                    "exactly one internal document relationship before "
+                    "it can be cloned."
+                )
+
+            (
+                clone_part_uri,
+                clone_relationship_id,
+                clone_root,
+            ) = _clone_header_footer_native_part(
+                updated,
+                source_root,
+                source_part_uri=source_ref.part_uri,
+                clone_part_id=clone_part_id,
+                kind=source_part.kind,
+                reserved_paragraph_ids=(
+                    reserved_native_paragraph_ids
+                ),
+                reserved_drawing_ids=(
+                    reserved_native_drawing_ids
+                ),
+            )
+            part_roots[clone_part_uri] = clone_root
+            part_containers[clone_part_uri] = clone_root
+            changed_xml_parts.add(clone_part_uri)
+            inserted_header_footer_parts[clone_part_id] = (
+                clone_part_uri,
+                clone_relationship_id,
+                result_part.kind,
+            )
+            cloned_header_footer_evidence[clone_part_id] = (
+                _clone_native_story_signature(clone_root),
+                tuple(
+                    sorted(
+                        (
+                            relationship.relationship_id,
+                            relationship.relationship_type,
+                            relationship.target,
+                            relationship.external,
+                        )
+                        for relationship in updated.relationships
+                        if relationship.source_part == clone_part_uri
+                    )
+                ),
+            )
+            live_part = result_part.model_copy(deep=True)
+            part_ref = native_ref_for_header_footer_part(
+                clone_root,
+                clone_part_uri,
+                kind=result_part.kind,
+            )
+            live_part.source_ref = part_ref
+            created_identity_refs[clone_part_id] = part_ref
+            source_header_footer_parts[clone_part_id] = live_part
+            root_path = (
+                "/w:hdr"
+                if result_part.kind == "header"
+                else "/w:ftr"
+            )
+            clone_elements = list(clone_root)
+            for source_block, clone_block in zip(
+                source_part.content,
+                live_part.content,
+                strict=True,
+            ):
+                block_source_ref = source_block.source_ref
+                if (
+                    not isinstance(block_source_ref, NativeRef)
+                    or block_source_ref.part_uri
+                    != source_ref.part_uri
+                ):
+                    raise NativePackageError(
+                        f"Source block {source_block.id!r} has no "
+                        "cloneable native range."
+                    )
+                indices = _source_indices(block_source_ref)
+                if any(
+                    index >= len(clone_elements)
+                    for index in indices
+                ):
+                    raise NativePackageError(
+                        f"Source block {source_block.id!r} range does "
+                        "not exist in the cloned part."
+                    )
+                mapped_elements = [
+                    clone_elements[index]
+                    for index in indices
+                ]
+                native_id = (
+                    mapped_elements[0].get(_q(W14, "paraId"))
+                    if len(mapped_elements) == 1
+                    and mapped_elements[0].tag == _q(W, "p")
+                    else None
+                )
+                clone_block_ref = native_ref_for_part_elements(
+                    mapped_elements,
+                    indices,
+                    part_uri=clone_part_uri,
+                    native_kind=block_source_ref.native_kind,
+                    root_path=root_path,
+                    native_id=native_id,
+                )
+                clone_block.source_ref = clone_block_ref
+                created_identity_refs[clone_block.id] = (
+                    clone_block_ref
+                )
+                source_elements[clone_block.id] = (
+                    mapped_elements,
+                    clone_block_ref,
+                )
+                if not isinstance(source_block, Paragraph):
+                    continue
+                if not isinstance(clone_block, Paragraph):
+                    raise NativePackageError(
+                        "header_footer.clone paragraph mapping changed "
+                        "type."
+                    )
+                if len(mapped_elements) != 1:
+                    raise NativePackageError(
+                        "header_footer.clone field-bearing paragraph "
+                        "has an ambiguous native range."
+                    )
+                source_document_fields = [
+                    inline
+                    for inline in source_block.content
+                    if isinstance(inline, DocumentField)
+                ]
+                clone_document_fields = [
+                    inline
+                    for inline in clone_block.content
+                    if isinstance(inline, DocumentField)
+                ]
+                for source_field, clone_field in zip(
+                    source_document_fields,
+                    clone_document_fields,
+                    strict=True,
+                ):
+                    field_source_ref = source_field.source_ref
+                    if (
+                        not isinstance(
+                            field_source_ref,
+                            NativeRef,
+                        )
+                        or field_source_ref.sub_index is None
+                    ):
+                        raise NativePackageError(
+                            f"Source field {source_field.id!r} has no "
+                            "cloneable native identity."
+                        )
+                    try:
+                        field_match = field_match_at(
+                            mapped_elements[0],
+                            field_source_ref.sub_index,
+                        )
+                    except FieldStructureError as error:
+                        raise NativePackageError(
+                            f"Could not map cloned field "
+                            f"{clone_field.id!r}: {error}"
+                        ) from error
+                    clone_field_ref = native_ref_for_field(
+                        mapped_elements[0],
+                        indices[0],
+                        field_match,
+                        part_uri=clone_part_uri,
+                        root_path=root_path,
+                    )
+                    clone_field.source_ref = clone_field_ref
+                    created_identity_refs[clone_field.id] = (
+                        clone_field_ref
+                    )
+                    source_fields[clone_field.id] = (
+                        mapped_elements[0],
+                        clone_field_ref,
                     )
             continue
         if operation_name == "section.header_footer.bind":
@@ -3865,6 +4524,44 @@ def apply_docx_operations(
             raise NativePackageError(
                 f"Created header/footer part {part_id!r} failed final "
                 "native graph verification."
+            )
+    for clone_part_id, (
+        expected_story_signature,
+        expected_relationship_signature,
+    ) in (
+        cloned_header_footer_evidence.items()
+    ):
+        clone_part_uri = inserted_header_footer_parts[
+            clone_part_id
+        ][0]
+        clone_root = part_roots.get(clone_part_uri)
+        if clone_root is None:
+            raise NativePackageError(
+                f"Cloned header/footer part {clone_part_id!r} lost its "
+                "native result root."
+            )
+        clone_relationship_signature = tuple(
+            sorted(
+                (
+                    relationship.relationship_id,
+                    relationship.relationship_type,
+                    relationship.target,
+                    relationship.external,
+                )
+                for relationship in updated.relationships
+                if relationship.source_part == clone_part_uri
+            )
+        )
+        if (
+            _clone_native_story_signature(clone_root)
+            != expected_story_signature
+            or clone_relationship_signature
+            != expected_relationship_signature
+        ):
+            raise NativePackageError(
+                f"Cloned header/footer part {clone_part_id!r} no "
+                "longer matches its creation-time native graph; "
+                "edit cloned content in a later Patch."
             )
 
     current_indices = {id(element): index for index, element in enumerate(list(body))}

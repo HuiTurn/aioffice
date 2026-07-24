@@ -84,8 +84,8 @@ so section and part IDs remain stable after reopen.
 The native transaction refuses a missing or type-incompatible part, external or
 duplicate relationships, duplicate references for one slot, stale section
 boundaries, and clearing an invalid native reference that was not safely projected.
-Creating a reusable part is a separate explicit operation. Deleting, cloning, and
-copy-on-write editing remain future operations. See
+Creating or cloning a reusable part is a separate explicit operation. Deleting
+parts remains a future operation. See
 [the full native binding contract](native-header-footer-binding.md).
 
 ## Reusable part creation
@@ -116,6 +116,31 @@ cannot provide those package-owned values. Existing parts and unrelated package
 content remain untouched. See
 [the full native creation contract](native-header-footer-creation.md).
 
+## Reusable part cloning
+
+`header_footer.clone` forks an existing reusable header/footer as an independent
+part while retaining native content that the semantic projection cannot recreate:
+
+```json
+{
+  "op": "header_footer.clone",
+  "target": "#report_header",
+  "part": {
+    "id": "appendix_header",
+    "metadata": {
+      "role": "appendix"
+    }
+  }
+}
+```
+
+AiOffice generates deterministic new semantic IDs, copies the native story and its
+part-local relationship XML, shares relationship targets such as media, and rebases
+native paragraph and DrawingML IDs. The clone may be bound in the same Patch. Edit
+its content in a later Patch so creation-time graph evidence remains independently
+verifiable. See
+[the full native cloning contract](native-header-footer-cloning.md).
+
 ## Conservative projection boundary
 
 PAGE, NUMPAGES, SECTION, and SECTIONPAGES fields are projected as structured inline
@@ -125,8 +150,10 @@ read-only native fields. Malformed field containment, drawings, embedded objects
 tables, and unknown header/footer elements remain non-editable opaque blocks.
 
 Semantic creation currently supports ordinary paragraph blocks, including rich
-text, hyperlinks, and normalized dynamic fields. Tables, images, deleting parts,
-and copy-on-write region content remain planned behind explicit capabilities.
+text, hyperlinks, and normalized dynamic fields. Native cloning can preserve
+supported drawings and images without projecting them as editable semantics.
+Tables, deleting parts, and direct editing of opaque region content remain planned
+behind explicit capabilities.
 See [the dynamic field contract](dynamic-fields.md).
 
 ## Preview boundary

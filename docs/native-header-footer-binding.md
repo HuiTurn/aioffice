@@ -1,6 +1,6 @@
 # Incremental native header/footer binding
 
-AiOffice `0.2.0.dev30` can change the explicit header/footer references of an
+AiOffice `0.2.0.dev31` can change the explicit header/footer references of an
 existing or newly inserted DOCX section without rebuilding any reusable region
 part. JSON carries the model-facing binding intent; the attached package remains
 authoritative for relationship IDs, section-property ordering, unknown XML, and
@@ -114,7 +114,7 @@ control parts are additionally changed once to attach it. Header/footer parts an
 This operation reuses projected parts. It does not:
 
 - create a part implicitly or delete a header/footer part;
-- clone a shared part for copy-on-write editing;
+- clone a shared part implicitly;
 - add or remove a document relationship;
 - bind an unprojected orphan package part;
 - repair multiple or external relationships;
@@ -128,6 +128,8 @@ scope, preservation guarantees, and unsupported part lifecycle operations.
 Use [`header_footer.create`](native-header-footer-creation.md) to create a reusable
 semantic part explicitly, optionally immediately before this binding operation in
 the same atomic Patch.
+Use [`header_footer.clone`](native-header-footer-cloning.md) to fork a supported
+native part and bind the clone in the same Patch.
 
 ## Visual verification
 

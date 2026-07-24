@@ -262,6 +262,7 @@ class CliTests(unittest.TestCase):
                     "style.define",
                     "style.format",
                     "header_footer.create",
+                    "header_footer.clone",
                     "section.header_footer.bind",
                     "section.insert_before",
                     "section.format",

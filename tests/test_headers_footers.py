@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import unittest
 from xml.etree import ElementTree as ET
@@ -14,6 +15,13 @@ W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+WP = (
+    "http://schemas.openxmlformats.org/drawingml/2006/"
+    "wordprocessingDrawing"
+)
+A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 
 
 def _q(namespace: str, local: str) -> str:
@@ -193,6 +201,74 @@ class HeaderFooterTests(unittest.TestCase):
                 if part["id"] == "semantic_footer"
             )["content"][0]["text"],
             "Semantic footer",
+        )
+
+    def test_semantic_header_footer_clone_has_deterministic_new_ids(
+        self,
+    ) -> None:
+        document = _document_with_regions()
+        operations = [
+            {
+                "op": "header_footer.clone",
+                "target": "#report_header",
+                "part": {
+                    "id": "chapter_header",
+                    "metadata": {"role": "chapter"},
+                },
+            },
+            {
+                "op": "section.header_footer.bind",
+                "target": "#body_section",
+                "set": {
+                    "header_default": "#chapter_header",
+                },
+            },
+        ]
+        first = document.apply(operations)
+        second = document.apply(operations)
+        self.assertTrue(first.success, first.model_dump())
+        self.assertTrue(second.success, second.model_dump())
+        self.assertEqual(first.changes, second.changes)
+        assert first.document is not None
+        assert second.document is not None
+        first_spec = first.document.to_spec()
+        second_spec = second.document.to_spec()
+        source = next(
+            part
+            for part in first_spec["header_footers"]
+            if part["id"] == "report_header"
+        )
+        clone = next(
+            part
+            for part in first_spec["header_footers"]
+            if part["id"] == "chapter_header"
+        )
+        second_clone = next(
+            part
+            for part in second_spec["header_footers"]
+            if part["id"] == "chapter_header"
+        )
+        self.assertEqual(clone["kind"], source["kind"])
+        self.assertEqual(clone["content"][0]["text"], source["content"][0]["text"])
+        self.assertNotEqual(clone["content"][0]["id"], source["content"][0]["id"])
+        self.assertEqual(
+            clone["content"][0]["id"],
+            second_clone["content"][0]["id"],
+        )
+        self.assertEqual(
+            clone["metadata"],
+            {
+                "cloned_from": "report_header",
+                "role": "chapter",
+            },
+        )
+        self.assertEqual(
+            first_spec["sections"][1]["header_footer"],
+            {"header_default": "chapter_header"},
+        )
+        self.assertEqual(
+            document.to_spec()["header_footers"][0]["id"],
+            "report_header",
         )
 
     def test_created_empty_header_remains_semantically_empty(
@@ -1148,6 +1224,544 @@ class HeaderFooterTests(unittest.TestCase):
             reopened_created["content"][0]["text"],
             "Unbound but reusable",
         )
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_native_header_footer_clone_copies_graph_and_binds(
+        self,
+    ) -> None:
+        base = (
+            DocumentBuilder()
+            .paragraph("Native clone body", id="clone_body")
+            .build()
+            .to_bytes("docx")
+        )
+        imported_base = Document.from_docx(base)
+        section_id = imported_base.to_spec()["sections"][0]["id"]
+        created = imported_base.apply(
+            [
+                {
+                    "op": "header_footer.create",
+                    "part": {
+                        "id": "source_header",
+                        "kind": "header",
+                        "content": [
+                            {
+                                "id": "source_header_text",
+                                "type": "paragraph",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Page ",
+                                    },
+                                    {
+                                        "id": "source_page_field",
+                                        "type": "field",
+                                        "kind": "page_number",
+                                    },
+                                    {
+                                        "type": "text",
+                                        "text": " · portal",
+                                        "marks": ["link"],
+                                        "href": "https://aioffice.dev",
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": f"#{section_id}",
+                    "set": {"header_default": "source_header"},
+                },
+            ]
+        )
+        self.assertTrue(created.success, created.model_dump())
+        assert created.document is not None
+        source = created.document.to_bytes("docx")
+        imported = Document.from_docx(source)
+        imported_spec = imported.to_spec()
+        imported_section_id = imported_spec["sections"][0]["id"]
+        source_part = next(
+            part
+            for part in imported_spec["header_footers"]
+            if part["id"] == "source_header"
+        )
+        source_block = source_part["content"][0]
+        source_field = next(
+            inline
+            for inline in source_block["content"]
+            if inline["type"] == "field"
+        )
+
+        result = imported.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": "#source_header",
+                    "part": {
+                        "id": "chapter_header",
+                        "metadata": {"role": "chapter"},
+                    },
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": f"#{imported_section_id}",
+                    "set": {"header_default": "#chapter_header"},
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        self.assertEqual(imported.to_bytes("docx"), source)
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        output_spec = result.document.to_spec()
+        clone = next(
+            part
+            for part in output_spec["header_footers"]
+            if part["id"] == "chapter_header"
+        )
+        clone_field = next(
+            inline
+            for inline in clone["content"][0]["content"]
+            if inline["type"] == "field"
+        )
+        self.assertEqual(clone["source_ref"]["part_uri"], "/word/header2.xml")
+        self.assertEqual(clone["metadata"]["cloned_from"], "source_header")
+        self.assertEqual(clone["metadata"]["role"], "chapter")
+        self.assertTrue(clone["metadata"]["projection_complete"])
+        self.assertNotEqual(clone["content"][0]["id"], source_block["id"])
+        self.assertNotEqual(clone_field["id"], source_field["id"])
+        self.assertEqual(
+            clone_field["source_ref"]["part_uri"],
+            "/word/header2.xml",
+        )
+        self.assertEqual(
+            output_spec["sections"][0]["header_footer"],
+            {"header_default": "chapter_header"},
+        )
+
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(io.BytesIO(output)) as after,
+        ):
+            self.assertEqual(
+                before.read("word/header1.xml"),
+                after.read("word/header1.xml"),
+            )
+            self.assertEqual(
+                before.read("word/_rels/header1.xml.rels"),
+                after.read("word/_rels/header1.xml.rels"),
+            )
+            self.assertEqual(
+                after.read("word/_rels/header2.xml.rels"),
+                after.read("word/_rels/header1.xml.rels"),
+            )
+            source_root = parse_xml(after.read("word/header1.xml"))
+            clone_root = parse_xml(after.read("word/header2.xml"))
+            source_paragraph_ids = {
+                paragraph.get(_q(W14, "paraId"))
+                for paragraph in source_root.iter(_q(W, "p"))
+            }
+            clone_paragraph_ids = {
+                paragraph.get(_q(W14, "paraId"))
+                for paragraph in clone_root.iter(_q(W, "p"))
+            }
+            self.assertTrue(source_paragraph_ids)
+            self.assertTrue(clone_paragraph_ids)
+            self.assertTrue(
+                source_paragraph_ids.isdisjoint(clone_paragraph_ids)
+            )
+            for root in (source_root, clone_root):
+                for paragraph in root.iter(_q(W, "p")):
+                    paragraph.attrib.pop(_q(W14, "paraId"), None)
+            self.assertEqual(
+                serialize_xml(source_root),
+                serialize_xml(clone_root),
+            )
+
+        reopened = Document.from_docx(output)
+        reopened_clone = next(
+            part
+            for part in reopened.to_spec()["header_footers"]
+            if part["id"] == "chapter_header"
+        )
+        self.assertEqual(
+            reopened_clone["content"][0]["id"],
+            clone["content"][0]["id"],
+        )
+        self.assertEqual(reopened.to_bytes("docx"), output)
+
+    def test_native_header_footer_clone_is_copy_on_write_across_patches(
+        self,
+    ) -> None:
+        source = _document_with_regions().to_bytes("docx")
+        imported = Document.from_docx(source)
+        source_part = next(
+            part
+            for part in imported.to_spec()["header_footers"]
+            if part["id"] == "report_header"
+        )
+        source_block_id = source_part["content"][0]["id"]
+        clone_block_id = "para_" + hashlib.sha256(
+            f"isolated_header:{source_block_id}:0".encode()
+        ).hexdigest()[:24]
+
+        source_edit = imported.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": "#report_header",
+                    "part": {"id": "isolated_header"},
+                },
+                {
+                    "op": "text.replace",
+                    "target": f"#{source_block_id}",
+                    "search": "Confidential",
+                    "replacement": "Public",
+                },
+            ]
+        )
+        self.assertTrue(source_edit.success, source_edit.model_dump())
+        assert source_edit.document is not None
+        source_edit_spec = source_edit.document.to_spec()
+        edited_source = next(
+            part
+            for part in source_edit_spec["header_footers"]
+            if part["id"] == "report_header"
+        )
+        untouched_clone = next(
+            part
+            for part in source_edit_spec["header_footers"]
+            if part["id"] == "isolated_header"
+        )
+        self.assertEqual(edited_source["content"][0]["text"], "Public report")
+        self.assertEqual(
+            untouched_clone["content"][0]["text"],
+            "Confidential report",
+        )
+
+        clone_edit = imported.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": "#report_header",
+                    "part": {"id": "isolated_header"},
+                },
+                {
+                    "op": "text.replace",
+                    "target": f"#{clone_block_id}",
+                    "search": "Confidential",
+                    "replacement": "Public",
+                },
+            ]
+        )
+        self.assertFalse(clone_edit.success)
+        self.assertEqual(
+            clone_edit.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "edit cloned content in a later Patch",
+            clone_edit.diagnostics[0].message,
+        )
+        self.assertEqual(imported.to_bytes("docx"), source)
+
+    def test_native_header_footer_clone_rebases_drawing_ids_and_shares_assets(
+        self,
+    ) -> None:
+        source = _document_with_regions().to_bytes("docx")
+        with ZipFile(io.BytesIO(source)) as package:
+            header_root = parse_xml(package.read("word/header1.xml"))
+        paragraph = next(header_root.iter(_q(W, "p")))
+        run = ET.SubElement(paragraph, _q(W, "r"))
+        drawing = ET.SubElement(run, _q(W, "drawing"))
+        inline = ET.SubElement(drawing, _q(WP, "inline"))
+        ET.SubElement(inline, _q(WP, "docPr"), {"id": "41", "name": "Logo"})
+        graphic = ET.SubElement(inline, _q(A, "graphic"))
+        graphic_data = ET.SubElement(graphic, _q(A, "graphicData"))
+        picture = ET.SubElement(graphic_data, _q(PIC, "pic"))
+        non_visual = ET.SubElement(picture, _q(PIC, "nvPicPr"))
+        ET.SubElement(
+            non_visual,
+            _q(PIC, "cNvPr"),
+            {"id": "42", "name": "logo.png"},
+        )
+        blip_fill = ET.SubElement(picture, _q(PIC, "blipFill"))
+        ET.SubElement(blip_fill, _q(A, "blip"), {_q(R, "embed"): "rIdLogo"})
+
+        output_buffer = io.BytesIO()
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(output_buffer, "w", compression=ZIP_DEFLATED) as after,
+        ):
+            for info in before.infolist():
+                payload = before.read(info.filename)
+                if info.filename == "word/header1.xml":
+                    payload = serialize_xml(header_root)
+                after.writestr(copy.copy(info), payload)
+            after.writestr(
+                "word/_rels/header1.xml.rels",
+                (
+                    b'<Relationships xmlns="http://schemas.openxmlformats.org/'
+                    b'package/2006/relationships"><Relationship Id="rIdLogo" '
+                    b'Type="http://schemas.openxmlformats.org/officeDocument/'
+                    b'2006/relationships/image" Target="media/logo.png"/>'
+                    b"</Relationships>"
+                ),
+            )
+            after.writestr(
+                "word/media/logo.png",
+                (
+                    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+                    b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06"
+                    b"\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDAT"
+                    b"\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01"
+                    b"\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
+                ),
+            )
+        drawing_source = output_buffer.getvalue()
+        imported = Document.from_docx(drawing_source)
+        imported_spec = imported.to_spec()
+        section_id = imported_spec["sections"][0]["id"]
+        source_part_id = next(
+            part["id"]
+            for part in imported_spec["header_footers"]
+            if part["source_ref"]["part_uri"] == "/word/header1.xml"
+        )
+        result = imported.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": f"#{source_part_id}",
+                    "part": {"id": "logo_header"},
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": f"#{section_id}",
+                    "set": {"header_default": "logo_header"},
+                },
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        with ZipFile(io.BytesIO(result.document.to_bytes("docx"))) as package:
+            source_root = parse_xml(package.read("word/header1.xml"))
+            clone_root = parse_xml(package.read("word/header3.xml"))
+            source_ids = {
+                int(element.get("id", "0"))
+                for element in source_root.iter()
+                if element.tag
+                in {
+                    _q(WP, "docPr"),
+                    _q(A, "cNvPr"),
+                    _q(PIC, "cNvPr"),
+                }
+            }
+            clone_ids = {
+                int(element.get("id", "0"))
+                for element in clone_root.iter()
+                if element.tag
+                in {
+                    _q(WP, "docPr"),
+                    _q(A, "cNvPr"),
+                    _q(PIC, "cNvPr"),
+                }
+            }
+            self.assertTrue(source_ids)
+            self.assertTrue(source_ids.isdisjoint(clone_ids))
+            self.assertEqual(
+                package.read("word/_rels/header3.xml.rels"),
+                package.read("word/_rels/header1.xml.rels"),
+            )
+            self.assertEqual(
+                package.read("word/media/logo.png"),
+                (
+                    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+                    b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06"
+                    b"\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDAT"
+                    b"\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01"
+                    b"\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
+                ),
+            )
+
+    def test_native_header_footer_clone_refuses_unrebased_identity_features(
+        self,
+    ) -> None:
+        source = _document_with_regions().to_bytes("docx")
+        with ZipFile(io.BytesIO(source)) as package:
+            root = parse_xml(package.read("word/header1.xml"))
+        paragraph = next(root.iter(_q(W, "p")))
+        paragraph.insert(
+            0,
+            ET.Element(
+                _q(W, "bookmarkStart"),
+                {_q(W, "id"): "7", _q(W, "name"): "unsafe"},
+            ),
+        )
+        paragraph.append(
+            ET.Element(_q(W, "bookmarkEnd"), {_q(W, "id"): "7"})
+        )
+        unsafe_source = _rewrite_part(
+            source,
+            "word/header1.xml",
+            serialize_xml(root),
+        )
+        imported = Document.from_docx(unsafe_source)
+        source_part_id = next(
+            part["id"]
+            for part in imported.to_spec()["header_footers"]
+            if part["source_ref"]["part_uri"] == "/word/header1.xml"
+        )
+        result = imported.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": f"#{source_part_id}",
+                    "part": {"id": "unsafe_clone"},
+                }
+            ]
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn("bookmark", result.diagnostics[0].message)
+        self.assertEqual(imported.to_bytes("docx"), unsafe_source)
+
+    def test_native_header_footer_clone_refuses_ambiguous_local_graph(
+        self,
+    ) -> None:
+        source = _document_with_regions().to_bytes("docx")
+        output_buffer = io.BytesIO()
+        duplicate_relationships = (
+            b'<Relationships xmlns="http://schemas.openxmlformats.org/'
+            b'package/2006/relationships">'
+            b'<Relationship Id="rIdDuplicate" Type="http://schemas.'
+            b'openxmlformats.org/officeDocument/2006/relationships/'
+            b'styles" Target="styles.xml"/>'
+            b'<Relationship Id="rIdDuplicate" Type="http://schemas.'
+            b'openxmlformats.org/officeDocument/2006/relationships/'
+            b'styles" Target="styles.xml"/>'
+            b"</Relationships>"
+        )
+        with (
+            ZipFile(io.BytesIO(source)) as before,
+            ZipFile(output_buffer, "w", compression=ZIP_DEFLATED) as after,
+        ):
+            for info in before.infolist():
+                after.writestr(
+                    copy.copy(info),
+                    before.read(info.filename),
+                )
+            after.writestr(
+                "word/_rels/header1.xml.rels",
+                duplicate_relationships,
+            )
+        ambiguous_source = output_buffer.getvalue()
+        imported = Document.from_docx(ambiguous_source)
+        result = imported.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": "#report_header",
+                    "part": {"id": "ambiguous_clone"},
+                }
+            ]
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "relationships are incomplete or ambiguous",
+            result.diagnostics[0].message,
+        )
+        self.assertEqual(imported.to_bytes("docx"), ambiguous_source)
+
+        invalid_root_source = _rewrite_part(
+            ambiguous_source,
+            "word/_rels/header1.xml.rels",
+            (
+                b'<FutureRelationships xmlns="http://schemas.'
+                b'openxmlformats.org/package/2006/relationships">'
+                b'<Relationship Id="rIdStyles" Type="http://schemas.'
+                b'openxmlformats.org/officeDocument/2006/'
+                b'relationships/styles" Target="styles.xml"/>'
+                b"</FutureRelationships>"
+            ),
+        )
+        invalid_root = Document.from_docx(invalid_root_source)
+        invalid_result = invalid_root.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": "#report_header",
+                    "part": {"id": "invalid_root_clone"},
+                }
+            ]
+        )
+        self.assertFalse(invalid_result.success)
+        self.assertEqual(
+            invalid_result.diagnostics[0].code,
+            "NATIVE_PATCH_FAILED",
+        )
+        self.assertIn(
+            "invalid root or child",
+            invalid_result.diagnostics[0].message,
+        )
+        self.assertEqual(
+            invalid_root.to_bytes("docx"),
+            invalid_root_source,
+        )
+
+    def test_native_empty_header_clone_remains_semantically_empty(
+        self,
+    ) -> None:
+        source = (
+            DocumentBuilder()
+            .paragraph("Body", id="blank_clone_body")
+            .build()
+            .to_bytes("docx")
+        )
+        imported = Document.from_docx(source)
+        created = imported.apply(
+            [
+                {
+                    "op": "header_footer.create",
+                    "part": {
+                        "id": "blank_source",
+                        "kind": "header",
+                        "content": [],
+                    },
+                }
+            ]
+        )
+        self.assertTrue(created.success, created.model_dump())
+        assert created.document is not None
+        clone_source = created.document.to_bytes("docx")
+        imported_clone_source = Document.from_docx(clone_source)
+        result = imported_clone_source.apply(
+            [
+                {
+                    "op": "header_footer.clone",
+                    "target": "#blank_source",
+                    "part": {"id": "blank_clone"},
+                }
+            ]
+        )
+        self.assertTrue(result.success, result.model_dump())
+        assert result.document is not None
+        output = result.document.to_bytes("docx")
+        reopened = Document.from_docx(output)
+        clone = next(
+            part
+            for part in reopened.to_spec()["header_footers"]
+            if part["id"] == "blank_clone"
+        )
+        self.assertEqual(clone["content"], [])
         self.assertEqual(reopened.to_bytes("docx"), output)
 
     def test_native_header_footer_create_failures_are_atomic(self) -> None:

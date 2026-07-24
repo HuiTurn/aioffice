@@ -351,8 +351,31 @@ class PatchTests(unittest.TestCase):
             header_footer_contract["create_operation"],
             "header_footer.create",
         )
+        self.assertEqual(
+            header_footer_contract["clone_operation"],
+            "header_footer.clone",
+        )
         self.assertTrue(
             header_footer_contract["create_then_bind_same_patch"]
+        )
+        self.assertTrue(
+            header_footer_contract["clone_then_bind_same_patch"]
+        )
+        self.assertEqual(
+            header_footer_contract["clone_content_edit"],
+            "subsequent_patch_only",
+        )
+        self.assertIn(
+            "drawingml_image_with_shared_asset",
+            header_footer_contract[
+                "clone_supported_native_content"
+            ],
+        )
+        self.assertIn(
+            "bookmark",
+            header_footer_contract[
+                "clone_refused_native_features"
+            ],
         )
         self.assertEqual(
             header_footer_contract["binding_clear"],

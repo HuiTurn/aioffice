@@ -2745,6 +2745,10 @@ class NativeDocxTests(unittest.TestCase):
             "header_footer.create",
             detached.capabilities()["operations"],
         )
+        self.assertNotIn(
+            "header_footer.clone",
+            detached.capabilities()["operations"],
+        )
         detached_insert = detached.apply(
             [
                 {

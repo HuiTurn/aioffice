@@ -775,6 +775,100 @@ class WorkspaceTests(unittest.TestCase):
                 result.result_revision,
             )
 
+    def test_workspace_persists_cloned_native_header_footer(
+        self,
+    ) -> None:
+        document = (
+            DocumentBuilder(
+                header_footers=[
+                    {
+                        "id": "report_header",
+                        "kind": "header",
+                        "content": [
+                            {
+                                "id": "report_header_text",
+                                "type": "paragraph",
+                                "text": "Confidential report",
+                            }
+                        ],
+                    }
+                ],
+                sections=[
+                    {
+                        "id": "front_section",
+                        "header_footer": {
+                            "header_default": "report_header",
+                        },
+                    },
+                    {
+                        "id": "body_section",
+                        "start_at": "workspace_body",
+                        "layout": {"start_type": "next_page"},
+                    },
+                ],
+            )
+            .paragraph("Body", id="workspace_body")
+            .build()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "clone-region.docx"
+            source.write_bytes(document.to_bytes("docx"))
+            workspace = Workspace.init(root / "project")
+            imported = workspace.import_document(source)
+            operations = [
+                {
+                    "op": "header_footer.clone",
+                    "target": "#report_header",
+                    "part": {
+                        "id": "workspace_cloned_header",
+                        "metadata": {"role": "chapter"},
+                    },
+                },
+                {
+                    "op": "section.header_footer.bind",
+                    "target": "#body_section",
+                    "set": {
+                        "header_default": "workspace_cloned_header",
+                    },
+                },
+            ]
+            result = workspace.apply(
+                imported.id,
+                operations,
+                idempotency_key="clone-header",
+            )
+            self.assertTrue(result.success, result.model_dump())
+            reopened_workspace = Workspace.open(root / "project")
+            reopened = reopened_workspace.open_document(imported.id)
+            reopened_spec = reopened.to_spec()
+            cloned = next(
+                part
+                for part in reopened_spec["header_footers"]
+                if part["id"] == "workspace_cloned_header"
+            )
+            self.assertEqual(
+                cloned["source_ref"]["part_uri"],
+                "/word/header2.xml",
+            )
+            self.assertEqual(
+                cloned["content"][0]["text"],
+                "Confidential report",
+            )
+            self.assertEqual(
+                reopened_spec["sections"][1]["header_footer"],
+                {"header_default": "workspace_cloned_header"},
+            )
+            replay = reopened_workspace.apply(
+                imported.id,
+                operations,
+                idempotency_key="clone-header",
+            )
+            self.assertEqual(
+                replay.result_revision,
+                result.result_revision,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
