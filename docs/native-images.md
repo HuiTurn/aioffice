@@ -15,9 +15,9 @@ drawing.
 
 The supported vertical slice is one embedded DrawingML picture in an otherwise
 empty body, header, or footer paragraph. Placement may be inline or one conservative
-floating offset/alignment anchor with square, no-wrap, or top-and-bottom text
-wrapping. A body occurrence lives in `content`; a reusable story occurrence lives
-in its `header_footers[].content`:
+floating offset/alignment anchor with square, no-wrap, top-and-bottom, tight, or
+through text wrapping. A body occurrence lives in `content`; a reusable story
+occurrence lives in its `header_footers[].content`:
 
 ```json
 {
@@ -114,6 +114,35 @@ bottom distances and its own effect extent, independently of the parent anchor:
 }
 ```
 
+Tight and through wrapping require a side plus an ordered native polygon. Their
+optional wrap-local distances are left/right only. Coordinates deliberately remain
+raw signed OOXML integers: producers commonly use a normalized 0–21600 space, so
+labeling them as EMUs or another physical `Length` would be incorrect. The last
+point is not forced to equal the start because the native renderer infers the
+closing edge when it is omitted:
+
+```json
+{
+  "wrap": {
+    "mode": "tight",
+    "side": "both_sides",
+    "distances": {
+      "left": {"value": 3, "unit": "pt"},
+      "right": {"value": 4, "unit": "pt"}
+    },
+    "polygon": {
+      "edited": true,
+      "start": {"x": 0, "y": 0},
+      "line_to": [
+        {"x": 0, "y": 21600},
+        {"x": 21600, "y": 21600},
+        {"x": 21600, "y": 0}
+      ]
+    }
+  }
+}
+```
+
 `asset_id` is derived from the full lowercase SHA-256 digest. Repeated occurrences
 of identical bytes can therefore share one asset record while retaining separate,
 stable image node IDs and native paragraph references.
@@ -164,9 +193,13 @@ recognized `wp:posOffset` or `wp:align`; recognized `relativeFrom` values; zero 
 more optional non-negative native anchor distances; an optional strict parent
 `wp:effectExtent`; exactly one empty `wp:wrapNone`, or a `wp:wrapTopAndBottom` /
 `wp:wrapSquare` carrying only its schema-defined optional distances and at most one
-strict child `wp:effectExtent`; bounded `relativeHeight`; and strict boolean values
-for `behindDoc`, `locked`, `layoutInCell`, and `allowOverlap`. Child order must match
-the native anchor schema.
+strict child `wp:effectExtent`, or one `wp:wrapTight` / `wp:wrapThrough` with a
+recognized side, optional left/right distances, and exactly one strict
+`wp:wrapPolygon`. A polygon preserves optional boolean `edited`, exactly one first
+`wp:start`, and 2–4096 ordered `wp:lineTo` points whose signed coordinates fit
+OOXML `ST_Coordinate`. `relativeHeight` is bounded and `behindDoc`, `locked`,
+`layoutInCell`, and `allowOverlap` are strict booleans. Child order must match the
+native anchor schema.
 
 Microsoft's Open XML contracts distinguish
 [`wp:inline`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.inline?view=openxml-3.0.1)
@@ -186,8 +219,9 @@ resample bytes, decode the bitmap, or guess missing dimensions.
 `FloatingImageLayout` is a normalized, AI-readable view of the supported native
 anchor. Horizontal and vertical positions deliberately keep the reference frame plus
 exactly one positioning mode: a signed physical `offset` or semantic `alignment`.
-Neither mode is meaningful without its frame. `wrap.mode` is `square`, `none`, or
-`top_and_bottom`; only square wrapping has a `side`. `anchor_distances` preserves
+Neither mode is meaningful without its frame. `wrap.mode` is `square`, `none`,
+`top_and_bottom`, `tight`, or `through`; square, tight, and through wrapping have a
+`side`. `anchor_distances` preserves
 each optional `wp:anchor/@dist*` attribute without inventing missing values.
 `anchor_effect_extent` preserves the optional parent element. Square wrap has four
 optional local distances; top-and-bottom has optional top and bottom distances.
@@ -195,6 +229,9 @@ Both can carry a wrap-child `effect_extent`. These fields are deliberately not
 collapsed: for square and top-and-bottom wrapping, a present child effect extent
 defines that wrap boundary instead of the parent value. Native flags remain
 separate rather than being collapsed into a vague “floating” boolean.
+Tight and through have optional left/right distances and require a polygon instead
+of a child effect extent. Their point order, optional `edited` attribute, and
+explicit or inferred closure are preserved without normalizing producer coordinates.
 
 The accepted horizontal frames are `character`, `column`, `inside_margin`,
 `left_margin`, `margin`, `outside_margin`, `page`, and `right_margin`. The accepted
@@ -217,6 +254,16 @@ causes no text reflow; `behind_text` then determines whether the picture is behi
 or in front of document text.
 [`wp:wrapTopAndBottom`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.wraptopbottom?view=openxml-3.0.1)
 prevents text beside the picture. The
+[`wp:wrapTight`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.wraptight?view=openxml-3.0.1)
+and
+[`wp:wrapThrough`](https://learn.microsoft.com/zh-tw/dotnet/api/documentformat.openxml.drawing.wordprocessing.wrapthrough?view=openxml-2.8.1)
+elements require a
+[`wp:wrapPolygon`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.wrappolygon?view=openxml-3.0.1);
+its first point is `wp:start` and subsequent
+[`wp:lineTo`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.lineto?view=openxml-3.0.1)
+points describe the object-relative outline. Tight prevents text inside the
+polygon's maximum left/right extents, while through permits text in those interior
+regions. The
 [`wp:align`](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.wordprocessing.horizontalalignment?view=openxml-3.0.1)
 element expresses alignment relative to its parent position frame. Existing verified
 image operations may extract, resize, crop, change accessibility metadata, format
@@ -273,14 +320,17 @@ Every top-level field is optional, but `set` must contain at least one non-null
 change. `horizontal`, `vertical`, `anchor_distances`, `anchor_effect_extent`, and
 `wrap` are complete grouped values. Position callers keep the reference frame with
 exactly one of `offset` or `alignment`. `side` is required and non-null exactly for
-`square`; it must be omitted for `none` and `top_and_bottom`. No-wrap forbids
-wrap-local distances and effect extent; top-and-bottom forbids left and right local
-distances. Use `clear: ["anchor_distances"]`,
+`square`, `tight`, and `through`; it must be omitted for `none` and
+`top_and_bottom`. No-wrap forbids wrap-local distances, effect extent, and polygon.
+Top-and-bottom forbids left/right local distances and polygons. Tight/through
+require a 2–4096-segment polygon, allow only left/right local distances, and forbid
+a child effect extent. Use `clear: ["anchor_distances"]`,
 `clear: ["anchor_effect_extent"]`, or both to remove those optional parent-native
 values. A wrap update omitting its optional `distances` or `effect_extent` removes
 them as part of the complete wrap replacement. Signed offsets must fit OOXML Int64
 EMUs; text distances and `relative_height` must fit UInt32; effect extents must fit
-OOXML `ST_Coordinate`; booleans are strict JSON booleans.
+OOXML `ST_Coordinate`; polygon coordinates fit the same signed range but remain raw
+integers; booleans are strict JSON booleans.
 `aioffice schema --kind floating-image-layout-update` exposes the same contract,
 including machine-readable `oneOf` constraints for position and wrap modes.
 
@@ -299,12 +349,14 @@ Native lowering changes only the selected `wp:positionH`, `wp:positionV`,
 the one selected wrap child, and `wp:anchor` attributes in the already-proven tree.
 It preserves the drawing, extents, crop, image relationship and bytes, accessibility
 metadata, host paragraph, unknown surrounding XML, and present `wp14:anchorId` /
-`wp14:editId`. A wrap update may replace `wp:wrapSquare`, `wp:wrapNone`, or
-`wp:wrapTopAndBottom` at the same schema position. The operation re-projects the
-result and fails the complete Patch if any requested semantic value does not
-round-trip exactly. It composes with `image.update` in either order inside one atomic
-Patch. A complete position update may also switch the native child from
-`wp:posOffset` to `wp:align` or back without reconstructing the surrounding anchor.
+`wp14:editId`. A wrap update may replace `wp:wrapSquare`, `wp:wrapNone`,
+`wp:wrapTopAndBottom`, `wp:wrapTight`, or `wp:wrapThrough` at the same schema
+position. Polygon lowering writes the requested start and line sequence exactly and
+does not invent a closing point. The operation re-projects the result and fails the
+complete Patch if any requested semantic value does not round-trip exactly. It
+composes with `image.update` in either order inside one atomic Patch. A complete
+position update may also switch the native child from `wp:posOffset` to `wp:align`
+or back without reconstructing the surrounding anchor.
 
 Physical lengths are compared by their rounded native EMU value, not by unit
 spelling. For example, an accepted `1 in` offset reopens as the canonical native
@@ -322,11 +374,11 @@ unknown field, invalid unit/range/alignment, or non-boolean flag fails closed. T
 operation does not convert an inline picture to floating and does not create or
 reconstruct an anchor.
 
-Active simple positioning, Office 2010 percentage positioning, tight/through
-polygons, relative-size extensions, malformed or out-of-range distance/effect
-metadata, missing or unknown compatibility values, extra position/wrap children,
-and mixed text plus drawing paragraphs stay opaque. This is a deliberate protocol
-boundary, not an indication that their native XML is discarded.
+Active simple positioning, Office 2010 percentage positioning, relative-size
+extensions, malformed or out-of-range distance/effect/polygon metadata, missing or
+unknown compatibility values, extra position/wrap children, and mixed text plus
+drawing paragraphs stay opaque. This is a deliberate protocol boundary, not an
+indication that their native XML is discarded.
 
 LibreOffice may add `bwMode="auto"` and an empty `a:noFill` while saving an otherwise
 unchanged picture. AiOffice treats only those exact optional forms as neutral and
@@ -341,6 +393,13 @@ wrap-child effect extent, and reset the parent effect extent to zero. AiOffice
 preserves the original fields exactly during its own no-op round trip; after an
 external producer rewrites them, AiOffice projects that producer's new native state
 instead of pretending the old source values survived.
+
+The dev40 tight/through fixture shows a stronger producer rewrite: LibreOffice
+removed local left/right distances, changed `edited`, regenerated the point
+coordinates, appended an explicit closing point, and also normalized parent anchor
+attributes. AiOffice preserves the authored non-closed polygon byte-for-byte on a
+no-op and exactly through its own unrelated edits. If another producer saves the
+file, the reopened projection truthfully reports that producer's new sequence.
 
 ## Verified binary access
 
@@ -663,7 +722,7 @@ result.document.export("inserted.docx")
 
 Omitting `floating` creates the established inline form. Supplying one strict
 `FloatingImageLayout` creates the same conservative offset-or-alignment anchor with
-square, no-wrap, or top-and-bottom wrapping that import and
+square, no-wrap, top-and-bottom, tight, or through wrapping that import and
 `image.anchor.update` already understand:
 
 ```python
@@ -717,12 +776,12 @@ The contract is deliberately explicit:
   placement and must validate as one complete `FloatingImageLayout`;
 - every horizontal and vertical position must select exactly one explicit `offset`
   or allowed semantic `alignment`;
-- `wrap.mode` must be `square`, `none`, or `top_and_bottom`; `side` is required only
-  for `square`; parent distances are optional and separate from the schema-defined
-  wrap-local distances and effect extent;
-- active simple-position or percentage-position anchors, tight/through polygon
-  wrapping, crop, rotation, effects, and other drawing features are not silently
-  inferred.
+- `wrap.mode` must be `square`, `none`, `top_and_bottom`, `tight`, or `through`;
+  `side` is required for square/tight/through; tight/through also require a native
+  ordered polygon; parent distances are optional and separate from schema-defined
+  wrap-local geometry;
+- active simple-position or percentage-position anchors, malformed polygons, crop,
+  rotation, effects, and other drawing features are not silently inferred.
 
 The native lowering adds or reuses the content-addressed image part, creates a fresh
 relationship ID, creates a `w:p/w:r/w:drawing` tree with `wp:inline` or canonical
@@ -791,9 +850,8 @@ transaction while leaving the operation metadata explainable to an AI.
 These cases remain native and explicit `opaque`/read-only projections:
 
 - text plus a drawing in one paragraph;
-- active-simple-position, percentage-position, tight/through polygon wrap,
-  wrap-specific effects, relative-size, malformed, or otherwise unsupported
-  floating anchors;
+- active-simple-position, percentage-position, unsupported wrap-specific effects,
+  relative-size, malformed, or otherwise unsupported floating anchors;
 - non-default picture black-and-white modes or non-neutral shape fills;
 - multiple pictures or alternate representations;
 - linked or external images;

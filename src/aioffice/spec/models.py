@@ -18,7 +18,7 @@ from pydantic import (
 from aioffice._version import __version__
 from aioffice.core.ids import new_id
 
-SPEC_VERSION = "0.2-draft.39"
+SPEC_VERSION = "0.2-draft.40"
 DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/draft/0.2/document.json"
 LEGACY_SPEC_VERSION = "1.0"
 LEGACY_DOCUMENT_SCHEMA_URL = "https://schemas.aioffice.dev/spec/1.0/document.json"
@@ -1257,6 +1257,32 @@ class FloatingImageEffectExtent(StrictModel):
         return self
 
 
+class FloatingImageWrapPoint(StrictModel):
+    """One raw OOXML wrap-polygon coordinate."""
+
+    x: int = Field(
+        ge=-27_273_042_329_600,
+        le=27_273_042_316_900,
+        strict=True,
+    )
+    y: int = Field(
+        ge=-27_273_042_329_600,
+        le=27_273_042_316_900,
+        strict=True,
+    )
+
+
+class FloatingImageWrapPolygon(StrictModel):
+    """Ordered native outline used by tight or through text wrapping."""
+
+    edited: bool | None = Field(default=None, strict=True)
+    start: FloatingImageWrapPoint
+    line_to: list[FloatingImageWrapPoint] = Field(
+        min_length=2,
+        max_length=4096,
+    )
+
+
 class FloatingImageTextWrap(StrictModel):
     """Native wrap element, separate from parent-anchor layout metadata."""
 
@@ -1272,6 +1298,7 @@ class FloatingImageTextWrap(StrictModel):
                         "side": {"not": {"type": "null"}},
                     },
                     "required": ["side"],
+                    "not": {"required": ["polygon"]},
                 },
                 {
                     "properties": {
@@ -1282,6 +1309,7 @@ class FloatingImageTextWrap(StrictModel):
                         {"not": {"required": ["side"]}},
                         {"not": {"required": ["distances"]}},
                         {"not": {"required": ["effect_extent"]}},
+                        {"not": {"required": ["polygon"]}},
                     ],
                 },
                 {
@@ -1295,40 +1323,109 @@ class FloatingImageTextWrap(StrictModel):
                         },
                     },
                     "required": ["mode"],
-                    "not": {"required": ["side"]},
+                    "allOf": [
+                        {"not": {"required": ["side"]}},
+                        {"not": {"required": ["polygon"]}},
+                    ],
+                },
+                {
+                    "properties": {
+                        "mode": {"const": "tight"},
+                        "side": {"not": {"type": "null"}},
+                        "polygon": {"not": {"type": "null"}},
+                        "distances": {
+                            "allOf": [
+                                {"not": {"required": ["top"]}},
+                                {"not": {"required": ["bottom"]}},
+                            ]
+                        },
+                    },
+                    "required": ["mode", "side", "polygon"],
+                    "not": {"required": ["effect_extent"]},
+                },
+                {
+                    "properties": {
+                        "mode": {"const": "through"},
+                        "side": {"not": {"type": "null"}},
+                        "polygon": {"not": {"type": "null"}},
+                        "distances": {
+                            "allOf": [
+                                {"not": {"required": ["top"]}},
+                                {"not": {"required": ["bottom"]}},
+                            ]
+                        },
+                    },
+                    "required": ["mode", "side", "polygon"],
+                    "not": {"required": ["effect_extent"]},
                 },
             ]
         },
     )
 
-    mode: Literal["square", "none", "top_and_bottom"] = "square"
+    mode: Literal[
+        "square",
+        "none",
+        "top_and_bottom",
+        "tight",
+        "through",
+    ] = "square"
     side: Literal["both_sides", "largest", "left", "right"] | None = None
     distances: FloatingImageTextDistances | None = None
     effect_extent: FloatingImageEffectExtent | None = None
+    polygon: FloatingImageWrapPolygon | None = None
 
     @model_validator(mode="before")
     @classmethod
     def validate_wrap_mode(cls, value: object) -> object:
         if isinstance(value, Mapping):
             mode = value.get("mode", "square")
-            if mode not in {"square", "none", "top_and_bottom"}:
+            if mode not in {
+                "square",
+                "none",
+                "top_and_bottom",
+                "tight",
+                "through",
+            }:
                 return value
-            if mode == "square":
+            has_side = mode in {"square", "tight", "through"}
+            if has_side:
                 if "side" not in value or value["side"] is None:
                     raise ValueError(
-                        "Square floating image wrap requires a non-null side."
+                        f"{mode.replace('_', '-').title()} floating image "
+                        "wrap requires a non-null side."
                     )
             elif "side" in value:
                 raise ValueError(
-                    "Floating image wrap side is only valid for square mode."
+                    "Floating image wrap side is only valid for square, "
+                    "tight, or through mode."
                 )
             if mode == "none" and any(
                 field_name in value
-                for field_name in ("distances", "effect_extent")
+                for field_name in (
+                    "distances",
+                    "effect_extent",
+                    "polygon",
+                )
             ):
                 raise ValueError(
                     "No-wrap floating images cannot carry wrap-local "
-                    "distances or effect extents."
+                    "distances, effect extents, or polygons."
+                )
+            if mode in {"tight", "through"}:
+                if "polygon" not in value or value["polygon"] is None:
+                    raise ValueError(
+                        f"{mode.title()} floating image wrap requires a "
+                        "non-null polygon."
+                    )
+                if "effect_extent" in value:
+                    raise ValueError(
+                        "Tight and through floating image wrap cannot "
+                        "carry a wrap-local effect extent."
+                    )
+            elif "polygon" in value:
+                raise ValueError(
+                    "Floating image wrap polygon is only valid for tight "
+                    "or through mode."
                 )
             distances = value.get("distances")
             if (
@@ -1343,21 +1440,52 @@ class FloatingImageTextWrap(StrictModel):
                     "Top-and-bottom wrap only supports top and bottom "
                     "wrap-local distances."
                 )
+            if (
+                mode in {"tight", "through"}
+                and isinstance(distances, Mapping)
+                and any(
+                    field_name in distances
+                    for field_name in ("top", "bottom")
+                )
+            ):
+                raise ValueError(
+                    "Tight and through wrap only support left and right "
+                    "wrap-local distances."
+                )
         return value
 
     @model_validator(mode="after")
     def validate_mode_fields(self) -> "FloatingImageTextWrap":
-        if (self.mode == "square") != (self.side is not None):
+        has_side = self.mode in {"square", "tight", "through"}
+        if has_side != (self.side is not None):
             raise ValueError(
                 "Floating image wrap requires side exactly when mode is "
-                "square."
+                "square, tight, or through."
             )
         if self.mode == "none" and (
-            self.distances is not None or self.effect_extent is not None
+            self.distances is not None
+            or self.effect_extent is not None
+            or self.polygon is not None
         ):
             raise ValueError(
                 "No-wrap floating images cannot carry wrap-local "
-                "distances or effect extents."
+                "distances, effect extents, or polygons."
+            )
+        if self.mode in {"tight", "through"}:
+            if self.polygon is None:
+                raise ValueError(
+                    "Tight and through floating image wrap require a "
+                    "polygon."
+                )
+            if self.effect_extent is not None:
+                raise ValueError(
+                    "Tight and through floating image wrap cannot carry "
+                    "a wrap-local effect extent."
+                )
+        elif self.polygon is not None:
+            raise ValueError(
+                "Floating image wrap polygon is only valid for tight or "
+                "through mode."
             )
         if self.mode == "top_and_bottom" and self.distances is not None:
             if (
@@ -1366,6 +1494,15 @@ class FloatingImageTextWrap(StrictModel):
             ):
                 raise ValueError(
                     "Top-and-bottom wrap only supports top and bottom "
+                    "wrap-local distances."
+                )
+        if self.mode in {"tight", "through"} and self.distances is not None:
+            if (
+                self.distances.top is not None
+                or self.distances.bottom is not None
+            ):
+                raise ValueError(
+                    "Tight and through wrap only support left and right "
                     "wrap-local distances."
                 )
         if self.distances is not None and not self.distances.has_values():
@@ -1735,6 +1872,7 @@ class AiOfficeDocumentSpec(StrictModel):
         "0.2-draft.37",
         "0.2-draft.38",
         "0.2-draft.39",
+        "0.2-draft.40",
     ] = SPEC_VERSION
     engine_version: str = __version__
     artifact: ArtifactDescriptor = Field(default_factory=ArtifactDescriptor)

@@ -148,8 +148,9 @@ objects. Their cached display result is kept separate from the semantic instruct
 and never treated as authoritative text. Unknown field instructions are visible as
 read-only native fields. A paragraph containing exactly one conservative embedded
 inline picture or offset/alignment-positioned floating picture with square,
-no-wrap, or top-and-bottom wrapping is projected as a stable `ImageBlock`: its bytes
-can be verified or extracted, and its accessibility metadata, extent, bounded
+no-wrap, top-and-bottom, tight, or through wrapping is projected as a stable
+`ImageBlock`: its bytes can be verified or extracted, and its accessibility
+metadata, extent, bounded
 rectangular source crop, paragraph layout, or binary can be changed through the same
 native image APIs as a body picture. Floating anchor layout is explicit
 native-authoritative evidence; for the conservative projected subset,

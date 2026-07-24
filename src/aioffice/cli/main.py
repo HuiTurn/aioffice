@@ -27,6 +27,8 @@ from aioffice.spec.models import (
     FloatingImageTextDistances,
     FloatingImageTextWrap,
     FloatingImageVerticalPosition,
+    FloatingImageWrapPoint,
+    FloatingImageWrapPolygon,
     HeaderFooterBindings,
     HeaderFooterImageBlock,
     HeaderFooterPart,
@@ -299,6 +301,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "floating-image-text-distances",
             "floating-image-text-wrap",
             "floating-image-vertical-position",
+            "floating-image-wrap-point",
+            "floating-image-wrap-polygon",
             "header-footer-bindings",
             "header-footer-image-block",
             "header-footer-part",
@@ -886,6 +890,8 @@ def _run(args: argparse.Namespace) -> int:
             "floating-image-vertical-position": (
                 FloatingImageVerticalPosition
             ),
+            "floating-image-wrap-point": FloatingImageWrapPoint,
+            "floating-image-wrap-polygon": FloatingImageWrapPolygon,
             "header-footer-bindings": HeaderFooterBindings,
             "header-footer-image-block": HeaderFooterImageBlock,
             "header-footer-part": HeaderFooterPart,

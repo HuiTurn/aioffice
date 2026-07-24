@@ -1252,6 +1252,8 @@ class Document:
                     "square",
                     "none",
                     "top_and_bottom",
+                    "tight",
+                    "through",
                 ],
                 "floating_square_wrap_sides": [
                     "both_sides",
@@ -1259,11 +1261,37 @@ class Document:
                     "left",
                     "right",
                 ],
+                "floating_polygon_wrap_modes": [
+                    "tight",
+                    "through",
+                ],
+                "floating_polygon_wrap_sides": [
+                    "both_sides",
+                    "largest",
+                    "left",
+                    "right",
+                ],
+                "floating_polygon_schema": (
+                    "floating-image-wrap-polygon"
+                ),
+                "floating_polygon_point_schema": (
+                    "floating-image-wrap-point"
+                ),
+                "floating_polygon_line_to_bounds": {
+                    "minimum": 2,
+                    "maximum": 4096,
+                },
                 "floating_wrap_distance_authority": (
                     "native_anchor_and_wrap_element_attributes_are_separate"
                 ),
                 "floating_effect_extent_authority": (
                     "wrap_child_overrides_anchor_for_square_and_top_bottom"
+                ),
+                "floating_polygon_coordinate_semantics": (
+                    "ordered_raw_ooxml_signed_integers_not_physical_lengths"
+                ),
+                "floating_polygon_closure": (
+                    "native_sequence_preserved_renderer_infers_closing_edge"
                 ),
                 "floating_layout_clearable_fields": [
                     "anchor_distances",
@@ -1338,8 +1366,8 @@ class Document:
                     "one embedded DrawingML picture",
                     (
                         "inline placement or conservative floating offset/"
-                        "alignment placement with square, none, or top-and-"
-                        "bottom text wrap"
+                        "alignment placement with square, none, top-and-"
+                        "bottom, tight, or through text wrap"
                     ),
                     "explicit positive extent",
                     "rectangular stretch fill",
@@ -1359,9 +1387,9 @@ class Document:
                 ],
                 "opaque_native_cases": [
                     (
-                        "active simple-position, tight/through polygon wrap, "
-                        "wrap-specific effects, relative-size, percentage-"
-                        "position, or malformed anchor"
+                        "active simple-position, relative-size, percentage-"
+                        "position, unsupported wrap-specific effects, or "
+                        "malformed anchor"
                     ),
                     "text and drawing in one paragraph",
                     "multiple pictures",

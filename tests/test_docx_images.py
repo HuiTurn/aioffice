@@ -96,7 +96,13 @@ def _image_document(
 ) -> bytes:
     if aligned and not anchored:
         raise ValueError("Aligned positioning requires a floating anchor.")
-    if wrap_mode not in {"square", "none", "top_and_bottom"}:
+    if wrap_mode not in {
+        "square",
+        "none",
+        "top_and_bottom",
+        "tight",
+        "through",
+    }:
         raise ValueError("Unsupported test wrap mode.")
     if wrap_mode != "square" and not anchored:
         raise ValueError("Explicit floating wrap requires an anchor.")
@@ -189,12 +195,39 @@ def _image_document(
             "square": "wrapSquare",
             "none": "wrapNone",
             "top_and_bottom": "wrapTopAndBottom",
+            "tight": "wrapTight",
+            "through": "wrapThrough",
         }[wrap_mode]
-        ET.SubElement(
+        wrap = ET.SubElement(
             placement,
             _q(WP, wrap_tag),
-            {"wrapText": "bothSides"} if wrap_mode == "square" else {},
+            (
+                {"wrapText": "bothSides"}
+                if wrap_mode in {"square", "tight", "through"}
+                else {}
+            ),
         )
+        if wrap_mode in {"tight", "through"}:
+            polygon = ET.SubElement(
+                wrap,
+                _q(WP, "wrapPolygon"),
+                {"edited": "1"},
+            )
+            ET.SubElement(
+                polygon,
+                _q(WP, "start"),
+                {"x": "0", "y": "0"},
+            )
+            for x, y in (
+                (0, 21600),
+                (21600, 21600),
+                (21600, 0),
+            ):
+                ET.SubElement(
+                    polygon,
+                    _q(WP, "lineTo"),
+                    {"x": str(x), "y": str(y)},
+                )
     document_properties = {
         "id": "7",
         "name": "Expert diagram",
@@ -444,7 +477,16 @@ class DocxImageTests(unittest.TestCase):
                     "side",
                     "distances",
                     "effect_extent",
+                    "polygon",
                 },
+            ),
+            (
+                "floating-image-wrap-point",
+                {"x", "y"},
+            ),
+            (
+                "floating-image-wrap-polygon",
+                {"edited", "start", "line_to"},
             ),
             (
                 "floating-image-layout",
@@ -532,7 +574,13 @@ class DocxImageTests(unittest.TestCase):
                 }
                 self.assertEqual(
                     set(branches),
-                    {"square", "none", "top_and_bottom"},
+                    {
+                        "square",
+                        "none",
+                        "top_and_bottom",
+                        "tight",
+                        "through",
+                    },
                 )
                 self.assertIn("side", branches["square"]["required"])
                 self.assertEqual(
@@ -546,6 +594,7 @@ class DocxImageTests(unittest.TestCase):
                         {"not": {"required": ["side"]}},
                         {"not": {"required": ["distances"]}},
                         {"not": {"required": ["effect_extent"]}},
+                        {"not": {"required": ["polygon"]}},
                     ],
                 )
                 self.assertIn(
@@ -553,8 +602,11 @@ class DocxImageTests(unittest.TestCase):
                     branches["top_and_bottom"]["required"],
                 )
                 self.assertEqual(
-                    branches["top_and_bottom"]["not"],
-                    {"required": ["side"]},
+                    branches["top_and_bottom"]["allOf"],
+                    [
+                        {"not": {"required": ["side"]}},
+                        {"not": {"required": ["polygon"]}},
+                    ],
                 )
                 self.assertEqual(
                     branches["top_and_bottom"]["properties"][
@@ -567,6 +619,24 @@ class DocxImageTests(unittest.TestCase):
                         ]
                     },
                 )
+                for mode in ("tight", "through"):
+                    self.assertEqual(
+                        set(branches[mode]["required"]),
+                        {"mode", "side", "polygon"},
+                    )
+                    self.assertEqual(
+                        branches[mode]["not"],
+                        {"required": ["effect_extent"]},
+                    )
+                    self.assertEqual(
+                        branches[mode]["properties"]["distances"],
+                        {
+                            "allOf": [
+                                {"not": {"required": ["top"]}},
+                                {"not": {"required": ["bottom"]}},
+                            ]
+                        },
+                    )
             if kind == "header-footer-image-block":
                 capabilities = schema["properties"]["capabilities"]
                 self.assertEqual(
@@ -586,7 +656,7 @@ class DocxImageTests(unittest.TestCase):
         document = Document.from_docx(source)
         spec = document.to_spec()
 
-        self.assertEqual(spec["spec_version"], "0.2-draft.39")
+        self.assertEqual(spec["spec_version"], "0.2-draft.40")
         self.assertEqual(len(spec["content"]), 1)
         image = spec["content"][0]
         self.assertEqual(image["type"], "image")
@@ -976,6 +1046,127 @@ class DocxImageTests(unittest.TestCase):
                 )
                 self.assertEqual(reopened.image_bytes(image["id"]), PNG)
 
+    def test_tight_and_through_polygons_project_preserve_and_update(
+        self,
+    ) -> None:
+        native_tags = {
+            "tight": "wrapTight",
+            "through": "wrapThrough",
+        }
+        original_polygon = {
+            "edited": True,
+            "start": {"x": 0, "y": 0},
+            "line_to": [
+                {"x": 0, "y": 21600},
+                {"x": 21600, "y": 21600},
+                {"x": 21600, "y": 0},
+            ],
+        }
+        updated_polygon = {
+            "edited": False,
+            "start": {"x": -10800, "y": 0},
+            "line_to": [
+                {"x": -10800, "y": 10800},
+                {"x": 21600, "y": 10800},
+                {"x": 21600, "y": 0},
+                {"x": -10800, "y": 0},
+            ],
+        }
+        for mode, native_tag in native_tags.items():
+            with self.subTest(mode=mode):
+                source = _image_document(
+                    anchored=True,
+                    wrap_mode=mode,
+                    cropped=True,
+                )
+                document = Document.from_docx(source)
+                image = document.to_spec()["content"][0]
+                self.assertEqual(
+                    image["floating"]["wrap"],
+                    {
+                        "mode": mode,
+                        "side": "both_sides",
+                        "polygon": original_polygon,
+                    },
+                )
+                self.assertEqual(document.to_bytes("docx"), source)
+                self.assertEqual(document.image_bytes(image["id"]), PNG)
+
+                replacement_mode = (
+                    "through" if mode == "tight" else "tight"
+                )
+                requested_wrap = {
+                    "mode": replacement_mode,
+                    "side": "largest",
+                    "distances": {
+                        "left": {"value": 3, "unit": "pt"},
+                        "right": {"value": 4, "unit": "pt"},
+                    },
+                    "polygon": updated_polygon,
+                }
+                result = document.apply(
+                    [
+                        {
+                            "op": "image.anchor.update",
+                            "target": image["id"],
+                            "set": {"wrap": requested_wrap},
+                        }
+                    ]
+                )
+                self.assertTrue(result.success, result.model_dump())
+                assert result.document is not None
+                updated_image = result.document.to_spec()["content"][0]
+                self.assertEqual(
+                    updated_image["floating"]["wrap"],
+                    requested_wrap,
+                )
+                output = result.document.to_bytes("docx")
+                with ZipFile(io.BytesIO(output)) as package:
+                    root = parse_xml(package.read("word/document.xml"))
+                self.assertIsNone(
+                    root.find(f".//{_q(WP, native_tag)}")
+                )
+                native_wrap = root.find(
+                    f".//{_q(WP, native_tags[replacement_mode])}"
+                )
+                assert native_wrap is not None
+                self.assertEqual(
+                    native_wrap.attrib,
+                    {
+                        "wrapText": "largest",
+                        "distR": "50800",
+                        "distL": "38100",
+                    },
+                )
+                polygon = native_wrap.find(
+                    f"./{_q(WP, 'wrapPolygon')}"
+                )
+                assert polygon is not None
+                self.assertEqual(polygon.attrib, {"edited": "0"})
+                self.assertEqual(
+                    [
+                        (
+                            child.tag,
+                            child.get("x"),
+                            child.get("y"),
+                        )
+                        for child in polygon
+                    ],
+                    [
+                        (_q(WP, "start"), "-10800", "0"),
+                        (_q(WP, "lineTo"), "-10800", "10800"),
+                        (_q(WP, "lineTo"), "21600", "10800"),
+                        (_q(WP, "lineTo"), "21600", "0"),
+                        (_q(WP, "lineTo"), "-10800", "0"),
+                    ],
+                )
+                reopened = Document.from_docx(output)
+                self.assertEqual(
+                    reopened.to_spec()["content"][0]["floating"]["wrap"],
+                    requested_wrap,
+                )
+                self.assertEqual(reopened.image_bytes(image["id"]), PNG)
+
     def test_layered_anchor_and_wrap_geometry_updates_and_clears(
         self,
     ) -> None:
@@ -1362,11 +1553,37 @@ class DocxImageTests(unittest.TestCase):
         )
         self.assertEqual(
             capabilities["floating_wrap_modes"],
-            ["square", "none", "top_and_bottom"],
+            [
+                "square",
+                "none",
+                "top_and_bottom",
+                "tight",
+                "through",
+            ],
         )
         self.assertEqual(
             capabilities["floating_square_wrap_sides"],
             ["both_sides", "largest", "left", "right"],
+        )
+        self.assertEqual(
+            capabilities["floating_polygon_wrap_modes"],
+            ["tight", "through"],
+        )
+        self.assertEqual(
+            capabilities["floating_polygon_wrap_sides"],
+            ["both_sides", "largest", "left", "right"],
+        )
+        self.assertEqual(
+            capabilities["floating_polygon_schema"],
+            "floating-image-wrap-polygon",
+        )
+        self.assertEqual(
+            capabilities["floating_polygon_point_schema"],
+            "floating-image-wrap-point",
+        )
+        self.assertEqual(
+            capabilities["floating_polygon_line_to_bounds"],
+            {"minimum": 2, "maximum": 4096},
         )
         self.assertEqual(
             capabilities["floating_wrap_distance_authority"],
@@ -2051,6 +2268,10 @@ class DocxImageTests(unittest.TestCase):
             "invalid_alignment_position",
             "simple_position",
             "tight_wrap",
+            "tight_top_distance",
+            "tight_effect_extent",
+            "tight_invalid_coordinate",
+            "tight_invalid_point_order",
             "wrap_none_attribute",
             "wrap_text_content",
             "malformed_wrap_effect_extent",
@@ -2062,7 +2283,15 @@ class DocxImageTests(unittest.TestCase):
             "missing_required_attribute",
         )
         for case in cases:
-            source = _image_document(anchored=True)
+            source = _image_document(
+                anchored=True,
+                wrap_mode=(
+                    "tight"
+                    if case.startswith("tight_")
+                    and case != "tight_wrap"
+                    else "square"
+                ),
+            )
             with ZipFile(io.BytesIO(source)) as archive:
                 root = parse_xml(archive.read("word/document.xml"))
             anchor = root.find(f".//{_q(WP, 'anchor')}")
@@ -2083,6 +2312,32 @@ class DocxImageTests(unittest.TestCase):
                 wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
                 assert wrap is not None
                 wrap.tag = _q(WP, "wrapTight")
+            elif case == "tight_top_distance":
+                wrap = anchor.find(f"./{_q(WP, 'wrapTight')}")
+                assert wrap is not None
+                wrap.set("distT", "12700")
+            elif case == "tight_effect_extent":
+                wrap = anchor.find(f"./{_q(WP, 'wrapTight')}")
+                assert wrap is not None
+                ET.SubElement(
+                    wrap,
+                    _q(WP, "effectExtent"),
+                    {"l": "0", "t": "0", "r": "0", "b": "0"},
+                )
+            elif case == "tight_invalid_coordinate":
+                point = anchor.find(
+                    f"./{_q(WP, 'wrapTight')}/"
+                    f"{_q(WP, 'wrapPolygon')}/{_q(WP, 'start')}"
+                )
+                assert point is not None
+                point.set("x", "27273042316901")
+            elif case == "tight_invalid_point_order":
+                point = anchor.find(
+                    f"./{_q(WP, 'wrapTight')}/"
+                    f"{_q(WP, 'wrapPolygon')}/{_q(WP, 'start')}"
+                )
+                assert point is not None
+                point.tag = _q(WP, "lineTo")
             elif case == "wrap_none_attribute":
                 wrap = anchor.find(f"./{_q(WP, 'wrapSquare')}")
                 assert wrap is not None
@@ -3672,7 +3927,11 @@ class DocxImageTests(unittest.TestCase):
     def test_cloned_header_image_can_be_replaced_copy_on_write(
         self,
     ) -> None:
-        source = _header_image_document(cropped=True, anchored=True)
+        source = _header_image_document(
+            cropped=True,
+            anchored=True,
+            wrap_mode="tight",
+        )
         document = Document.from_docx(source)
         spec = document.to_spec()
         source_part = spec["header_footers"][0]
@@ -4910,6 +5169,92 @@ class DocxImageTests(unittest.TestCase):
                 assert wrap is not None
                 self.assertFalse(wrap.attrib)
                 self.assertFalse(len(wrap))
+                reopened = Document.from_docx(output)
+                reopened_image = next(
+                    node
+                    for node in reopened.to_spec()["content"]
+                    if node["id"] == image_id
+                )
+                self.assertEqual(reopened_image["floating"], layout)
+                self.assertEqual(reopened.image_bytes(image_id), JPEG)
+
+    def test_insert_image_after_supports_tight_and_through_polygons(
+        self,
+    ) -> None:
+        for mode, native_tag in (
+            ("tight", "wrapTight"),
+            ("through", "wrapThrough"),
+        ):
+            with self.subTest(mode=mode):
+                source = _image_document(preceding_text="Before")
+                document = Document.from_docx(source)
+                layout = {
+                    "horizontal": {
+                        "relative_to": "margin",
+                        "alignment": "center",
+                    },
+                    "vertical": {
+                        "relative_to": "page",
+                        "alignment": "center",
+                    },
+                    "wrap": {
+                        "mode": mode,
+                        "side": "both_sides",
+                        "distances": {
+                            "left": {"value": 2, "unit": "pt"},
+                            "right": {"value": 3, "unit": "pt"},
+                        },
+                        "polygon": {
+                            "start": {"x": 0, "y": 0},
+                            "line_to": [
+                                {"x": 0, "y": 21600},
+                                {"x": 21600, "y": 21600},
+                                {"x": 21600, "y": 0},
+                            ],
+                        },
+                    },
+                    "relative_height": 2048,
+                    "behind_text": False,
+                    "locked": False,
+                    "layout_in_cell": True,
+                    "allow_overlap": True,
+                }
+                image_id = f"inserted_{mode}"
+                result = document.insert_image_after(
+                    "#before",
+                    JPEG,
+                    width={"value": 2, "unit": "in"},
+                    height={"value": 1, "unit": "in"},
+                    alt_text=f"Inserted {mode} image",
+                    media_type="image/jpeg",
+                    image_id=image_id,
+                    floating=layout,
+                )
+                self.assertTrue(result.success, result.model_dump())
+                assert result.document is not None
+                inserted = next(
+                    node
+                    for node in result.document.to_spec()["content"]
+                    if node["id"] == image_id
+                )
+                self.assertEqual(inserted["floating"], layout)
+                output = result.document.to_bytes("docx")
+                with ZipFile(io.BytesIO(output)) as package:
+                    root = parse_xml(package.read("word/document.xml"))
+                wrap = root.find(f".//{_q(WP, native_tag)}")
+                assert wrap is not None
+                self.assertEqual(
+                    wrap.attrib,
+                    {
+                        "wrapText": "bothSides",
+                        "distR": "38100",
+                        "distL": "25400",
+                    },
+                )
+                polygon = wrap.find(f"./{_q(WP, 'wrapPolygon')}")
+                assert polygon is not None
+                self.assertFalse(polygon.attrib)
+                self.assertEqual(len(polygon), 4)
                 reopened = Document.from_docx(output)
                 reopened_image = next(
                     node

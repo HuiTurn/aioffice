@@ -16,7 +16,7 @@ AiOffice architecture:
 - atomic, revision-checked document patches;
 - a CLI shared with the Python core.
 
-The development branch is now `0.2.0.dev39`. It adds lossless DOCX opening, semantic
+The development branch is now `0.2.0.dev40`. It adds lossless DOCX opening, semantic
 projection over a native package, persistent native identities, local revision
 workspaces, copy-on-write native parts, exact text-range formatting, AI-addressable
 named styles, document defaults, ordered page/section models, reusable header/footer
@@ -26,7 +26,7 @@ background/border surfaces, conservative body and header/footer image projection
 verified asset extraction, selective native image metadata and geometry updates,
 bounded rectangular source cropping,
 conservative offset/alignment floating-image anchor projection,
-square/no-wrap/top-and-bottom text wrapping, selective floating-anchor layout
+square/no-wrap/top-and-bottom/tight/through text wrapping, selective floating-anchor layout
 updates plus positioning and wrapping-mode switches,
 occurrence-scoped copy-on-write image replacement, addressable native inline and
 floating image insertion, direct image-paragraph layout formatting, semantic diffs,
@@ -118,9 +118,10 @@ part first, then update or replace its projected image in a subsequent Patch.
 
 For a supported floating picture, `image["floating"]` preserves explicit horizontal
 and vertical reference frames with offset or alignment positioning, supported
-square/no-wrap/top-and-bottom wrapping, optional parent-anchor distances, separate
-wrap-local distances, parent and wrap-child effect extents, relative height,
-behind-text behavior, anchor locking, cell layout, and overlap policy.
+square/no-wrap/top-and-bottom/tight/through wrapping, optional parent-anchor
+distances, separate wrap-local distances, parent and wrap-child effect extents,
+ordered native tight/through polygons, relative height, behind-text behavior,
+anchor locking, cell layout, and overlap policy.
 `image.anchor.update` can selectively change or switch those proven groups without
 rebuilding the drawing or touching its image bytes, relationship, crop, extent,
 accessibility metadata, or Office 2010 anchor identities. Native DOCX rendering
@@ -298,8 +299,11 @@ floating = {
 }
 ```
 
-`wrap.mode` accepts `square`, `none`, or `top_and_bottom`. Only `square` accepts
-`side`; the other modes must omit it. `anchor_distances` preserves the optional
+`wrap.mode` accepts `square`, `none`, `top_and_bottom`, `tight`, or `through`.
+Square, tight, and through require `side`; the other modes must omit it.
+Tight/through additionally require an ordered polygon whose coordinates remain raw
+OOXML signed integers rather than being mislabeled as physical lengths.
+`anchor_distances` preserves the optional
 distance attributes on `wp:anchor`. Square and top-and-bottom wrap may separately
 carry wrap-element `distances` and `effect_extent`; `anchor_effect_extent` preserves
 the parent value. AiOffice keeps these native sources distinct because the wrap
@@ -331,8 +335,7 @@ revision log.
 The read path re-resolves the trusted native paragraph and its story-local OPC
 relationship, then verifies the asset record, media type, size, and content hash
 before returning bytes. Mixed text/picture paragraphs, active simple-position or
-percentage-position anchors, tight/through polygon wrapping, wrap-specific effects,
-linked images,
+percentage-position anchors, unsupported wrap-specific effects, linked images,
 multiple pictures, negative or overconstrained crop rectangles, transforms,
 effects, drawings in tables, complex header/footer drawings, VML, OLE, and embedded
 objects remain explicit opaque native content. They are preserved losslessly and

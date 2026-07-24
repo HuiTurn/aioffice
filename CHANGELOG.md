@@ -115,13 +115,13 @@
 - Extended the conservative floating picture subset with native `wp:wrapNone` and
   `wp:wrapTopAndBottom` in body, header, and footer stories, while retaining exact
   four-direction anchor distances and strict child-order proof.
-- Made `FloatingImageTextWrap` accept `square`, `none`, or `top_and_bottom`, require
-  `side` exactly for square mode, and publish the rule as machine-readable JSON
-  Schema `oneOf`.
+- Introduced `FloatingImageTextWrap` with the initial `square`, `none`, and
+  `top_and_bottom` modes, requiring `side` exactly for square mode and publishing
+  the rule as machine-readable JSON Schema `oneOf`.
 - Taught `image.anchor.update` to switch the complete native wrap child safely and
   extended floating insertion, cloning, inspection, capabilities, and Workspace
-  metadata to all three supported modes; tight/through polygons and unsupported
-  DrawingML visual effects remain opaque.
+  metadata to the initial three wrap modes; unsupported DrawingML visual effects
+  remain opaque.
 - Split the floating-image protocol into native layers: optional
   `wp:anchor/@dist*` values now project as `anchor_distances`, optional parent
   `wp:effectExtent` as `anchor_effect_extent`, and square/top-and-bottom wrap-local
@@ -138,6 +138,20 @@
 - Added standalone JSON Schemas and capability metadata for text distances and
   effect extents, plus strict refusal for malformed leaves, illegal mode/edge
   combinations, conflicting set/clear requests, and out-of-range values.
+- Added lossless `wp:wrapTight` and `wp:wrapThrough` projection, insertion, update,
+  binary preservation, and header/footer cloning with strict `wp:wrapPolygon`
+  parsing in body and reusable stories.
+- Added AI-readable `FloatingImageWrapPoint` and `FloatingImageWrapPolygon` models
+  that preserve ordered raw signed OOXML coordinates, optional `edited` presence,
+  and explicit/non-explicit closure without pretending normalized producer
+  coordinates are physical EMUs.
+- Published standalone polygon/point schemas and exact mode constraints: tight and
+  through require `side` plus `polygon`, accept only optional left/right local
+  distances, and reject wrap-child effect extents; malformed point sequences,
+  flags, ranges, and native child order fail closed.
+- Documented and tested LibreOffice's producer normalization of polygon outlines,
+  including local-distance removal, point regeneration, explicit closure, and
+  anchor metadata changes, while retaining exact AiOffice no-op round trips.
 - Preserved story-local relationship semantics while replacing a cloned header or
   footer logo copy-on-write, leaving the source story, relationship, media, body, and
   unrelated pages untouched.
@@ -495,7 +509,7 @@
 - Advanced the AiOffice Document Spec to `0.2-draft.36`.
 - Advanced the AiOffice Document Spec to `0.2-draft.37`.
 - Advanced the AiOffice Document Spec to `0.2-draft.38`.
-- Advanced the AiOffice Document Spec to `0.2-draft.39`.
+- Advanced the AiOffice Document Spec to `0.2-draft.40`.
 
 ## 0.1.0
 

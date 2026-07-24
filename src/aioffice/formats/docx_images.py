@@ -23,6 +23,8 @@ from aioffice.spec.models import (
     FloatingImageTextDistances,
     FloatingImageTextWrap,
     FloatingImageVerticalPosition,
+    FloatingImageWrapPoint,
+    FloatingImageWrapPolygon,
     ImageBlock,
     ImageCrop,
     ImageInsert,
@@ -54,8 +56,8 @@ RELATIONSHIPS_CONTENT_TYPE = (
     "application/vnd.openxmlformats-package.relationships+xml"
 )
 EMU_PER_POINT = 12_700
-EFFECT_EXTENT_MIN_EMU = -27_273_042_329_600
-EFFECT_EXTENT_MAX_EMU = 27_273_042_316_900
+ST_COORDINATE_MIN = -27_273_042_329_600
+ST_COORDINATE_MAX = 27_273_042_316_900
 
 _VISUAL_EFFECT_NAMES = {
     "alphaBiLevel",
@@ -146,7 +148,13 @@ VerticalRelativeTo: TypeAlias = Literal[
     "top_margin",
 ]
 WrapSide: TypeAlias = Literal["both_sides", "largest", "left", "right"]
-WrapMode: TypeAlias = Literal["square", "none", "top_and_bottom"]
+WrapMode: TypeAlias = Literal[
+    "square",
+    "none",
+    "top_and_bottom",
+    "tight",
+    "through",
+]
 HorizontalAlignment: TypeAlias = Literal[
     "left",
     "right",
@@ -192,6 +200,8 @@ _WRAP_TAG_TO_MODE: dict[str, WrapMode] = {
     _q(WP, "wrapSquare"): "square",
     _q(WP, "wrapNone"): "none",
     _q(WP, "wrapTopAndBottom"): "top_and_bottom",
+    _q(WP, "wrapTight"): "tight",
+    _q(WP, "wrapThrough"): "through",
 }
 _WRAP_MODE_TO_TAG = {
     value: key for key, value in _WRAP_TAG_TO_MODE.items()
@@ -276,8 +286,8 @@ def _floating_effect_extent(
         for field_name, attribute_name in _EFFECT_EXTENT_FIELDS
     }
     if any(
-        value < EFFECT_EXTENT_MIN_EMU
-        or value > EFFECT_EXTENT_MAX_EMU
+        value < ST_COORDINATE_MIN
+        or value > ST_COORDINATE_MAX
         for value in values.values()
     ):
         raise ValueError("Effect extent is outside ST_Coordinate.")
@@ -287,6 +297,57 @@ def _floating_effect_extent(
             for field_name, native_value in values.items()
         }
     )
+
+
+def _floating_wrap_point(
+    element: ET.Element,
+) -> FloatingImageWrapPoint:
+    if (
+        set(element.attrib) != {"x", "y"}
+        or len(element)
+        or (element.text or "").strip()
+    ):
+        raise ValueError("Wrap polygon point is not one strict native leaf.")
+    return FloatingImageWrapPoint.model_validate(
+        {
+            "x": int(element.attrib["x"]),
+            "y": int(element.attrib["y"]),
+        }
+    )
+
+
+def _floating_wrap_polygon(
+    element: ET.Element,
+) -> FloatingImageWrapPolygon:
+    if (
+        any(attribute != "edited" for attribute in element.attrib)
+        or (element.text or "").strip()
+    ):
+        raise ValueError("Wrap polygon has unsupported native metadata.")
+    children = list(element)
+    if (
+        len(children) < 3
+        or len(children) > 4097
+        or children[0].tag != _q(WP, "start")
+        or any(
+            child.tag != _q(WP, "lineTo")
+            for child in children[1:]
+        )
+    ):
+        raise ValueError("Wrap polygon has an invalid point sequence.")
+    payload: dict[str, object] = {
+        "start": _floating_wrap_point(children[0]),
+        "line_to": [
+            _floating_wrap_point(child)
+            for child in children[1:]
+        ],
+    }
+    if "edited" in element.attrib:
+        edited = _strict_boolean(element.attrib["edited"])
+        if edited is None:
+            raise ValueError("Wrap polygon edited flag is not boolean.")
+        payload["edited"] = edited
+    return FloatingImageWrapPolygon.model_validate(payload)
 
 
 def _native_position_value(
@@ -338,12 +399,49 @@ def _native_effect_extent(
             * EMU_PER_POINT
         )
         if (
-            extent_emu < EFFECT_EXTENT_MIN_EMU
-            or extent_emu > EFFECT_EXTENT_MAX_EMU
+            extent_emu < ST_COORDINATE_MIN
+            or extent_emu > ST_COORDINATE_MAX
         ):
             return None
         attributes[attribute_name] = str(extent_emu)
     return ET.Element(_q(WP, "effectExtent"), attributes)
+
+
+def _native_wrap_polygon(
+    polygon: FloatingImageWrapPolygon,
+) -> ET.Element | None:
+    if len(polygon.line_to) < 2 or len(polygon.line_to) > 4096:
+        return None
+    attributes = (
+        {}
+        if polygon.edited is None
+        else {"edited": "1" if polygon.edited else "0"}
+    )
+    element = ET.Element(_q(WP, "wrapPolygon"), attributes)
+
+    def append_point(
+        name: str,
+        point: FloatingImageWrapPoint,
+    ) -> bool:
+        for value in (point.x, point.y):
+            if (
+                value < ST_COORDINATE_MIN
+                or value > ST_COORDINATE_MAX
+            ):
+                return False
+        ET.SubElement(
+            element,
+            _q(WP, name),
+            {"x": str(point.x), "y": str(point.y)},
+        )
+        return True
+
+    if not append_point("start", polygon.start):
+        return None
+    for point in polygon.line_to:
+        if not append_point("lineTo", point):
+            return None
+    return element
 
 
 def _native_wrap_value(
@@ -353,14 +451,18 @@ def _native_wrap_value(
     if tag is None:
         return None
     attributes: dict[str, str] = {}
-    if wrap.mode == "square":
+    if wrap.mode in {"square", "tight", "through"}:
         if wrap.side is None:
             return None
         native_side = _WRAP_SIDE_TO_NATIVE.get(wrap.side)
         if native_side is None:
             return None
         attributes["wrapText"] = native_side
-        allowed_edges = frozenset({"top", "right", "bottom", "left"})
+        allowed_edges = (
+            frozenset({"top", "right", "bottom", "left"})
+            if wrap.mode == "square"
+            else frozenset({"right", "left"})
+        )
     elif wrap.mode == "top_and_bottom":
         if wrap.side is not None:
             return None
@@ -369,6 +471,7 @@ def _native_wrap_value(
         wrap.side is not None
         or wrap.distances is not None
         or wrap.effect_extent is not None
+        or wrap.polygon is not None
     ):
         return None
     else:
@@ -383,9 +486,21 @@ def _native_wrap_value(
     element = ET.Element(tag, attributes)
     if wrap.effect_extent is not None:
         effect_extent = _native_effect_extent(wrap.effect_extent)
-        if effect_extent is None or wrap.mode == "none":
+        if (
+            effect_extent is None
+            or wrap.mode in {"none", "tight", "through"}
+        ):
             return None
         element.append(effect_extent)
+    if wrap.mode in {"tight", "through"}:
+        if wrap.polygon is None:
+            return None
+        polygon = _native_wrap_polygon(wrap.polygon)
+        if polygon is None:
+            return None
+        element.append(polygon)
+    elif wrap.polygon is not None:
+        return None
     return element
 
 
@@ -490,6 +605,7 @@ def floating_image_layout_matches(
             left.wrap.effect_extent,
             right.wrap.effect_extent,
         )
+        and left.wrap.polygon == right.wrap.polygon
         and left.relative_height == right.relative_height
         and left.behind_text == right.behind_text
         and left.locked == right.locked
@@ -647,6 +763,7 @@ def _floating_image_layout(
     wrap_side: WrapSide | None = None
     wrap_distances: FloatingImageTextDistances | None
     wrap_effect_extent: FloatingImageEffectExtent | None
+    wrap_polygon: FloatingImageWrapPolygon | None = None
     if (wrap.text or "").strip():
         return None
     try:
@@ -676,12 +793,34 @@ def _floating_image_layout(
                 wrap,
                 allowed_edges=frozenset({"top", "bottom"}),
             )
+        elif wrap_mode in {"tight", "through"}:
+            if any(
+                attribute
+                not in {"wrapText", "distL", "distR"}
+                for attribute in wrap.attrib
+            ):
+                return None
+            wrap_side = _WRAP_SIDES.get(wrap.attrib.get("wrapText", ""))
+            if wrap_side is None:
+                return None
+            wrap_distances = _floating_text_distances(
+                wrap,
+                allowed_edges=frozenset({"left", "right"}),
+            )
         elif wrap.attrib or len(wrap):
             return None
         else:
             wrap_distances = None
         if wrap_mode == "none":
             wrap_effect_extent = None
+        elif wrap_mode in {"tight", "through"}:
+            if (
+                len(wrap) != 1
+                or wrap[0].tag != _q(WP, "wrapPolygon")
+            ):
+                return None
+            wrap_effect_extent = None
+            wrap_polygon = _floating_wrap_polygon(wrap[0])
         else:
             if len(wrap) > 1 or any(
                 child.tag != _q(WP, "effectExtent")
@@ -776,6 +915,11 @@ def _floating_image_layout(
                 **(
                     {"effect_extent": wrap_effect_extent}
                     if wrap_effect_extent is not None
+                    else {}
+                ),
+                **(
+                    {"polygon": wrap_polygon}
+                    if wrap_polygon is not None
                     else {}
                 ),
             }
